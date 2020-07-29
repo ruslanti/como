@@ -1,16 +1,17 @@
 use crate::mqtt::proto::types::{MQTTCodec, ControlPacket, PacketType};
 use tokio_util::codec::Encoder;
-use bytes::{BytesMut, BufMut, Buf, Bytes};
-use tokio::io::Error;
+use bytes::{BytesMut, BufMut, Bytes};
 use anyhow::{anyhow, Result, Context};
-use crate::mqtt::proto::property::{PropertiesLength, ConnAckProperties, Property};
+use crate::mqtt::proto::property::{PropertiesLength};
+use crate::mqtt::proto::pubres::encode_pubres_properties;
+use crate::mqtt::proto::connack::encode_connack_properties;
 
 impl Encoder<ControlPacket> for MQTTCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, packet: ControlPacket, writer: &mut BytesMut) -> Result<(), Self::Error> {
         match packet {
-            ControlPacket::Connect { .. } => {},
+            ControlPacket::Connect { .. } => unimplemented!(),
             ControlPacket::ConnAck {
                 session_present,
                 reason_code,
@@ -23,97 +24,90 @@ impl Encoder<ControlPacket> for MQTTCodec {
                 writer.reserve(1 + remaining_length_size + remaining_length);
 
                 writer.put_u8(PacketType::CONNACK.into()); // packet type
-                encode_variable_integer(writer, remaining_length); // remaining length
+                encode_variable_integer(writer, remaining_length)?; // remaining length
                 writer.put_u8(session_present as u8); // connack flags
                 writer.put_u8(reason_code.into());
-                encode_variable_integer(writer, properties_length); // properties length
-                end_of_stream!(writer.remaining() < properties_length);
-                encode_connack_properties(writer, properties);
+                encode_variable_integer(writer, properties_length)?; // properties length
+                encode_connack_properties(writer, properties)?;
             },
-            ControlPacket::Publish => {},
-            ControlPacket::PubAck => {},
-            ControlPacket::PubRec => {},
-            ControlPacket::PubRel => {},
-            ControlPacket::Subscribe => {},
-            ControlPacket::SubAck => {},
-            ControlPacket::UnSubscribe => {},
-            ControlPacket::UnSubAck => {},
-            ControlPacket::PingReq => {},
-            ControlPacket::PingResp => {},
-            ControlPacket::Disconnect => {},
-            ControlPacket::Auth => {},
+            ControlPacket::Publish{
+                dup, qos, retain,
+                topic_name,
+                packet_identifier,
+                properties,
+                payload
+            } => unimplemented!(),
+            ControlPacket::PubAck {
+                packet_identifier, reason_code, properties
+            } => {
+                let properties_length = properties.len(); // properties
+                let properties_length_size= encoded_variable_integer_len(properties_length); // properties length
+                let remaining_length = 3 + properties_length_size + properties_length;
+                let remaining_length_size = encoded_variable_integer_len(remaining_length); // remaining length size
+                writer.reserve(1 + remaining_length_size + remaining_length);
+
+                writer.put_u8(PacketType::PUBACK.into()); // packet type
+                encode_variable_integer(writer, remaining_length)?; // remaining length
+                writer.put_u16(packet_identifier); // packet identifier
+                writer.put_u8(reason_code.into());
+                encode_variable_integer(writer, properties_length)?; // properties length
+                encode_pubres_properties(writer, properties)?;
+            },
+            ControlPacket::PubRec {
+                packet_identifier, reason_code, properties
+            } => {
+                let properties_length = properties.len(); // properties
+                let properties_length_size= encoded_variable_integer_len(properties_length); // properties length
+                let remaining_length = 3 + properties_length_size + properties_length;
+                let remaining_length_size = encoded_variable_integer_len(remaining_length); // remaining length size
+                writer.reserve(1 + remaining_length_size + remaining_length);
+
+                writer.put_u8(PacketType::PUBREC.into()); // packet type
+                encode_variable_integer(writer, remaining_length)?; // remaining length
+                writer.put_u16(packet_identifier); // packet identifier
+                writer.put_u8(reason_code.into());
+                encode_variable_integer(writer, properties_length)?; // properties length
+                encode_pubres_properties(writer, properties)?;
+            },
+            ControlPacket::PubRel {
+                packet_identifier, reason_code, properties
+            } => {
+                let properties_length = properties.len(); // properties
+                let properties_length_size= encoded_variable_integer_len(properties_length); // properties length
+                let remaining_length = 3 + properties_length_size + properties_length;
+                let remaining_length_size = encoded_variable_integer_len(remaining_length); // remaining length size
+                writer.reserve(1 + remaining_length_size + remaining_length);
+
+                writer.put_u8(PacketType::PUBREL.into()); // packet type
+                encode_variable_integer(writer, remaining_length)?; // remaining length
+                writer.put_u16(packet_identifier); // packet identifier
+                writer.put_u8(reason_code.into());
+                encode_variable_integer(writer, properties_length)?; // properties length
+                encode_pubres_properties(writer, properties)?;
+            },
+            ControlPacket::Subscribe => unimplemented!(),
+            ControlPacket::SubAck => unimplemented!(),
+            ControlPacket::UnSubscribe => unimplemented!(),
+            ControlPacket::UnSubAck => unimplemented!(),
+            ControlPacket::PingReq => unimplemented!(),
+            ControlPacket::PingResp => unimplemented!(),
+            ControlPacket::Disconnect{ reason_code, properties } => unimplemented!(),
+            ControlPacket::Auth => unimplemented!(),
         };
         Ok(())
     }
 }
 
-fn encode_connack_properties(writer: &mut BytesMut, properties: ConnAckProperties) -> Result<()> {
-    if let Some(value) = properties.session_expire_interval {
-        end_of_stream!(writer.remaining() < 1);
-        writer.put_u8(Property::SessionExpireInterval as u8);
-        end_of_stream!(writer.remaining() < 4);
-        writer.put_u32(value);
-    }
-    if let Some(value) = properties.receive_maximum {
-        end_of_stream!(writer.remaining() < 1);
-        writer.put_u8(Property::ReceiveMaximum as u8);
-        end_of_stream!(writer.remaining() < 2);
-        writer.put_u16(value);
-    }
-    if let Some(value) = properties.maximum_qos {
-        end_of_stream!(writer.remaining() < 1);
-        writer.put_u8(Property::MaximumQoS as u8);
-        end_of_stream!(writer.remaining() < 1);
-        writer.put_u8(value.into());
-    }
-    if let Some(value) = properties.retain_available {
-        end_of_stream!(writer.remaining() < 1);
-        writer.put_u8(Property::RetainAvailable as u8);
-        end_of_stream!(writer.remaining() < 1);
-        writer.put_u8(value as u8);
-    }
-    if let Some(value) = properties.maximum_packet_size {
-        end_of_stream!(writer.remaining() < 1);
-        writer.put_u8(Property::MaximumPacketSize as u8);
-        end_of_stream!(writer.remaining() < 4);
-        writer.put_u32(value);
-    }
-    if let Some(value) = properties.assigned_client_identifier {
-        end_of_stream!(writer.remaining() < 1);
-        writer.put_u8(Property::AssignedClientIdentifier as u8);
-        end_of_stream!(writer.remaining() < value.len());
-        writer.put(value);
-    }
-    if let Some(value) = properties.topic_alias_maximum {
-        end_of_stream!(writer.remaining() < 1);
-        writer.put_u8(Property::TopicAliasMaximum as u8);
-        end_of_stream!(writer.remaining() < 2);
-        writer.put_u16(value);
-    }
-    if let Some(value) = properties.reason_string {
-        end_of_stream!(writer.remaining() < 1);
-        writer.put_u8(Property::ReasonString as u8);
-        end_of_stream!(writer.remaining() < value.len());
-        writer.put(value);
-    }
-    for (first, second) in properties.user_properties {
-        end_of_stream!(writer.remaining() < 1);
-        writer.put_u8(Property::UserProperty as u8);
-        encode_utf8_string(writer, first)?;
-        encode_utf8_string(writer, second)?;
-    }
-    Ok(())
-}
 
-fn encode_utf8_string(writer: &mut BytesMut, s: Bytes) -> Result<()> {
-    end_of_stream!(writer.remaining() < 2);
+pub fn encode_utf8_string(writer: &mut BytesMut, s: Bytes) -> Result<()> {
+    end_of_stream!(writer.capacity() < 2, "encode utf2 string len");
     writer.put_u16(s.len() as u16);
-    end_of_stream!(writer.remaining() < s.len());
+    end_of_stream!(writer.capacity() < s.len(), "encode utf2 string");
     writer.put(s);
     Ok(())
 }
 
-fn encode_variable_integer(writer: &mut BytesMut, v: usize) -> Result<()> {
+pub fn encode_variable_integer(writer: &mut BytesMut, v: usize) -> Result<()> {
     let mut value = v;
     loop {
         let mut encoded_byte = (value % 0x80) as u8;
@@ -122,7 +116,7 @@ fn encode_variable_integer(writer: &mut BytesMut, v: usize) -> Result<()> {
         if value > 0 {
             encoded_byte = encoded_byte | 0x80;
         }
-        if writer.remaining() < 1 { return Err(anyhow!("end of stream")).context("encode_variable_integer") }
+        if writer.capacity() < 1 { return Err(anyhow!("end of stream")).context("encode_variable_integer") }
         writer.put_u8(encoded_byte);
         if value == 0 {
             break;

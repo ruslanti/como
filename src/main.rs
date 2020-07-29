@@ -1,14 +1,13 @@
+mod settings;
 mod mqtt;
 
-use std::io;
 use tokio::signal;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use mqtt::service;
 use tracing::Level;
 use tokio::net::TcpListener;
-
-#[macro_use]
-extern crate anyhow;
+use crate::settings::Settings;
+use tracing::debug;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -17,8 +16,10 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)
         .expect("no global subscriber has been set");
 
+    let settings = Settings::new()?;
+    debug!("{:?}", settings);
+
     // Bind a TCP listener
-    let port = 1883;
-    let listener = TcpListener::bind(&format!("127.0.0.1:{}", port)).await?;
-    service::run(listener, signal::ctrl_c()).await
+    let listener = TcpListener::bind(&format!("{}:{}", settings.service.listen, settings.service.port)).await?;
+    service::run(listener, settings, signal::ctrl_c()).await
 }

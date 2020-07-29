@@ -1,15 +1,15 @@
 use core::fmt;
-use std::collections::BTreeSet;
-use tracing_subscriber::fmt::Formatter;
 use std::convert::{TryFrom, TryInto};
-use anyhow::{anyhow, Result};
-use crate::mqtt::proto::property::{WillProperties, ConnectProperties, ConnAckProperties};
-use bytes::{BytesMut, Bytes};
+use anyhow::anyhow;
+use crate::mqtt::proto::property::{WillProperties, ConnectProperties, ConnAckProperties, PublishProperties, DisconnectProperties, PubResProperties};
+use bytes::Bytes;
+use serde::{Deserialize, Deserializer, de};
+use serde::de::Visitor;
 
 #[macro_use]
 macro_rules! end_of_stream {
-    ($condition: expr) => {
-       if $condition {return Err(anyhow!("end of stream"))};
+    ($condition: expr, $context: expr) => {
+       if $condition {return Err(anyhow!("end of stream").context($context))};
     };
 }
 
@@ -23,7 +23,7 @@ pub enum QoS {
 impl TryFrom<u8> for QoS {
     type Error = anyhow::Error;
 
-    fn try_from(v: u8) -> Result<Self> {
+    fn try_from(v: u8) -> anyhow::Result<Self> {
         match v {
             0 => Ok(QoS::AtMostOnce),
             1 => Ok(QoS::AtLeastOnce),
@@ -40,6 +40,30 @@ impl Into<u8> for QoS {
             QoS::AtLeastOnce => 1,
             QoS::ExactlyOnce => 2,
         }
+    }
+}
+
+struct QoSVisitor;
+
+impl<'de> Visitor<'de> for QoSVisitor {
+    type Value = QoS;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("an integer between 0 and 2")
+    }
+
+    fn visit_u8<E>(self, value: u8) -> Result<Self::Value, E> where E: de::Error, {
+        if let Ok(ret) = value.try_into() {
+            Ok(ret)
+        } else {
+            Err(E::custom(format!("QoS out of range: {}", value)))
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for QoS {
+    fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error> where D: Deserializer<'de> {
+        deserializer.deserialize_u8(QoSVisitor)
     }
 }
 
@@ -65,7 +89,7 @@ pub enum PacketType {
 impl TryFrom<u8> for PacketType {
     type Error = anyhow::Error;
 
-    fn try_from(v: u8) -> Result<Self> {
+    fn try_from(v: u8) -> anyhow::Result<Self> {
         match v {
             0x10 => Ok(PacketType::CONNECT),
             0x20 => Ok(PacketType::CONNACK),
@@ -202,7 +226,7 @@ pub struct Will {
     pub qos: QoS,
     pub retain: bool,
     pub properties: WillProperties,
-    pub topic: Bytes,
+    pub topic: Option<Bytes>,
     pub payload: Bytes
 }
 
@@ -212,7 +236,7 @@ pub enum ControlPacket {
         clean_start_flag: bool,
         keep_alive: u16,
         properties: ConnectProperties,
-        client_identifier: Bytes,
+        client_identifier: Option<Bytes>,
         username: Option<Bytes>,
         password: Option<Bytes>,
         will: Option<Will>
@@ -222,24 +246,46 @@ pub enum ControlPacket {
         reason_code: ReasonCode,
         properties: ConnAckProperties
     },
-    Publish,
-    PubAck,
-    PubRec,
-    PubRel,
+    Publish {
+        dup: bool,
+        qos: QoS,
+        retain: bool,
+        topic_name: Bytes,
+        packet_identifier: Option<u16>,
+        properties: PublishProperties,
+        payload: Bytes
+    },
+    PubAck {
+        packet_identifier: u16,
+        reason_code: ReasonCode,
+        properties: PubResProperties
+    },
+    PubRec {
+        packet_identifier: u16,
+        reason_code: ReasonCode,
+        properties: PubResProperties
+    },
+    PubRel {
+        packet_identifier: u16,
+        reason_code: ReasonCode,
+        properties: PubResProperties
+    },
     Subscribe,
     SubAck,
     UnSubscribe,
     UnSubAck,
     PingReq,
     PingResp,
-    Disconnect,
+    Disconnect {
+        reason_code: ReasonCode,
+        properties: DisconnectProperties
+    },
     Auth
 }
 
 pub enum PacketPart {
     FixedHeader,
-    VariableHeader{remaining: usize, packet_type: PacketType},
-    Payload
+    VariableHeader{remaining: usize, packet_type: PacketType}
 }
 
 #[derive(Debug)]
@@ -256,8 +302,7 @@ impl fmt::Debug for PacketPart {
             } => f.debug_struct("PacketPart::VariableHeader")
                 .field("remaining", &remaining)
                 .field("packet_type", &packet_type)
-                .finish(),
-            PacketPart::Payload => write!(f, "PacketPart::Payload"),
+                .finish()
         }
     }
 }

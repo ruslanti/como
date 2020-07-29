@@ -1,5 +1,3 @@
-#[macro_use]
-extern crate anyhow;
 
 #[cfg(test)]
 mod tests {

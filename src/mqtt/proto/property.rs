@@ -22,6 +22,15 @@ macro_rules! check_size_of {
     };
 }
 
+macro_rules! check_size_of_string {
+    ($self:ident, $property:ident) => {
+        match &$self.$property {
+            None    => 0,
+            Some(v) => v.len() + 3
+        }
+    };
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Property {
     PayloadFormatIndicator          = 0x01,
@@ -130,7 +139,32 @@ pub struct ConnAckProperties {
     pub user_properties: Vec<(Bytes, Bytes)>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct PublishProperties {
+    pub payload_format_indicator: Option<bool>,
+    pub message_expire_interval: Option<u32>,
+    pub topic_alias: Option<u16>,
+    pub response_topic: Option<Bytes>,
+    pub correlation_data: Option<Bytes>,
+    pub user_properties: Vec<(Bytes, Bytes)>,
+    pub subscription_identifier: Option<u32>,
+    pub content_type: Option<Bytes>,
+}
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct PubResProperties {
+    pub reason_string: Option<Bytes>,
+    pub user_properties: Vec<(Bytes, Bytes)>,
+}
+
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct DisconnectProperties {
+    pub session_expire_interval: Option<u32>,
+    pub reason_string: Option<Bytes>,
+    pub user_properties: Vec<(Bytes, Bytes)>,
+    pub server_reference: Option<Bytes>
+}
 
 impl PropertiesLength for ConnAckProperties {
     fn len(&self) -> usize {
@@ -139,14 +173,21 @@ impl PropertiesLength for ConnAckProperties {
         len += check_size_of!(self, maximum_qos);
         len += check_size_of!(self, retain_available);
         len += check_size_of!(self, maximum_packet_size);
-        len += check_size_of!(self, assigned_client_identifier);
+        len += check_size_of_string!(self, assigned_client_identifier);
         len += check_size_of!(self, topic_alias_maximum) ;
-        len += check_size_of!(self, reason_string);
+        len += check_size_of_string!(self, reason_string);
         len += self.user_properties.iter().map(|(x, y)| 5 + x.len() + y.len()).sum::<usize>();
         len
     }
 }
 
+impl PropertiesLength for PubResProperties {
+    fn len(&self) -> usize {
+        let mut len = check_size_of_string!(self, reason_string);
+        len += self.user_properties.iter().map(|(x, y)| 5 + x.len() + y.len()).sum::<usize>();
+        len
+    }
+}
 pub struct PropertiesBuilder {
     payload_format_indicator: Option<bool>,
     message_expire_interval: Option<u32>,
@@ -244,11 +285,24 @@ impl PropertiesBuilder {
     pub fn message_expire_interval(mut self, value: u32) -> Result<Self> {
         check_and_set!(self, message_expire_interval, value)
     }
-    pub fn content_type(mut self, value: Bytes) -> Result<Self> {
-        check_and_set!(self, content_type, value)
+    pub fn content_type(mut self, value: Option<Bytes>) -> Result<Self> {
+        if let Some(v) = value {
+            check_and_set!(self, content_type, v)
+        } else { Err(anyhow!("empty content type")) }
     }
-    pub fn response_topic(mut self, value: Bytes) -> Result<Self> {
-        check_and_set!(self, response_topic, value)
+    pub fn response_topic(mut self, value: Option<Bytes>) -> Result<Self> {
+        if let Some(v) = value {
+            check_and_set!(self, response_topic, v)
+        } else {
+            Err(anyhow!("empty response topic"))
+        }
+    }
+    pub fn server_reference(mut self, value: Option<Bytes>) -> Result<Self> {
+        if let Some(v) = value {
+            check_and_set!(self, server_reference, v)
+        } else {
+            Err(anyhow!("empty server reference"))
+        }
     }
     pub fn correlation_data(mut self, value: Bytes) -> Result<Self> {
         check_and_set!(self, correlation_data, value)
@@ -270,6 +324,12 @@ impl PropertiesBuilder {
     }
     pub fn server_keep_alive(mut self, value: u16) -> Result<Self> {
         check_and_set!(self, server_keep_alive, value)
+    }
+    pub fn topic_alias(mut self, value: u16) -> Result<Self> {
+        check_and_set!(self, topic_alias, value)
+    }
+    pub fn subscription_identifier(mut self, value: u32) -> Result<Self> {
+        check_and_set!(self, subscription_identifier, value)
     }
 
     pub fn will(self) -> WillProperties {
@@ -308,6 +368,35 @@ impl PropertiesBuilder {
             topic_alias_maximum: self.topic_alias_maximum,
             reason_string: self.reason_string,
             user_properties: self.user_properties
+        }
+    }
+
+    pub fn publish(self) -> PublishProperties {
+        PublishProperties {
+            payload_format_indicator: self.payload_format_indicator,
+            message_expire_interval: self.message_expire_interval,
+            topic_alias: self.topic_alias,
+            response_topic: self.response_topic,
+            correlation_data: self.correlation_data,
+            user_properties: self.user_properties,
+            subscription_identifier: self.subscription_identifier,
+            content_type: self.content_type
+        }
+    }
+
+    pub fn pubres(self) -> PubResProperties {
+        PubResProperties{
+            reason_string: self.reason_string,
+            user_properties: self.user_properties
+        }
+    }
+
+    pub fn disconnect(self) -> DisconnectProperties {
+        DisconnectProperties {
+            session_expire_interval: self.session_expire_interval,
+            reason_string: self.reason_string,
+            user_properties: self.user_properties,
+            server_reference: self.server_reference
         }
     }
 }
