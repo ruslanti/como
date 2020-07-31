@@ -231,55 +231,76 @@ pub struct Will {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+pub struct Connect {
+    pub clean_start_flag: bool,
+    pub keep_alive: u16,
+    pub properties: ConnectProperties,
+    pub client_identifier: Option<Bytes>,
+    pub username: Option<Bytes>,
+    pub password: Option<Bytes>,
+    pub will: Option<Will>
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct ConnAck {
+    pub session_present: bool,
+    pub reason_code: ReasonCode,
+    pub properties: ConnAckProperties
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct Publish {
+    pub dup: bool,
+    pub qos: QoS,
+    pub retain: bool,
+    pub topic_name: Bytes,
+    pub packet_identifier: Option<u16>,
+    pub properties: PublishProperties,
+    pub payload: Bytes
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct PubAck {
+    pub packet_identifier: u16,
+    pub reason_code: ReasonCode,
+    pub properties: PubResProperties
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct PubRec {
+    pub packet_identifier: u16,
+    pub reason_code: ReasonCode,
+    pub properties: PubResProperties
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct PubRel {
+    pub packet_identifier: u16,
+    pub reason_code: ReasonCode,
+    pub properties: PubResProperties
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct Disconnect {
+    pub reason_code: ReasonCode,
+    pub properties: DisconnectProperties
+}
+
+#[derive(Debug, Eq, PartialEq)]
 pub enum ControlPacket {
-    Connect {
-        clean_start_flag: bool,
-        keep_alive: u16,
-        properties: ConnectProperties,
-        client_identifier: Option<Bytes>,
-        username: Option<Bytes>,
-        password: Option<Bytes>,
-        will: Option<Will>
-    },
-    ConnAck {
-        session_present: bool,
-        reason_code: ReasonCode,
-        properties: ConnAckProperties
-    },
-    Publish {
-        dup: bool,
-        qos: QoS,
-        retain: bool,
-        topic_name: Bytes,
-        packet_identifier: Option<u16>,
-        properties: PublishProperties,
-        payload: Bytes
-    },
-    PubAck {
-        packet_identifier: u16,
-        reason_code: ReasonCode,
-        properties: PubResProperties
-    },
-    PubRec {
-        packet_identifier: u16,
-        reason_code: ReasonCode,
-        properties: PubResProperties
-    },
-    PubRel {
-        packet_identifier: u16,
-        reason_code: ReasonCode,
-        properties: PubResProperties
-    },
+    Connect(Connect),
+    ConnAck(ConnAck),
+    Publish(Publish),
+    PubAck(PubAck),
+    PubRec(PubRec),
+    PubRel(PubRel),
     Subscribe,
     SubAck,
     UnSubscribe,
     UnSubAck,
     PingReq,
     PingResp,
-    Disconnect {
-        reason_code: ReasonCode,
-        properties: DisconnectProperties
-    },
+    Disconnect(Disconnect),
     Auth
 }
 

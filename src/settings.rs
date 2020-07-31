@@ -4,7 +4,7 @@ use crate::mqtt::proto::types::QoS;
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
-pub struct Service {
+pub struct ServiceSettings {
     pub listen: String,
     pub port: u16,
     pub max_connections: usize
@@ -12,7 +12,7 @@ pub struct Service {
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
-pub struct Connection {
+pub struct ConnectionSettings {
     pub session_expire_interval: Option<u32>,
     pub receive_maximum: Option<u16>,
     pub maximum_qos: Option<QoS>,
@@ -24,13 +24,13 @@ pub struct Connection {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub service: Service,
-    pub connection: Connection
+    pub service: ServiceSettings,
+    pub connection: ConnectionSettings
 }
 
-impl Default for Service {
+impl Default for ServiceSettings {
     fn default() -> Self {
-        Service {
+        ServiceSettings {
             listen: String::from("127.0.0.1"),
             port: 1883,
             max_connections: 255
@@ -38,9 +38,9 @@ impl Default for Service {
     }
 }
 
-impl Default for Connection {
+impl Default for ConnectionSettings {
     fn default() -> Self {
-        Connection{
+        ConnectionSettings{
             session_expire_interval: None,
             receive_maximum: None,
             maximum_qos: None,

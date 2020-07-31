@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::mqtt::session::Session;
 use crate::mqtt::shutdown::Shutdown;
 use tracing::{trace, debug, error, info, instrument};
-use crate::settings::{Settings, Connection};
+use crate::settings::{Settings, ConnectionSettings};
 use tokio_util::codec::Framed;
 use tokio::stream::StreamExt;
 use futures::sink::SinkExt;
@@ -21,14 +21,6 @@ struct Service {
     shutdown_complete_rx: mpsc::Receiver<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
     settings: Settings
-}
-
-#[derive(Debug)]
-struct ConnectionHandler {
-    stream: TcpStream,
-    config: Connection,
-    limit_connections: Arc<Semaphore>,
-    _shutdown_complete: mpsc::Sender<()>,
 }
 
 pub async fn run(listener: TcpListener, settings: Settings, shutdown: impl Future) -> Result<()> {
@@ -81,16 +73,14 @@ impl Service {
 
             let socket = self.accept().await?;
 
-           let mut handler = ConnectionHandler {
-               config: self.settings.connection,
-               stream: socket,
-               limit_connections: self.limit_connections.clone(),
-               _shutdown_complete: self.shutdown_complete_tx.clone(),
-            };
+            let mut session = Session::new(
+                Framed::new(socket, MQTTCodec::new()), self.limit_connections.clone(),
+                self.shutdown_complete_tx.clone(),self.settings.connection,
+            );
 
             let shutdown = Shutdown::new(self.notify_shutdown.subscribe());
             tokio::spawn(async move {
-                if let Err(err) = handler.run(shutdown).await {
+                if let Err(err) = session.run(shutdown).await {
                     error!(cause = ?err, "connection error");
                 }
             });
@@ -117,65 +107,5 @@ impl Service {
             // Double the back off
             backoff *= 2;
         }
-    }
-}
-
-impl ConnectionHandler {
-    #[instrument(skip(self))]
-    pub async fn process(&mut self) -> Result<()> {
-        trace!("process start");
-        let mut transport = Framed::new(&mut self.stream, MQTTCodec::new());
-        let session = Session::new(self.config);
-        while let Some(packet) = transport.next().await {
-            match packet {
-                Ok(packet) => {
-                    debug!("decoded frame: {:?}", packet);
-                    if let Some(res) = session.handle_event(packet)? {
-                        transport.send(res).await?;
-                    }
-                }
-                Err(e) => {
-                    error!("error on process connection: {}", e);
-                    return Err(e.into())
-                },
-            }
-        };
-        trace!("process end");
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
-    pub async fn disconnect(&mut self)  {
-        debug!("send disconnect");
-        //self.stream.send()
-        // todo send disconnect to session
-    }
-
-    #[instrument(skip(self))]
-    async fn run(&mut self, mut shutdown: Shutdown) -> Result<()> {
-        trace!("run start");
-        while !shutdown.is_shutdown() {
-            // While reading a request frame, also listen for the shutdown signal.
-            tokio::select! {
-                res = self.process() => {
-                    res?; // handle error
-                    break; // disconnect
-                },
-                _ = shutdown.recv() => {
-                    trace!("shutdown received");
-                    self.disconnect().await;
-                    trace!("disconnect sent");
-                    return Ok(());
-                }
-            };
-        }
-        trace!("run end");
-        Ok(())
-    }
-}
-
-impl Drop for ConnectionHandler {
-    fn drop(&mut self) {
-        self.limit_connections.add_permits(1);
     }
 }

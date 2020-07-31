@@ -1,7 +1,7 @@
 use bytes::{Buf, BytesMut};
 use anyhow::{anyhow, Result, Context};
 use std::convert::TryInto;
-use crate::mqtt::proto::types::{ControlPacket, ReasonCode};
+use crate::mqtt::proto::types::{ControlPacket, ReasonCode, Disconnect};
 use crate::mqtt::proto::decoder::{decode_variable_integer, decode_utf8_string};
 use crate::mqtt::proto::property::{PropertiesBuilder, DisconnectProperties, Property};
 
@@ -9,10 +9,10 @@ pub fn decode_disconnect(reader: &mut BytesMut) -> Result<Option<ControlPacket>>
     let reason_code = if reader.remaining() > 0 { reader.get_u8().try_into()? } else { ReasonCode::Success };
     let properties_length = if reader.remaining() > 0 { decode_variable_integer(reader)? as usize } else { 0 };
     let properties = decode_disconnect_properties(&mut reader.split_to(properties_length))?;
-    Ok(Some(ControlPacket::Disconnect {
+    Ok(Some(ControlPacket::Disconnect(Disconnect {
         reason_code,
         properties
-    }))
+    })))
 }
 
 fn decode_disconnect_properties(reader: &mut BytesMut) -> Result<DisconnectProperties> {

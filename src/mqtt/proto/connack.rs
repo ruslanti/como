@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 use anyhow::{anyhow, Result};
 use bytes::{BytesMut, Buf, BufMut};
-use crate::mqtt::proto::types::ControlPacket;
+use crate::mqtt::proto::types::{ControlPacket, ConnAck};
 use crate::mqtt::proto::property::{PropertiesBuilder, Property, ConnAckProperties};
 use crate::mqtt::proto::decoder::decode_variable_integer;
 use crate::mqtt::proto::encoder::encode_utf8_string;
@@ -13,11 +13,11 @@ pub fn decode_connack(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     let reason_code = reader.get_u8().try_into()?;
     let properties_length = decode_variable_integer(reader)? as usize;
     let properties = decode_connack_properties(&mut reader.split_to(properties_length))?;
-    Ok(Some(ControlPacket::ConnAck {
+    Ok(Some(ControlPacket::ConnAck(ConnAck {
         session_present,
         reason_code,
         properties
-    }))
+    })))
 }
 
 pub fn decode_connack_properties(reader: &mut BytesMut) -> Result<ConnAckProperties> {

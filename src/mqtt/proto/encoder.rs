@@ -1,4 +1,4 @@
-use crate::mqtt::proto::types::{MQTTCodec, ControlPacket, PacketType};
+use crate::mqtt::proto::types::{MQTTCodec, ControlPacket, PacketType, Connect, ConnAck, Publish, PubAck, PubRec, PubRel, Disconnect};
 use tokio_util::codec::Encoder;
 use bytes::{BytesMut, BufMut, Bytes};
 use anyhow::{anyhow, Result, Context};
@@ -11,12 +11,8 @@ impl Encoder<ControlPacket> for MQTTCodec {
 
     fn encode(&mut self, packet: ControlPacket, writer: &mut BytesMut) -> Result<(), Self::Error> {
         match packet {
-            ControlPacket::Connect { .. } => unimplemented!(),
-            ControlPacket::ConnAck {
-                session_present,
-                reason_code,
-                properties
-            } => {
+            ControlPacket::Connect(Connect { .. }) => unimplemented!(),
+            ControlPacket::ConnAck(ConnAck { session_present, reason_code, properties }) => {
                 let properties_length = properties.len(); // properties
                 let properties_length_size= encoded_variable_integer_len(properties_length); // properties length
                 let remaining_length = 2 + properties_length_size + properties_length;
@@ -30,16 +26,8 @@ impl Encoder<ControlPacket> for MQTTCodec {
                 encode_variable_integer(writer, properties_length)?; // properties length
                 encode_connack_properties(writer, properties)?;
             },
-            ControlPacket::Publish{
-                dup, qos, retain,
-                topic_name,
-                packet_identifier,
-                properties,
-                payload
-            } => unimplemented!(),
-            ControlPacket::PubAck {
-                packet_identifier, reason_code, properties
-            } => {
+            ControlPacket::Publish(Publish { dup, qos, retain, topic_name, packet_identifier, properties, payload }) => unimplemented!(),
+            ControlPacket::PubAck(PubAck { packet_identifier, reason_code, properties }) => {
                 let properties_length = properties.len(); // properties
                 let properties_length_size= encoded_variable_integer_len(properties_length); // properties length
                 let remaining_length = 3 + properties_length_size + properties_length;
@@ -53,9 +41,7 @@ impl Encoder<ControlPacket> for MQTTCodec {
                 encode_variable_integer(writer, properties_length)?; // properties length
                 encode_pubres_properties(writer, properties)?;
             },
-            ControlPacket::PubRec {
-                packet_identifier, reason_code, properties
-            } => {
+            ControlPacket::PubRec(PubRec { packet_identifier, reason_code, properties }) => {
                 let properties_length = properties.len(); // properties
                 let properties_length_size= encoded_variable_integer_len(properties_length); // properties length
                 let remaining_length = 3 + properties_length_size + properties_length;
@@ -69,9 +55,7 @@ impl Encoder<ControlPacket> for MQTTCodec {
                 encode_variable_integer(writer, properties_length)?; // properties length
                 encode_pubres_properties(writer, properties)?;
             },
-            ControlPacket::PubRel {
-                packet_identifier, reason_code, properties
-            } => {
+            ControlPacket::PubRel(PubRel { packet_identifier, reason_code, properties }) => {
                 let properties_length = properties.len(); // properties
                 let properties_length_size= encoded_variable_integer_len(properties_length); // properties length
                 let remaining_length = 3 + properties_length_size + properties_length;
@@ -91,7 +75,7 @@ impl Encoder<ControlPacket> for MQTTCodec {
             ControlPacket::UnSubAck => unimplemented!(),
             ControlPacket::PingReq => unimplemented!(),
             ControlPacket::PingResp => unimplemented!(),
-            ControlPacket::Disconnect{ reason_code, properties } => unimplemented!(),
+            ControlPacket::Disconnect(Disconnect { reason_code, properties }) => unimplemented!(),
             ControlPacket::Auth => unimplemented!(),
         };
         Ok(())

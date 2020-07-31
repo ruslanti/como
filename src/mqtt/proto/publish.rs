@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 use anyhow::{anyhow, Result};
 use bytes::{BytesMut, Buf};
-use crate::mqtt::proto::types::{ControlPacket, QoS};
+use crate::mqtt::proto::types::{ControlPacket, QoS, Publish};
 use crate::mqtt::proto::property::{PropertiesBuilder, Property, PublishProperties};
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
 
@@ -17,7 +17,7 @@ pub fn decode_publish(dup: bool, qos: QoS, retain: bool, reader: &mut BytesMut) 
     };
     let properties_length = decode_variable_integer(reader)? as usize;
     let properties = decode_publish_properties(&mut reader.split_to(properties_length))?;
-    Ok(Some(ControlPacket::Publish {
+    Ok(Some(ControlPacket::Publish(Publish {
         dup,
         qos,
         retain,
@@ -25,7 +25,7 @@ pub fn decode_publish(dup: bool, qos: QoS, retain: bool, reader: &mut BytesMut) 
         packet_identifier,
         properties,
         payload: reader.to_bytes()
-    }))
+    })))
 }
 
 pub fn decode_publish_properties(reader: &mut BytesMut) -> Result<PublishProperties> {

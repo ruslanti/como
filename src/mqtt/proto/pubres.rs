@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use bytes::{BytesMut, Buf, BufMut};
-use crate::mqtt::proto::types::{ControlPacket, ReasonCode};
+use crate::mqtt::proto::types::{ControlPacket, ReasonCode, PubAck, PubRec, PubRel};
 use std::convert::TryInto;
 use crate::mqtt::proto::decoder::decode_variable_integer;
 use crate::mqtt::proto::property::{PropertiesBuilder, Property, PubResProperties};
@@ -21,29 +21,29 @@ pub fn decode_pubres(reader: &mut BytesMut) -> Result<(u16, ReasonCode, PubResPr
 
 pub fn decode_puback(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
-    Ok(Some(ControlPacket::PubAck {
+    Ok(Some(ControlPacket::PubAck(PubAck {
         packet_identifier,
         reason_code,
         properties
-    }))
+    })))
 }
 
 pub fn decode_pubrec(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
-    Ok(Some(ControlPacket::PubRec {
+    Ok(Some(ControlPacket::PubRec(PubRec {
         packet_identifier,
         reason_code,
         properties
-    }))
+    })))
 }
 
 pub fn decode_pubrel(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
-    Ok(Some(ControlPacket::PubRel {
+    Ok(Some(ControlPacket::PubRel(PubRel {
         packet_identifier,
         reason_code,
         properties
-    }))
+    })))
 }
 
 pub fn decode_pubres_properties(reader: &mut BytesMut) -> Result<PubResProperties> {

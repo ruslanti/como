@@ -1,17 +1,20 @@
 use std::convert::TryInto;
 use anyhow::{anyhow, Result};
 use bytes::{BytesMut, Buf, Bytes};
-use crate::mqtt::proto::types::{ControlPacket, Will, QoS};
+use crate::mqtt::proto::types::{ControlPacket, Will, QoS, Connect};
 use crate::mqtt::proto::property::{PropertiesBuilder, ConnectProperties, Property};
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::mqtt::proto::will::decode_will_properties;
 
+const MQTT: &'static str = "MQTT";
+const VERSION: u8 = 5;
+
 pub fn decode_connect(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
-    if Some(Bytes::from("MQTT")) != decode_utf8_string(reader)? {
+    if Some(Bytes::from(MQTT)) != decode_utf8_string(reader)? {
         return Err(anyhow!("wrong protocol name"))
     }
     end_of_stream!(reader.remaining() < 4, "connect version");
-    if 5 != reader.get_u8() {
+    if VERSION != reader.get_u8() {
         return Err(anyhow!("wrong protocol version"))
     }
 
@@ -58,7 +61,7 @@ pub fn decode_connect(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
         None
     };
 
-    Ok(Some(ControlPacket::Connect{
+    Ok(Some(ControlPacket::Connect(Connect {
         clean_start_flag,
         keep_alive,
         properties,
@@ -66,7 +69,7 @@ pub fn decode_connect(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
         username,
         password,
         will
-    }))
+    })))
 }
 
 fn decode_connect_properties(reader: &mut BytesMut) -> Result<ConnectProperties> {
