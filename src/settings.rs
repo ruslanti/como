@@ -1,6 +1,7 @@
 use config::{ConfigError, Config, File};
 use serde::Deserialize;
 use crate::mqtt::proto::types::QoS;
+use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
@@ -13,6 +14,8 @@ pub struct ServiceSettings {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
 pub struct ConnectionSettings {
+    pub idle_keep_alive: u16,
+    pub server_keep_alive: Option<u16>,
     pub session_expire_interval: Option<u32>,
     pub receive_maximum: Option<u16>,
     pub maximum_qos: Option<QoS>,
@@ -41,6 +44,8 @@ impl Default for ServiceSettings {
 impl Default for ConnectionSettings {
     fn default() -> Self {
         ConnectionSettings{
+            idle_keep_alive: 500,
+            server_keep_alive: None,
             session_expire_interval: None,
             receive_maximum: None,
             maximum_qos: None,

@@ -55,8 +55,8 @@ impl Decoder for MQTTCodec {
                     PacketType::SUBACK      => unimplemented!(),
                     PacketType::UNSUBSCRIBE => unimplemented!(),
                     PacketType::UNSUBACK    => unimplemented!(),
-                    PacketType::PINGREQ     => unimplemented!(),
-                    PacketType::PINGRESP    => unimplemented!(),
+                    PacketType::PINGREQ     => Ok(Some(ControlPacket::PingReq)),
+                    PacketType::PINGRESP    => Ok(Some(ControlPacket::PingResp)),
                     PacketType::DISCONNECT  => decode_disconnect(&mut packet),
                     PacketType::AUTH        => unimplemented!(),
                 }

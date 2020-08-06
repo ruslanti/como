@@ -148,7 +148,9 @@ pub enum ReasonCode {
     ServerUnavailable           = 0x88,
     ServerBusy                  = 0x89,
     Banned                      = 0x8A,
+    ServerShuttingDown          = 0x8B,
     BadAuthenticationMethod     = 0x8C,
+    KeepAliveTimeout            = 0x8D,
     TopicNameInvalid            = 0x90,
     PacketTooLarge              = 0x95,
     QuotaExceeded               = 0x97,
@@ -177,7 +179,9 @@ impl TryFrom<u8> for ReasonCode {
             0x88 => Ok(ReasonCode::ServerUnavailable),
             0x89 => Ok(ReasonCode::ServerBusy),
             0x8A => Ok(ReasonCode::Banned),
+            0x8B => Ok(ReasonCode::ServerShuttingDown),
             0x8C => Ok(ReasonCode::BadAuthenticationMethod),
+            0x8D => Ok(ReasonCode::KeepAliveTimeout),
             0x90 => Ok(ReasonCode::TopicNameInvalid),
             0x95 => Ok(ReasonCode::PacketTooLarge),
             0x97 => Ok(ReasonCode::QuotaExceeded),
@@ -207,7 +211,9 @@ impl Into<u8> for ReasonCode {
             ReasonCode::ServerUnavailable => 0x88,
             ReasonCode::ServerBusy => 0x89,
             ReasonCode::Banned => 0x8A,
+            ReasonCode::ServerShuttingDown => 0x8B,
             ReasonCode::BadAuthenticationMethod => 0x8C,
+            ReasonCode::KeepAliveTimeout => 0x8D,
             ReasonCode::TopicNameInvalid => 0x90,
             ReasonCode::PacketTooLarge => 0x95,
             ReasonCode::QuotaExceeded => 0x97,
@@ -260,21 +266,7 @@ pub struct Publish {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct PubAck {
-    pub packet_identifier: u16,
-    pub reason_code: ReasonCode,
-    pub properties: PubResProperties
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct PubRec {
-    pub packet_identifier: u16,
-    pub reason_code: ReasonCode,
-    pub properties: PubResProperties
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct PubRel {
+pub struct PubRes {
     pub packet_identifier: u16,
     pub reason_code: ReasonCode,
     pub properties: PubResProperties
@@ -291,9 +283,10 @@ pub enum ControlPacket {
     Connect(Connect),
     ConnAck(ConnAck),
     Publish(Publish),
-    PubAck(PubAck),
-    PubRec(PubRec),
-    PubRel(PubRel),
+    PubAck(PubRes),
+    PubRec(PubRes),
+    PubRel(PubRes),
+    PubComp(PubRes),
     Subscribe,
     SubAck,
     UnSubscribe,

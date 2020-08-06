@@ -137,6 +137,14 @@ pub struct ConnAckProperties {
     pub topic_alias_maximum: Option<u16>,
     pub reason_string: Option<Bytes>,
     pub user_properties: Vec<(Bytes, Bytes)>,
+    pub wildcard_subscription_available: Option<bool>,
+    pub subscription_identifier_available: Option<bool>,
+    pub shared_subscription_available: Option<bool>,
+    pub server_keep_alive: Option<u16>,
+    pub response_information: Option<Bytes>,
+    pub server_reference: Option<Bytes>,
+    pub authentication_method: Option<Bytes>,
+    pub authentication_data: Option<Bytes>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -188,6 +196,17 @@ impl PropertiesLength for PubResProperties {
         len
     }
 }
+
+impl PropertiesLength for DisconnectProperties {
+    fn len(&self) -> usize {
+        let mut len = check_size_of!(self, session_expire_interval);
+        len += check_size_of_string!(self, reason_string);
+        len += self.user_properties.iter().map(|(x, y)| 5 + x.len() + y.len()).sum::<usize>();
+        len += check_size_of_string!(self, server_reference);
+        len
+    }
+}
+
 pub struct PropertiesBuilder {
     payload_format_indicator: Option<bool>,
     message_expire_interval: Option<u32>,
@@ -367,7 +386,15 @@ impl PropertiesBuilder {
             assigned_client_identifier: self.assigned_client_identifier,
             topic_alias_maximum: self.topic_alias_maximum,
             reason_string: self.reason_string,
-            user_properties: self.user_properties
+            user_properties: self.user_properties,
+            wildcard_subscription_available: self.wildcard_subscription_available,
+            subscription_identifier_available: self.subscription_identifier_available,
+            shared_subscription_available: self.shared_subscription_available,
+            server_keep_alive: self.server_keep_alive,
+            response_information: self.response_information,
+            server_reference: self.server_reference,
+            authentication_method: self.authentication_method,
+            authentication_data: self.authentication_data
         }
     }
 

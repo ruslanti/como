@@ -1,10 +1,11 @@
-use crate::mqtt::proto::types::{MQTTCodec, ControlPacket, PacketType, Connect, ConnAck, Publish, PubAck, PubRec, PubRel, Disconnect};
+use crate::mqtt::proto::types::{MQTTCodec, ControlPacket, PacketType, Connect, ConnAck, Publish, PubRes, Disconnect};
 use tokio_util::codec::Encoder;
 use bytes::{BytesMut, BufMut, Bytes};
 use anyhow::{anyhow, Result, Context};
 use crate::mqtt::proto::property::{PropertiesLength};
 use crate::mqtt::proto::pubres::encode_pubres_properties;
 use crate::mqtt::proto::connack::encode_connack_properties;
+use crate::mqtt::proto::disconnect::encode_disconnect_properties;
 
 impl Encoder<ControlPacket> for MQTTCodec {
     type Error = anyhow::Error;
@@ -27,7 +28,7 @@ impl Encoder<ControlPacket> for MQTTCodec {
                 encode_connack_properties(writer, properties)?;
             },
             ControlPacket::Publish(Publish { dup, qos, retain, topic_name, packet_identifier, properties, payload }) => unimplemented!(),
-            ControlPacket::PubAck(PubAck { packet_identifier, reason_code, properties }) => {
+            ControlPacket::PubAck(PubRes { packet_identifier, reason_code, properties }) => {
                 let properties_length = properties.len(); // properties
                 let properties_length_size= encoded_variable_integer_len(properties_length); // properties length
                 let remaining_length = 3 + properties_length_size + properties_length;
@@ -41,7 +42,7 @@ impl Encoder<ControlPacket> for MQTTCodec {
                 encode_variable_integer(writer, properties_length)?; // properties length
                 encode_pubres_properties(writer, properties)?;
             },
-            ControlPacket::PubRec(PubRec { packet_identifier, reason_code, properties }) => {
+            ControlPacket::PubRec(PubRes { packet_identifier, reason_code, properties }) => {
                 let properties_length = properties.len(); // properties
                 let properties_length_size= encoded_variable_integer_len(properties_length); // properties length
                 let remaining_length = 3 + properties_length_size + properties_length;
@@ -55,7 +56,7 @@ impl Encoder<ControlPacket> for MQTTCodec {
                 encode_variable_integer(writer, properties_length)?; // properties length
                 encode_pubres_properties(writer, properties)?;
             },
-            ControlPacket::PubRel(PubRel { packet_identifier, reason_code, properties }) => {
+            ControlPacket::PubRel(PubRes { packet_identifier, reason_code, properties }) => {
                 let properties_length = properties.len(); // properties
                 let properties_length_size= encoded_variable_integer_len(properties_length); // properties length
                 let remaining_length = 3 + properties_length_size + properties_length;
@@ -69,13 +70,47 @@ impl Encoder<ControlPacket> for MQTTCodec {
                 encode_variable_integer(writer, properties_length)?; // properties length
                 encode_pubres_properties(writer, properties)?;
             },
+            ControlPacket::PubComp(PubRes { packet_identifier, reason_code, properties }) => {
+                let properties_length = properties.len(); // properties
+                let properties_length_size= encoded_variable_integer_len(properties_length); // properties length
+                let remaining_length = 3 + properties_length_size + properties_length;
+                let remaining_length_size = encoded_variable_integer_len(remaining_length); // remaining length size
+                writer.reserve(1 + remaining_length_size + remaining_length);
+
+                writer.put_u8(PacketType::PUBCOMP.into()); // packet type
+                encode_variable_integer(writer, remaining_length)?; // remaining length
+                writer.put_u16(packet_identifier); // packet identifier
+                writer.put_u8(reason_code.into());
+                encode_variable_integer(writer, properties_length)?; // properties length
+                encode_pubres_properties(writer, properties)?;
+            },
             ControlPacket::Subscribe => unimplemented!(),
             ControlPacket::SubAck => unimplemented!(),
             ControlPacket::UnSubscribe => unimplemented!(),
             ControlPacket::UnSubAck => unimplemented!(),
-            ControlPacket::PingReq => unimplemented!(),
-            ControlPacket::PingResp => unimplemented!(),
-            ControlPacket::Disconnect(Disconnect { reason_code, properties }) => unimplemented!(),
+            ControlPacket::PingReq => {
+                writer.reserve(2);
+                writer.put_u8(PacketType::PINGREQ.into()); // packet type
+                writer.put_u8(0); // remaining length
+            },
+            ControlPacket::PingResp => {
+                writer.reserve(2);
+                writer.put_u8(PacketType::PINGRESP.into()); // packet type
+                writer.put_u8(0); // remaining length
+            },
+            ControlPacket::Disconnect(Disconnect { reason_code, properties }) => {
+                let properties_length = properties.len(); // properties
+                let properties_length_size= encoded_variable_integer_len(properties_length); // properties length
+                let remaining_length = 3 + properties_length_size + properties_length;
+                let remaining_length_size = encoded_variable_integer_len(remaining_length); // remaining length size
+                writer.reserve(1 + remaining_length_size + remaining_length);
+
+                writer.put_u8(PacketType::DISCONNECT.into()); // packet type
+                encode_variable_integer(writer, remaining_length)?; // remaining length
+                writer.put_u8(reason_code.into());
+                encode_variable_integer(writer, properties_length)?; // properties length
+                encode_disconnect_properties(writer, properties)?;
+            },
             ControlPacket::Auth => unimplemented!(),
         };
         Ok(())

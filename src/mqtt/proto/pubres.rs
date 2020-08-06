@@ -1,16 +1,20 @@
 use anyhow::{anyhow, Result};
 use bytes::{BytesMut, Buf, BufMut};
-use crate::mqtt::proto::types::{ControlPacket, ReasonCode, PubAck, PubRec, PubRel};
+use crate::mqtt::proto::types::{ControlPacket, ReasonCode, PubRes};
 use std::convert::TryInto;
 use crate::mqtt::proto::decoder::decode_variable_integer;
-use crate::mqtt::proto::property::{PropertiesBuilder, Property, PubResProperties};
+use crate::mqtt::proto::property::{PropertiesBuilder, Property, PubResProperties, DisconnectProperties};
 use crate::mqtt::proto::encoder::encode_utf8_string;
+use tracing::{trace, debug, error, instrument};
 
 pub fn decode_pubres(reader: &mut BytesMut) -> Result<(u16, ReasonCode, PubResProperties)> {
-    end_of_stream!(reader.remaining() < 4, "pubres variable header");
+    end_of_stream!(reader.remaining() < 2, "pubres variable header");
     let packet_identifier = reader.get_u16();
-    let reason_code = reader.get_u8().try_into()?;
-    let properties_length = decode_variable_integer(reader)? as usize;
+    let (reason_code, properties_length) = if reader.has_remaining() {
+            (reader.get_u8().try_into()?, decode_variable_integer(reader)? as usize)
+        } else {
+            (ReasonCode::Success, 0)
+        };
     let properties = decode_pubres_properties(&mut reader.split_to(properties_length))?;
     Ok((
         packet_identifier,
@@ -21,7 +25,7 @@ pub fn decode_pubres(reader: &mut BytesMut) -> Result<(u16, ReasonCode, PubResPr
 
 pub fn decode_puback(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
-    Ok(Some(ControlPacket::PubAck(PubAck {
+    Ok(Some(ControlPacket::PubAck(PubRes {
         packet_identifier,
         reason_code,
         properties
@@ -30,7 +34,7 @@ pub fn decode_puback(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
 
 pub fn decode_pubrec(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
-    Ok(Some(ControlPacket::PubRec(PubRec {
+    Ok(Some(ControlPacket::PubRec(PubRes {
         packet_identifier,
         reason_code,
         properties
@@ -39,7 +43,7 @@ pub fn decode_pubrec(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
 
 pub fn decode_pubrel(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
-    Ok(Some(ControlPacket::PubRel(PubRel {
+    Ok(Some(ControlPacket::PubRel(PubRes {
         packet_identifier,
         reason_code,
         properties
