@@ -1,4 +1,8 @@
 
+trait Publish {
+    fn publish();
+}
+
 struct Topic{
 
 }
