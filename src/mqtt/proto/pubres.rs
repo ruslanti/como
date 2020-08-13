@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use bytes::{BytesMut, Buf, BufMut};
-use crate::mqtt::proto::types::{ControlPacket, ReasonCode, PubRes};
+use crate::mqtt::proto::types::{ControlPacket, ReasonCode, PubResp, PacketType};
 use std::convert::TryInto;
 use crate::mqtt::proto::decoder::decode_variable_integer;
 use crate::mqtt::proto::property::{PropertiesBuilder, Property, PubResProperties, DisconnectProperties};
@@ -25,7 +25,8 @@ pub fn decode_pubres(reader: &mut BytesMut) -> Result<(u16, ReasonCode, PubResPr
 
 pub fn decode_puback(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
-    Ok(Some(ControlPacket::PubAck(PubRes {
+    Ok(Some(ControlPacket::PubAck(PubResp {
+        packet_type: PacketType::PUBACK,
         packet_identifier,
         reason_code,
         properties
@@ -34,7 +35,8 @@ pub fn decode_puback(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
 
 pub fn decode_pubrec(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
-    Ok(Some(ControlPacket::PubRec(PubRes {
+    Ok(Some(ControlPacket::PubRec(PubResp {
+        packet_type: PacketType::PUBREC,
         packet_identifier,
         reason_code,
         properties
@@ -43,7 +45,8 @@ pub fn decode_pubrec(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
 
 pub fn decode_pubrel(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
-    Ok(Some(ControlPacket::PubRel(PubRes {
+    Ok(Some(ControlPacket::PubRel(PubResp {
+        packet_type: PacketType::PUBREL,
         packet_identifier,
         reason_code,
         properties
@@ -51,7 +54,7 @@ pub fn decode_pubrel(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
 }
 
 pub fn decode_pubres_properties(reader: &mut BytesMut) -> Result<PubResProperties> {
-    let mut builder = PropertiesBuilder::new();
+    let builder = PropertiesBuilder::new();
     while reader.has_remaining() {
         let id = decode_variable_integer(reader)?;
         match id.try_into()? {
@@ -68,17 +71,7 @@ pub fn decode_pubres_properties(reader: &mut BytesMut) -> Result<PubResPropertie
 }
 
 pub fn encode_pubres_properties(writer: &mut BytesMut, properties: PubResProperties) -> Result<()> {
-    if let Some(value) = properties.reason_string {
-        end_of_stream!(writer.capacity() < 1, "reason string id");
-        writer.put_u8(Property::ReasonString as u8);
-        end_of_stream!(writer.capacity() < value.len(), "reason string");
-        encode_utf8_string(writer, value)?;
-    }
-    for (first, second) in properties.user_properties {
-        end_of_stream!(writer.capacity() < 1, "user properties");
-        writer.put_u8(Property::UserProperty as u8);
-        encode_utf8_string(writer, first)?;
-        encode_utf8_string(writer, second)?;
-    }
+    encode_property_string!(writer, ReasonString, properties.reason_string);
+    encode_property_user_properties!(writer, UserProperty, properties.user_properties);
     Ok(())
 }

@@ -1,12 +1,13 @@
 use anyhow::{anyhow, Result, Context};
 use tracing::{trace, debug, error, instrument};
-use crate::mqtt::proto::types::{ControlPacket, ReasonCode, MQTTCodec, Will, Connect, Publish, ConnAck, QoS, PubRes, Disconnect};
+use crate::mqtt::proto::types::{ControlPacket, ReasonCode, MQTTCodec, Will, Connect, Publish, ConnAck, QoS, PubResp, Disconnect, PacketType};
 use crate::mqtt::proto::property::{ConnAckProperties, DisconnectProperties, ConnectProperties, PubResProperties};
 use crate::settings::ConnectionSettings;
 use bytes::Bytes;
 use uuid::Uuid;
 use tokio_util::codec::Framed;
-use futures::{SinkExt, StreamExt};
+//use futures::{SinkExt, StreamExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use crate::mqtt::shutdown::Shutdown;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, Semaphore, oneshot};
@@ -16,7 +17,9 @@ use tokio::time::timeout;
 use std::ops::Add;
 use crate::mqtt::proto::types::ControlPacket::PubComp;
 use std::collections::BTreeMap;
-use futures::task::SpawnExt;
+use crate::mqtt::topic::Message;
+use tokio::stream::{Stream, StreamExt};
+use futures::SinkExt;
 
 #[derive(Debug)]
 enum ExactlyOnceState {
@@ -32,6 +35,7 @@ type ExactlyOnceSender = mpsc::Sender<(ControlPacket, oneshot::Sender<ControlPac
 struct ExactlyOnceFlow {
     id: u16,
     rx: ExactlyOnceReceiver,
+    topic_tx: mpsc::Sender<Message>,
     state: ExactlyOnceState
 }
 
@@ -49,8 +53,8 @@ pub(crate) enum State {
 
 
 #[derive(Debug)]
-pub struct ConnectionHandler {
-    stream: Framed<TcpStream, MQTTCodec>,
+pub struct ConnectionHandler<S> {
+    stream: Framed<S, MQTTCodec>,
     limit_connections: Arc<Semaphore>,
     sessions_states_tx: mpsc::Sender<ControlPacket>,
     shutdown_complete: mpsc::Sender<()>,
@@ -58,12 +62,13 @@ pub struct ConnectionHandler {
     state: State,
     connection_rx: mpsc::Receiver<()>,
     stream_timeout: Option<Duration>,
-    publish_flows: BTreeMap<u16, ExactlyOnceSender>
+    publish_flows: BTreeMap<u16, ExactlyOnceSender>,
+    topic_tx: mpsc::Sender<Message>,
 }
 
 impl ExactlyOnceFlow {
-    fn new(id: u16, rx: ExactlyOnceReceiver) -> ExactlyOnceFlow {
-        ExactlyOnceFlow { id, rx, state: ExactlyOnceState::Init }
+    fn new(id: u16, rx: ExactlyOnceReceiver, topic_tx: mpsc::Sender<Message>) -> Self {
+        ExactlyOnceFlow { id, rx, topic_tx, state: ExactlyOnceState::Init }
     }
 
     async fn run(&mut self) -> Result<()> {
@@ -72,7 +77,9 @@ impl ExactlyOnceFlow {
             trace!("ExactlyOnceFlow: {:?}", cmd);
             match (&self.state, cmd) {
                 (ExactlyOnceState::Init, (ControlPacket::Publish(msg), tx)) => {
-                    let rec = ControlPacket::PubRec(PubRes {
+                    self.topic_tx.send(Message::new(msg.retain, msg.topic_name, msg.payload)).await?;
+                    let rec = ControlPacket::PubRec(PubResp {
+                        packet_type: PacketType::PUBREC,
                         packet_identifier: self.id,
                         reason_code: ReasonCode::Success,
                         properties: PubResProperties { reason_string: None, user_properties: vec![] }
@@ -84,7 +91,8 @@ impl ExactlyOnceFlow {
                     }
                 },
                 (ExactlyOnceState::Received, (ControlPacket::PubRel(msg), tx)) => {
-                    let comp = ControlPacket::PubComp(PubRes{
+                    let comp = ControlPacket::PubComp(PubResp {
+                        packet_type: PacketType::PUBCOMP,
                         packet_identifier: self.id,
                         reason_code: ReasonCode::Success,
                         properties: PubResProperties { reason_string: None, user_properties: vec![] }
@@ -103,12 +111,13 @@ impl ExactlyOnceFlow {
     }
 }
 
-impl ConnectionHandler {
-    pub fn new(stream: Framed<TcpStream, MQTTCodec>, limit_connections: Arc<Semaphore>,
+impl<S> ConnectionHandler<S> where S: AsyncRead + AsyncWrite + Unpin {
+    pub(crate) fn new(stream: Framed<S, MQTTCodec>, limit_connections: Arc<Semaphore>,
                sessions_states_tx: mpsc::Sender<ControlPacket>,
                shutdown_complete: mpsc::Sender<()>,
-               config: ConnectionSettings) -> ConnectionHandler {
-        let (connection_tx, connection_rx) = mpsc::channel(32);
+               topic_tx: mpsc::Sender<Message>,
+               config: ConnectionSettings) -> Self {
+        let (_connection_tx, connection_rx) = mpsc::channel(32);
         ConnectionHandler {
             stream,
             limit_connections,
@@ -118,7 +127,8 @@ impl ConnectionHandler {
             state: State::Idle,
             connection_rx,
             stream_timeout: Some(Duration::from_millis(config.idle_keep_alive as u64)),
-            publish_flows: Default::default()
+            publish_flows: Default::default(),
+            topic_tx
         }
     }
 
@@ -180,7 +190,9 @@ impl ConnectionHandler {
                 if let Some(packet_identifier) = msg.packet_identifier
                 {
                     //todo store topic
-                    let ack = ControlPacket::PubAck(PubRes {
+                    self.topic_tx.send(Message::new(msg.retain, msg.topic_name, msg.payload)).await?;
+                    let ack = ControlPacket::PubAck(PubResp {
+                        packet_type: PacketType::PUBACK,
                         packet_identifier,
                         reason_code: ReasonCode::Success,
                         properties: PubResProperties { reason_string: None, user_properties: vec![] },
@@ -197,17 +209,18 @@ impl ConnectionHandler {
                     if self.publish_flows.contains_key(&packet_identifier) && !msg.dup {
                         self.disconnect(ReasonCode::PacketIdentifierInUse).await?;
                     } else {
-                        let (mut tx, mut rx) = mpsc::channel(1);
-                        let mut flow = ExactlyOnceFlow::new(packet_identifier, rx);
+                        let (mut tx, rx) = mpsc::channel(1);
+                        let mut flow = ExactlyOnceFlow::new(packet_identifier, rx, self.topic_tx.clone());
                         self.publish_flows.insert(packet_identifier, tx.clone());
 
                         tokio::spawn(async move {
                             if let Err(err) = flow.run().await{
                                 debug!(cause = ?err, "connection error");
                             }
+                            //self.publish_flows.remove(&packet_identifier)
                         });
 
-                        let (resp_tx, mut resp_rx) = oneshot::channel();
+                        let (resp_tx, resp_rx) = oneshot::channel();
                         tx.send((ControlPacket::Publish(msg), resp_tx)).await?;
 
                         if let Ok(res) = resp_rx.await {
@@ -226,14 +239,18 @@ impl ConnectionHandler {
         Ok(())
     }
 
-    async fn process_pubrel(&mut self, msg: PubRes) -> Result<()> {
+    async fn process_pubrel(&mut self, msg: PubResp) -> Result<()> {
         if let Some(tx) = self.publish_flows.get(&msg.packet_identifier) {
-            let (resp_tx, mut resp_rx) = oneshot::channel();
+            let (resp_tx, resp_rx) = oneshot::channel();
             tx.clone().send((ControlPacket::PubRel(msg), resp_tx)).await?;
 
-            let res = resp_rx.await?;
-            trace!("send {:?}", res);
-            self.stream.send(res).await?;
+            if let Ok(res) = resp_rx.await {
+                trace!("send {:?}", res);
+                self.stream.send(res).await?;
+                //todo store topic
+            } else {
+                debug!("no response in channel");
+            }
         } else {
             self.disconnect(ReasonCode::PacketIdentifierNotFound).await?;
         }
@@ -253,7 +270,7 @@ impl ConnectionHandler {
             (State::Established{..}, ControlPacket::Disconnect(disconnect)) => {
                 debug!("disconnect reason code: {:?}, reason string:{:?}", disconnect.reason_code, disconnect.properties.reason_string);
                 self.state = State::Disconnected;
-                self.stream.close().await?;
+                //self.stream.close().await?;
                 Ok(())
             },
             (State::Established{..}, ControlPacket::PingReq) => {
@@ -371,7 +388,7 @@ impl ConnectionHandler {
     }
 }
 
-impl Drop for ConnectionHandler {
+impl<S> Drop for ConnectionHandler<S> {
     fn drop(&mut self) {
         self.limit_connections.add_permits(1);
     }

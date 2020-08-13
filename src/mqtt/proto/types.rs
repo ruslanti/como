@@ -67,7 +67,7 @@ impl<'de> Deserialize<'de> for QoS {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub enum PacketType {
     CONNECT,
     CONNACK,
@@ -272,7 +272,8 @@ pub struct Publish {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct PubRes {
+pub struct PubResp {
+    pub packet_type: PacketType,
     pub packet_identifier: u16,
     pub reason_code: ReasonCode,
     pub properties: PubResProperties
@@ -289,10 +290,10 @@ pub enum ControlPacket {
     Connect(Connect),
     ConnAck(ConnAck),
     Publish(Publish),
-    PubAck(PubRes),
-    PubRec(PubRes),
-    PubRel(PubRes),
-    PubComp(PubRes),
+    PubAck(PubResp),
+    PubRec(PubResp),
+    PubRel(PubResp),
+    PubComp(PubResp),
     Subscribe,
     SubAck,
     UnSubscribe,
@@ -328,7 +329,7 @@ impl fmt::Debug for PacketPart {
 }
 
 impl MQTTCodec {
-    pub fn new() -> MQTTCodec {
+    pub fn new() -> Self {
         MQTTCodec{part: PacketPart::FixedHeader}
     }
 }

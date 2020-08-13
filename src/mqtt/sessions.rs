@@ -31,7 +31,7 @@ pub enum Command {
 
 impl SessionManager {
 
-    pub fn new(config: ConnectionSettings, sessions_states_rx: mpsc::Receiver<(Command)>) -> SessionManager {
+    pub fn new(config: ConnectionSettings, sessions_states_rx: mpsc::Receiver<(Command)>) -> Self {
         SessionManager {
             sessions_states_rx,
             sessions: HashMap::new(),

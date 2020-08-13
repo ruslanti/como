@@ -31,6 +31,61 @@ macro_rules! check_size_of_string {
     };
 }
 
+macro_rules! encode_property_u8 {
+    ($writer:ident, $property:ident, $value:expr) => {
+        if let Some(value) = $value {
+            end_of_stream!($writer.capacity() < 1, "$value id");
+            $writer.put_u8(Property::$property as u8);
+            end_of_stream!($writer.capacity() < 1, "$value");
+            $writer.put_u8(value);
+        }
+    }
+}
+
+macro_rules! encode_property_u16 {
+    ($writer:ident, $property:ident, $value:expr) => {
+        if let Some(value) = $value {
+            end_of_stream!($writer.capacity() < 1, "$value id");
+            $writer.put_u8(Property::$property as u8);
+            end_of_stream!($writer.capacity() < 2, "$value");
+            $writer.put_u16(value);
+        }
+    }
+}
+
+macro_rules! encode_property_u32 {
+    ($writer:ident, $property:ident, $value:expr) => {
+        if let Some(value) = $value {
+            end_of_stream!($writer.capacity() < 1, "$value id");
+            $writer.put_u8(Property::$property as u8);
+            end_of_stream!($writer.capacity() < 4, "$value");
+            $writer.put_u32(value);
+        }
+    }
+}
+
+macro_rules! encode_property_string {
+    ($writer:ident, $property:ident, $value:expr) => {
+        if let Some(value) = $value {
+            end_of_stream!($writer.capacity() < 1, "$value id");
+            $writer.put_u8(Property::$property as u8);
+            end_of_stream!($writer.capacity() < value.len(), "$value");
+            encode_utf8_string($writer, value)?;
+        }
+    }
+}
+
+macro_rules! encode_property_user_properties {
+    ($writer:ident, $property:ident, $value:expr) => {
+        for (first, second) in $value {
+            end_of_stream!($writer.capacity() < 1, "$value");
+            $writer.put_u8(Property::$property as u8);
+            encode_utf8_string($writer, first)?;
+            encode_utf8_string($writer, second)?;
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Property {
     PayloadFormatIndicator          = 0x01,

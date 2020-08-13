@@ -46,7 +46,8 @@ impl Decoder for MQTTCodec {
                 match packet_type {
                     PacketType::CONNECT     => decode_connect(&mut packet),
                     PacketType::CONNACK     => decode_connack(&mut packet),
-                    PacketType::PUBLISH{dup, qos, retain} => decode_publish(dup, qos, retain, &mut packet),
+                    PacketType::PUBLISH{dup, qos, retain}
+                                            => decode_publish(dup, qos, retain, &mut packet),
                     PacketType::PUBACK      => decode_puback(&mut packet),
                     PacketType::PUBREC      => decode_pubrec(&mut packet),
                     PacketType::PUBREL      => decode_pubrel(&mut packet),

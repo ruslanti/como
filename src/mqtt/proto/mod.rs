@@ -1,5 +1,6 @@
 #[macro_use]
 pub mod types;
+#[macro_use]
 pub mod property;
 mod decoder;
 mod encoder;

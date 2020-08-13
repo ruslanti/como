@@ -13,33 +13,49 @@ use tokio_util::codec::Framed;
 use tokio::stream::StreamExt;
 use futures::sink::SinkExt;
 use crate::mqtt::proto::types::{MQTTCodec, ControlPacket};
+use crate::mqtt::topic::{Message, TopicManager};
+use tokio_native_tls::TlsAcceptor;
+use tokio::io::{AsyncRead, AsyncWrite};
+use std::borrow::Borrow;
 
 #[derive(Debug)]
 struct Service {
     listener: TcpListener,
+    acceptor: Option<Arc<TlsAcceptor>>,
     limit_connections: Arc<Semaphore>,
     notify_shutdown: broadcast::Sender<()>,
     shutdown_complete_rx: mpsc::Receiver<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
-    sessions_states_tx: mpsc::Sender<(ControlPacket)>,
-    settings: Settings
+    sessions_states_tx: mpsc::Sender<ControlPacket>,
+    topic_tx: mpsc::Sender<Message>,
+    config: ConnectionSettings
 }
 
-pub async fn run(listener: TcpListener, settings: Settings, shutdown: impl Future) -> Result<()> {
+pub async fn run(listener: TcpListener, acceptor: Option<Arc<TlsAcceptor>>, config: ConnectionSettings, max_connections: usize, shutdown: impl Future) -> Result<()> {
     let (notify_shutdown, _) = broadcast::channel(1);
     let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel(1);
     let (sessions_states_tx, sessions_states_rx) = mpsc::channel(32);
+    let (topic_tx, topic_rx) = mpsc::channel(128);
 
     // Initialize the listener state
     let mut service = Service {
         listener,
-        limit_connections: Arc::new(Semaphore::new(settings.service.max_connections)),
+        acceptor,
+        limit_connections: Arc::new(Semaphore::new(max_connections)),
         notify_shutdown,
         shutdown_complete_rx,
         shutdown_complete_tx,
         sessions_states_tx,
-        settings
+        topic_tx,
+        config
     };
+
+    let mut topic_manager = TopicManager::new(topic_rx);
+    tokio::spawn(async move {
+        if let Err(err) =  topic_manager.run().await {
+            error!(cause = ?err, "topic manager failure");
+        }
+    });
 
     tokio::select! {
         res = service.listen() => {
@@ -47,6 +63,11 @@ pub async fn run(listener: TcpListener, settings: Settings, shutdown: impl Futur
                 error!(cause = %err, "failed to accept");
             }
         }
+/*        res = topic_manager.run() => {
+            if let Err(err) = res {
+                error!(cause = %err, "topic manager failure");
+            }
+        }*/
 /*        res = service.sessions_manager(sessions_states_rx) => {
             if let Err(err) = res {
                 error!(cause = %err, "failure in sessions manager");
@@ -89,26 +110,46 @@ impl Service {
     }*/
 
     async fn listen(&mut self) -> Result<()> {
-        info!("accepting inbound connections");
+        info!("{} accepting inbound connections", self.listener.local_addr().unwrap());
         loop {
             self.limit_connections.acquire().await.forget();
 
-            let socket = self.accept().await?;
+            let stream = self.accept().await?;
 
-            let mut handler = ConnectionHandler::new(
-                Framed::new(socket, MQTTCodec::new()),
-                self.limit_connections.clone(),
-                self.sessions_states_tx.clone(),
-                self.shutdown_complete_tx.clone(),
-                self.settings.connection,
-            );
+            if let Some(acceptor) = self.acceptor.as_ref() {
+                let stream = acceptor.accept(stream).await?;
+                let mut handler = ConnectionHandler::new(
+                    Framed::new(stream, MQTTCodec::new()),
+                    self.limit_connections.clone(),
+                    self.sessions_states_tx.clone(),
+                    self.shutdown_complete_tx.clone(),
+                    self.topic_tx.clone(),
+                    self.config,
+                );
 
-            let shutdown = Shutdown::new(self.notify_shutdown.subscribe());
-            tokio::spawn(async move {
-                if let Err(err) = handler.run(shutdown).await {
-                    error!(cause = ?err, "connection error");
-                }
-            });
+                let shutdown = Shutdown::new(self.notify_shutdown.subscribe());
+                tokio::spawn(async move {
+                    if let Err(err) = handler.run(shutdown).await {
+                        error!(cause = ?err, "connection error");
+                    }
+                });
+            } else {
+                let mut handler = ConnectionHandler::new(
+                    Framed::new(stream, MQTTCodec::new()),
+                    self.limit_connections.clone(),
+                    self.sessions_states_tx.clone(),
+                    self.shutdown_complete_tx.clone(),
+                    self.topic_tx.clone(),
+                    self.config,
+                );
+
+                let shutdown = Shutdown::new(self.notify_shutdown.subscribe());
+                tokio::spawn(async move {
+                    if let Err(err) = handler.run(shutdown).await {
+                        error!(cause = ?err, "connection error");
+                    }
+                });
+            }
         }
     }
 

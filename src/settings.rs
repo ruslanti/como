@@ -2,13 +2,24 @@ use config::{ConfigError, Config, File};
 use serde::Deserialize;
 use crate::mqtt::proto::types::QoS;
 use std::time::Duration;
+use std::rc::Rc;
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct ServiceSettings {
-    pub listen: String,
+    pub bind: String,
     pub port: u16,
-    pub max_connections: usize
+    pub max_connections: usize,
+    pub tls: Option<TlsSettings>
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct TlsSettings {
+    pub bind: String,
+    pub port: u16,
+    pub cert: String,
+    pub pass: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -34,9 +45,21 @@ pub struct Settings {
 impl Default for ServiceSettings {
     fn default() -> Self {
         ServiceSettings {
-            listen: String::from("127.0.0.1"),
+            bind: String::from("127.0.0.1"),
             port: 1883,
-            max_connections: 255
+            max_connections: 255,
+            tls: None
+        }
+    }
+}
+
+impl Default for TlsSettings {
+    fn default() -> Self {
+        TlsSettings {
+            bind: String::from("127.0.0.1"),
+            port: 8883,
+            cert: "".to_string(),
+            pass: "".to_string()
         }
     }
 }

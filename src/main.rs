@@ -6,8 +6,13 @@ use anyhow::Result;
 use mqtt::service;
 use tracing::Level;
 use tokio::net::TcpListener;
+use native_tls::Identity;
+use native_tls::TlsAcceptor;
 use crate::settings::Settings;
 use tracing::debug;
+use std::fs::File;
+use std::sync::Arc;
+use std::io::Read;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -20,6 +25,24 @@ async fn main() -> Result<()> {
     debug!("{:?}", settings);
 
     // Bind a TCP listener
-    let listener = TcpListener::bind(&format!("{}:{}", settings.service.listen, settings.service.port)).await?;
-    service::run(listener, settings, signal::ctrl_c()).await
+    let listener = TcpListener::bind(&format!("{}:{}", settings.service.bind, settings.service.port)).await?;
+    let srv = service::run(listener, None,settings.connection, settings.service.max_connections, signal::ctrl_c());
+
+    if let Some(tls) = settings.service.tls {
+        // Bind a TLS listener
+        let mut file = File::open(tls.cert)?;
+        let mut identity = vec![];
+        file.read_to_end(&mut identity)?;
+        let identity = Identity::from_pkcs12(&identity, tls.pass.as_str())?;
+
+        let acceptor = TlsAcceptor::new(identity)?;
+        let acceptor = Arc::new(acceptor.into());
+
+        let tls_listener = TcpListener::bind(&format!("{}:{}", tls.bind, tls.port)).await?;
+        let tls_srv = service::run(tls_listener, Some(acceptor),settings.connection, settings.service.max_connections, signal::ctrl_c());
+        let (res, tls_res) = tokio::join!( srv, tls_srv);
+        res.and(tls_res)
+    } else {
+        srv.await
+    }
 }

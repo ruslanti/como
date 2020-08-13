@@ -1,10 +1,11 @@
 use std::convert::TryInto;
 use anyhow::{anyhow, Result};
 use bytes::{BytesMut, Buf, BufMut};
-use crate::mqtt::proto::types::{ControlPacket, ConnAck};
-use crate::mqtt::proto::property::{PropertiesBuilder, Property, ConnAckProperties};
+use crate::mqtt::proto::types::{ControlPacket, ConnAck, MQTTCodec};
+use crate::mqtt::proto::property::*;
 use crate::mqtt::proto::decoder::decode_variable_integer;
 use crate::mqtt::proto::encoder::encode_utf8_string;
+use tokio_util::codec::Encoder;
 
 pub fn decode_connack(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     end_of_stream!(reader.remaining() < 3, "connack flags");
@@ -86,60 +87,19 @@ pub fn decode_connack_properties(reader: &mut BytesMut) -> Result<ConnAckPropert
     Ok(builder.connack())
 }
 
-pub fn encode_connack_properties(writer: &mut BytesMut, properties: ConnAckProperties) -> Result<()> {
-    if let Some(value) = properties.session_expire_interval {
-        end_of_stream!(writer.capacity() < 1, "session expire interval id");
-        writer.put_u8(Property::SessionExpireInterval as u8);
-        end_of_stream!(writer.capacity() < 4, "session expire interval");
-        writer.put_u32(value);
+impl Encoder<ConnAckProperties> for MQTTCodec {
+    type Error = anyhow::Error;
+
+    fn encode(&mut self, properties: ConnAckProperties, writer: &mut BytesMut) -> Result<(), Self::Error> {
+        encode_property_u32!(writer, SessionExpireInterval, properties.session_expire_interval);
+        encode_property_u16!(writer, ReceiveMaximum, properties.receive_maximum);
+        encode_property_u8!(writer, MaximumQoS, properties.maximum_qos.map(|q| q.into()));
+        encode_property_u8!(writer, RetainAvailable, properties.retain_available.map(|b| b as u8));
+        encode_property_u32!(writer, MaximumPacketSize, properties.maximum_packet_size);
+        encode_property_string!(writer, AssignedClientIdentifier, properties.assigned_client_identifier);
+        encode_property_u16!(writer, TopicAliasMaximum, properties.topic_alias_maximum);
+        encode_property_string!(writer, ReasonString, properties.reason_string);
+        encode_property_user_properties!(writer, UserProperty, properties.user_properties);
+        Ok(())
     }
-    if let Some(value) = properties.receive_maximum {
-        end_of_stream!(writer.capacity() < 1, "receive maximum id");
-        writer.put_u8(Property::ReceiveMaximum as u8);
-        end_of_stream!(writer.capacity() < 2, "receive maximum");
-        writer.put_u16(value);
-    }
-    if let Some(value) = properties.maximum_qos {
-        end_of_stream!(writer.capacity() < 1, "maximum qos id");
-        writer.put_u8(Property::MaximumQoS as u8);
-        end_of_stream!(writer.capacity() < 1, "maximum qos");
-        writer.put_u8(value.into());
-    }
-    if let Some(value) = properties.retain_available {
-        end_of_stream!(writer.capacity() < 1, "retain available id");
-        writer.put_u8(Property::RetainAvailable as u8);
-        end_of_stream!(writer.capacity() < 1, "retain available");
-        writer.put_u8(value as u8);
-    }
-    if let Some(value) = properties.maximum_packet_size {
-        end_of_stream!(writer.capacity() < 1, "maximum packet size id");
-        writer.put_u8(Property::MaximumPacketSize as u8);
-        end_of_stream!(writer.capacity() < 4, "maximum packet size");
-        writer.put_u32(value);
-    }
-    if let Some(value) = properties.assigned_client_identifier {
-        end_of_stream!(writer.capacity() < 1, "assigned client identifier id");
-        writer.put_u8(Property::AssignedClientIdentifier as u8);
-        end_of_stream!(writer.capacity() < value.len(), "assigned client identifier");
-        encode_utf8_string(writer, value)?;
-    }
-    if let Some(value) = properties.topic_alias_maximum {
-        end_of_stream!(writer.capacity() < 1, "topic alias maximum id");
-        writer.put_u8(Property::TopicAliasMaximum as u8);
-        end_of_stream!(writer.capacity() < 2, "topic alias maximum");
-        writer.put_u16(value);
-    }
-    if let Some(value) = properties.reason_string {
-        end_of_stream!(writer.capacity() < 1, "reason string id");
-        writer.put_u8(Property::ReasonString as u8);
-        end_of_stream!(writer.capacity() < value.len(), "reason string");
-        encode_utf8_string(writer, value)?;
-    }
-    for (first, second) in properties.user_properties {
-        end_of_stream!(writer.capacity() < 1, "user properties");
-        writer.put_u8(Property::UserProperty as u8);
-        encode_utf8_string(writer, first)?;
-        encode_utf8_string(writer, second)?;
-    }
-    Ok(())
 }
