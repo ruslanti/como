@@ -102,10 +102,17 @@ fn decode_connect_properties(reader: &mut BytesMut) -> Result<ConnectProperties>
                 builder = builder.request_problem_information(reader.get_u8())?;
             },
             Property::UserProperty => {
-                unimplemented!()
+                let user_property = (decode_utf8_string(reader)?, decode_utf8_string(reader)?);
+                if let (Some(key), Some(value)) = user_property {
+                    builder = builder.user_properties((key, value));
+                }
             }
             Property::AuthenticationMethod => {
-                unimplemented!()
+                if let Some(authentication_method) = decode_utf8_string(reader)? {
+                    builder = builder.authentication_method(authentication_method)?
+                } else {
+                    return Err(anyhow!("missing authentication method"))
+                }
             }
             _ => return Err(anyhow!("unknown connect property: {:x}", id))
         }

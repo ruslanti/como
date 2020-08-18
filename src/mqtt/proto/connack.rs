@@ -3,7 +3,7 @@ use anyhow::{anyhow, Result};
 use bytes::{BytesMut, Buf, BufMut};
 use crate::mqtt::proto::types::{ControlPacket, ConnAck, MQTTCodec};
 use crate::mqtt::proto::property::*;
-use crate::mqtt::proto::decoder::decode_variable_integer;
+use crate::mqtt::proto::decoder::{decode_variable_integer, decode_utf8_string};
 use crate::mqtt::proto::encoder::encode_utf8_string;
 use tokio_util::codec::Encoder;
 
@@ -54,10 +54,13 @@ pub fn decode_connack_properties(reader: &mut BytesMut) -> Result<ConnAckPropert
                 builder = builder.topic_alias_maximum(reader.get_u16())?;
             }
             Property::ReasonString => {
-                unimplemented!()
+                builder = builder.response_topic(decode_utf8_string(reader)?)?;
             },
             Property::UserProperty => {
-                unimplemented!()
+                let user_property = (decode_utf8_string(reader)?, decode_utf8_string(reader)?);
+                if let (Some(key), Some(value)) = user_property {
+                    builder = builder.user_properties((key, value));
+                }
             },
             Property::WildcardSubscriptionAvailable => {
                 end_of_stream!(reader.remaining() < 1, "wildcard subscription available");

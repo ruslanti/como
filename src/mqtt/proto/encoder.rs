@@ -1,10 +1,13 @@
-use crate::mqtt::proto::types::{MQTTCodec, ControlPacket, PacketType, Connect, ConnAck, Publish, PubResp, Disconnect};
+use crate::mqtt::proto::types::{MQTTCodec, ControlPacket, PacketType, Connect, ConnAck, Publish, PubResp, Disconnect, SubAck};
 use tokio_util::codec::Encoder;
 use bytes::{BytesMut, BufMut, Bytes};
 use anyhow::{anyhow, Result, Context};
 use crate::mqtt::proto::property::{PropertiesLength};
 use crate::mqtt::proto::pubres::encode_pubres_properties;
 use crate::mqtt::proto::disconnect::encode_disconnect_properties;
+use crate::mqtt::proto::subscribe::encode_suback_properties;
+use std::ops::Deref;
+use tracing::{trace, debug, error, instrument};
 
 impl Encoder<Connect> for MQTTCodec {
     type Error = anyhow::Error;
@@ -78,10 +81,33 @@ impl Encoder<Disconnect> for MQTTCodec {
     }
 }
 
+impl Encoder<SubAck> for MQTTCodec {
+    type Error = anyhow::Error;
+
+    fn encode(&mut self, msg: SubAck, writer: &mut BytesMut) -> Result<(), Self::Error> {
+        let properties_length = msg.properties.len(); // properties
+        let properties_length_size= encoded_variable_integer_len(properties_length); // properties length
+        let remaining_length = 2 + properties_length_size + properties_length + msg.reason_codes.len();
+        let remaining_length_size = encoded_variable_integer_len(remaining_length); // remaining length size
+        writer.reserve(1 + remaining_length_size + remaining_length);
+
+        writer.put_u8(PacketType::SUBACK.into()); // packet type
+        encode_variable_integer(writer, remaining_length)?; // remaining length
+        writer.put_u16(msg.packet_identifier.into());
+        encode_variable_integer(writer, properties_length)?; // properties length
+        encode_suback_properties(writer, msg.properties)?;
+        for reason_code in msg.reason_codes.into_iter() {
+            writer.put_u8(reason_code.into())
+        }
+        Ok(())
+    }
+}
+
 impl Encoder<ControlPacket> for MQTTCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, packet: ControlPacket, writer: &mut BytesMut) -> Result<(), Self::Error> {
+        trace!("encode {:?}", packet);
         match packet {
             ControlPacket::Connect(connect) => self.encode(connect, writer)?,
             ControlPacket::ConnAck(connack) => self.encode(connack, writer)?,
@@ -90,10 +116,10 @@ impl Encoder<ControlPacket> for MQTTCodec {
             ControlPacket::PubRec(response) => self.encode(response, writer)?,
             ControlPacket::PubRel(response) => self.encode(response, writer)?,
             ControlPacket::PubComp(response) => self.encode(response, writer)?,
-            ControlPacket::Subscribe => unimplemented!(),
-            ControlPacket::SubAck => unimplemented!(),
-            ControlPacket::UnSubscribe => unimplemented!(),
-            ControlPacket::UnSubAck => unimplemented!(),
+            ControlPacket::Subscribe(_subscribe) => unimplemented!(),
+            ControlPacket::SubAck(response) => self.encode(response, writer)?,
+            ControlPacket::UnSubscribe(_unsubscribe) => unimplemented!(),
+            ControlPacket::UnSubAck(response) => self.encode(response, writer)?,
             ControlPacket::PingReq => {
                 writer.reserve(2);
                 writer.put_u8(PacketType::PINGREQ.into()); // packet type
@@ -105,7 +131,7 @@ impl Encoder<ControlPacket> for MQTTCodec {
                 writer.put_u8(0); // remaining length
             },
             ControlPacket::Disconnect(disconnect) => self.encode(disconnect, writer)?,
-            ControlPacket::Auth => unimplemented!(),
+            ControlPacket::Auth(auth) => unimplemented!(),
         };
         Ok(())
     }

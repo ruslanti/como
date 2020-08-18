@@ -1,10 +1,12 @@
 use core::fmt;
 use std::convert::{TryFrom, TryInto};
 use anyhow::anyhow;
-use crate::mqtt::proto::property::{WillProperties, ConnectProperties, ConnAckProperties, PublishProperties, DisconnectProperties, PubResProperties};
+use crate::mqtt::proto::property::{WillProperties, ConnectProperties, ConnAckProperties, PublishProperties, DisconnectProperties, PubResProperties, SubscribeProperties, SubAckProperties, UnSubscribeProperties, AuthProperties};
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, de};
 use serde::de::Visitor;
+
+pub type MqttString = Bytes;
 
 #[macro_use]
 macro_rules! end_of_stream {
@@ -64,6 +66,36 @@ impl<'de> Visitor<'de> for QoSVisitor {
 impl<'de> Deserialize<'de> for QoS {
     fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error> where D: Deserializer<'de> {
         deserializer.deserialize_u8(QoSVisitor)
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+pub enum Retain {
+    SendAtTime,
+    SendAtSubscribe,
+    DoNotSend
+}
+
+impl TryFrom<u8> for Retain {
+    type Error = anyhow::Error;
+
+    fn try_from(v: u8) -> anyhow::Result<Self> {
+        match v {
+            0 => Ok(Retain::SendAtTime),
+            1 => Ok(Retain::SendAtSubscribe),
+            2 => Ok(Retain::DoNotSend),
+            _ => Err(anyhow!("malformed Retain: {}", v)),
+        }
+    }
+}
+
+impl Into<u8> for Retain {
+    fn into(self) -> u8 {
+        match self {
+            Retain::SendAtTime  => 0,
+            Retain::SendAtSubscribe => 1,
+            Retain::DoNotSend => 2,
+        }
     }
 }
 
@@ -137,6 +169,7 @@ impl Into<u8> for PacketType {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReasonCode {
     Success                     = 0x00,
+    DisconnectWithWill          = 0x04,
     UnspecifiedError            = 0x80,
     MalformedPacket             = 0x81,
     ProtocolError               = 0x82,
@@ -170,6 +203,7 @@ impl TryFrom<u8> for ReasonCode {
     fn try_from(b: u8) -> Result<Self, Self::Error> {
         match b {
             0x00 => Ok(ReasonCode::Success),
+            0x04 => Ok(ReasonCode::DisconnectWithWill),
             0x80 => Ok(ReasonCode::UnspecifiedError),
             0x81 => Ok(ReasonCode::MalformedPacket),
             0x82 => Ok(ReasonCode::ProtocolError),
@@ -204,6 +238,7 @@ impl Into<u8> for ReasonCode {
     fn into(self) -> u8 {
         match self {
             ReasonCode::Success => 0x00,
+            ReasonCode::DisconnectWithWill => 0x04,
             ReasonCode::UnspecifiedError => 0x80,
             ReasonCode::MalformedPacket => 0x81,
             ReasonCode::ProtocolError => 0x82,
@@ -238,7 +273,7 @@ pub struct Will {
     pub qos: QoS,
     pub retain: bool,
     pub properties: WillProperties,
-    pub topic: Option<Bytes>,
+    pub topic: Option<MqttString>,
     pub payload: Bytes
 }
 
@@ -247,9 +282,9 @@ pub struct Connect {
     pub clean_start_flag: bool,
     pub keep_alive: u16,
     pub properties: ConnectProperties,
-    pub client_identifier: Option<Bytes>,
-    pub username: Option<Bytes>,
-    pub password: Option<Bytes>,
+    pub client_identifier: Option<MqttString>,
+    pub username: Option<MqttString>,
+    pub password: Option<MqttString>,
     pub will: Option<Will>
 }
 
@@ -265,10 +300,10 @@ pub struct Publish {
     pub dup: bool,
     pub qos: QoS,
     pub retain: bool,
-    pub topic_name: Bytes,
+    pub topic_name: MqttString,
     pub packet_identifier: Option<u16>,
     pub properties: PublishProperties,
-    pub payload: Bytes
+    pub payload: MqttString
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -286,6 +321,41 @@ pub struct Disconnect {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+pub struct SubOption {
+    pub qos: QoS,
+    pub nl: bool,
+    pub rap: bool,
+    pub retain: Retain
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct Subscribe {
+    pub packet_identifier: u16,
+    pub properties: SubscribeProperties,
+    pub topic_filters: Vec<(MqttString, SubOption)>
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct SubAck {
+    pub packet_identifier: u16,
+    pub properties: SubAckProperties,
+    pub reason_codes: Vec<ReasonCode>
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct UnSubscribe {
+    pub packet_identifier: u16,
+    pub properties: UnSubscribeProperties,
+    pub topic_filters: Vec<MqttString>
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct Auth {
+    pub reason_code: ReasonCode,
+    pub properties: AuthProperties,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 pub enum ControlPacket {
     Connect(Connect),
     ConnAck(ConnAck),
@@ -294,14 +364,14 @@ pub enum ControlPacket {
     PubRec(PubResp),
     PubRel(PubResp),
     PubComp(PubResp),
-    Subscribe,
-    SubAck,
-    UnSubscribe,
-    UnSubAck,
+    Subscribe(Subscribe),
+    SubAck(SubAck),
+    UnSubscribe(UnSubscribe),
+    UnSubAck(SubAck),
     PingReq,
     PingResp,
     Disconnect(Disconnect),
-    Auth
+    Auth(Auth)
 }
 
 pub enum PacketPart {

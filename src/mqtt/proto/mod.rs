@@ -9,5 +9,8 @@ mod connack;
 mod publish;
 mod pubres;
 mod disconnect;
+mod subscribe;
+mod unsubscribe;
+mod auth;
 mod will;
 

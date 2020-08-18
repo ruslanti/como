@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result, Context};
 use tracing::{trace, debug, error, instrument};
-use crate::mqtt::proto::types::{ControlPacket, ReasonCode, MQTTCodec, Will, Connect, Publish, ConnAck, QoS, PubResp, Disconnect, PacketType};
-use crate::mqtt::proto::property::{ConnAckProperties, DisconnectProperties, ConnectProperties, PubResProperties};
+use crate::mqtt::proto::types::{ControlPacket, ReasonCode, MQTTCodec, Will, Connect, Publish, ConnAck, QoS, PubResp, Disconnect, PacketType, SubAck, Auth};
+use crate::mqtt::proto::property::{ConnAckProperties, DisconnectProperties, ConnectProperties, PubResProperties, SubAckProperties};
 use crate::settings::ConnectionSettings;
 use bytes::Bytes;
 use uuid::Uuid;
@@ -42,6 +42,7 @@ struct ExactlyOnceFlow {
 #[derive(Debug)]
 pub(crate) enum State {
     Idle,
+    Auth,
     Established{
         client_identifier: Bytes,
         keep_alive: u16,
@@ -260,9 +261,14 @@ impl<S> ConnectionHandler<S> where S: AsyncRead + AsyncWrite + Unpin {
     async fn process_packet(&mut self, packet: ControlPacket) -> Result<()> {
         trace!("recv {:?}", packet);
         match (&self.state, packet) {
-            (State::Idle{..}, ControlPacket::Connect(connect)) => self.process_connect(connect).await,
-            (State::Idle{..}, packet) => {
+            (State::Idle, ControlPacket::Connect(connect)) => self.process_connect(connect).await,
+            (State::Idle, packet) => {
                 error!("unacceptable packet {:?} in idle state", packet);
+                Err(anyhow!("unacceptable event").context(""))
+            },
+            (State::Auth, ControlPacket::Auth(auth)) => self.process_auth(auth).await,
+            (State::Auth, packet) => {
+                error!("expected Auth, found {:?} in auth state", packet);
                 Err(anyhow!("unacceptable event").context(""))
             },
             (State::Established{..}, ControlPacket::Publish(publish)) => self.process_publish(publish).await,
@@ -274,8 +280,34 @@ impl<S> ConnectionHandler<S> where S: AsyncRead + AsyncWrite + Unpin {
                 Ok(())
             },
             (State::Established{..}, ControlPacket::PingReq) => {
-                debug!("ping req");
+                debug!("ping req/res");
                 self.stream.send(ControlPacket::PingResp).await?;
+                Ok(())
+            },
+            (State::Established{..}, ControlPacket::Subscribe(subscribe)) => {
+                debug!("subscribe topics: {:?}", subscribe.topic_filters);
+                let reason_codes = subscribe.topic_filters.iter().map(|_t| ReasonCode::Success).collect();
+
+                let suback = ControlPacket::SubAck(SubAck{
+                    packet_identifier: subscribe.packet_identifier,
+                    properties: SubAckProperties { reason_string: None, user_properties: vec![] },
+                    reason_codes
+                });
+                trace!("send {:?}", suback);
+                self.stream.send(suback).await?;
+                Ok(())
+            },
+            (State::Established{..}, ControlPacket::UnSubscribe(unsubscribe)) => {
+                debug!("unsubscribe topics: {:?}", unsubscribe.topic_filters);
+                let reason_codes = unsubscribe.topic_filters.iter().map(|_t| ReasonCode::Success).collect();
+
+                let suback = ControlPacket::UnSubAck(SubAck{
+                    packet_identifier: unsubscribe.packet_identifier,
+                    properties: SubAckProperties { reason_string: None, user_properties: vec![] },
+                    reason_codes
+                });
+                trace!("send {:?}", suback);
+                self.stream.send(suback).await?;
                 Ok(())
             },
             (State::Established{..}, packet) => {
@@ -284,6 +316,10 @@ impl<S> ConnectionHandler<S> where S: AsyncRead + AsyncWrite + Unpin {
             },
             _ => unreachable!()
         }
+    }
+
+    async fn process_auth(&mut self, _msg: Auth) -> Result<()> {
+        Ok(())
     }
 
     #[instrument(skip(self))]

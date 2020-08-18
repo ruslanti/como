@@ -26,7 +26,10 @@ fn decode_disconnect_properties(reader: &mut BytesMut) -> Result<DisconnectPrope
                 builder = builder.session_expire_interval(reader.get_u32())?;
             },
             Property::UserProperty => {
-                unimplemented!()
+                let user_property = (decode_utf8_string(reader)?, decode_utf8_string(reader)?);
+                if let (Some(key), Some(value)) = user_property {
+                    builder = builder.user_properties((key, value));
+                }
             }
             Property::ReasonString => {
                 builder = builder.response_topic(decode_utf8_string(reader)?)?;

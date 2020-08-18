@@ -51,7 +51,10 @@ pub fn decode_publish_properties(reader: &mut BytesMut) -> Result<PublishPropert
                 unimplemented!()
             },
             Property::UserProperty => {
-                unimplemented!()
+                let user_property = (decode_utf8_string(reader)?, decode_utf8_string(reader)?);
+                if let (Some(key), Some(value)) = user_property {
+                    builder = builder.user_properties((key, value));
+                }
             }
             Property::TopicAlias => {
                 end_of_stream!(reader.remaining() < 2, "topic alias");
@@ -59,9 +62,9 @@ pub fn decode_publish_properties(reader: &mut BytesMut) -> Result<PublishPropert
             },
             Property::SubscriptionIdentifier => {
                 end_of_stream!(reader.remaining() < 4, "subscription identifier");
-                builder = builder.subscription_identifier(reader.get_u32())?;
+                builder = builder.subscription_identifier(decode_variable_integer(reader)?)?;
             }
-            _ => return Err(anyhow!("unknown will property: {:x}", id))
+            _ => return Err(anyhow!("unknown publish property: {:x}", id))
         }
     }
     Ok(builder.publish())

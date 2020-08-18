@@ -1,8 +1,9 @@
 use std::convert::{TryFrom, TryInto};
 use anyhow::{anyhow, Result};
-use crate::mqtt::proto::types::QoS;
+use crate::mqtt::proto::types::{QoS, Subscribe};
 use bytes::Bytes;
 use std::mem::size_of_val;
+use crate::mqtt::proto::types::MqttString;
 
 macro_rules! check_and_set {
     ($self:ident, $property:ident, $value: expr) => {
@@ -163,10 +164,10 @@ pub struct WillProperties {
     pub will_delay_interval: u32,
     pub payload_format_indicator: bool,
     pub message_expire_interval: Option<u32>,
-    pub content_type: Option<Bytes>,
-    pub response_topic: Option<Bytes>,
+    pub content_type: Option<MqttString>,
+    pub response_topic: Option<MqttString>,
     pub correlation_data: Option<Bytes>,
-    pub user_properties: Vec<(Bytes, Bytes)>,
+    pub user_properties: Vec<(MqttString, MqttString)>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -177,8 +178,8 @@ pub struct ConnectProperties {
     pub topic_alias_maximum: u16,
     pub request_response_information: bool,
     pub request_problem_information: bool,
-    pub user_properties: Vec<(Bytes, Bytes)>,
-    pub authentication_method: Option<Bytes>
+    pub user_properties: Vec<(MqttString, MqttString)>,
+    pub authentication_method: Option<MqttString>
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -188,17 +189,17 @@ pub struct ConnAckProperties {
     pub maximum_qos: Option<QoS>,
     pub retain_available: Option<bool>,
     pub maximum_packet_size: Option<u32>,
-    pub assigned_client_identifier: Option<Bytes>,
+    pub assigned_client_identifier: Option<MqttString>,
     pub topic_alias_maximum: Option<u16>,
-    pub reason_string: Option<Bytes>,
-    pub user_properties: Vec<(Bytes, Bytes)>,
+    pub reason_string: Option<MqttString>,
+    pub user_properties: Vec<(MqttString, MqttString)>,
     pub wildcard_subscription_available: Option<bool>,
     pub subscription_identifier_available: Option<bool>,
     pub shared_subscription_available: Option<bool>,
     pub server_keep_alive: Option<u16>,
-    pub response_information: Option<Bytes>,
-    pub server_reference: Option<Bytes>,
-    pub authentication_method: Option<Bytes>,
+    pub response_information: Option<MqttString>,
+    pub server_reference: Option<MqttString>,
+    pub authentication_method: Option<MqttString>,
     pub authentication_data: Option<Bytes>,
 }
 
@@ -207,26 +208,51 @@ pub struct PublishProperties {
     pub payload_format_indicator: Option<bool>,
     pub message_expire_interval: Option<u32>,
     pub topic_alias: Option<u16>,
-    pub response_topic: Option<Bytes>,
+    pub response_topic: Option<MqttString>,
     pub correlation_data: Option<Bytes>,
-    pub user_properties: Vec<(Bytes, Bytes)>,
+    pub user_properties: Vec<(MqttString, MqttString)>,
     pub subscription_identifier: Option<u32>,
-    pub content_type: Option<Bytes>,
+    pub content_type: Option<MqttString>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct PubResProperties {
-    pub reason_string: Option<Bytes>,
-    pub user_properties: Vec<(Bytes, Bytes)>,
+    pub reason_string: Option<MqttString>,
+    pub user_properties: Vec<(MqttString, MqttString)>,
 }
 
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct DisconnectProperties {
     pub session_expire_interval: Option<u32>,
-    pub reason_string: Option<Bytes>,
-    pub user_properties: Vec<(Bytes, Bytes)>,
-    pub server_reference: Option<Bytes>
+    pub reason_string: Option<MqttString>,
+    pub user_properties: Vec<(MqttString, MqttString)>,
+    pub server_reference: Option<MqttString>
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct SubscribeProperties {
+    pub subscription_identifier: Option<u32>,
+    pub user_properties: Vec<(MqttString, MqttString)>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct SubAckProperties {
+    pub reason_string: Option<MqttString>,
+    pub user_properties: Vec<(MqttString, MqttString)>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct UnSubscribeProperties {
+    pub user_properties: Vec<(MqttString, MqttString)>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct AuthProperties {
+    pub authentication_method: Option<MqttString>,
+    pub authentication_data: Option<Bytes>,
+    pub reason_string: Option<MqttString>,
+    pub user_properties: Vec<(MqttString, MqttString)>,
 }
 
 impl PropertiesLength for ConnAckProperties {
@@ -262,30 +288,38 @@ impl PropertiesLength for DisconnectProperties {
     }
 }
 
+impl PropertiesLength for SubAckProperties {
+    fn len(&self) -> usize {
+        let mut len = check_size_of_string!(self, reason_string);
+        len += self.user_properties.iter().map(|(x, y)| 5 + x.len() + y.len()).sum::<usize>();
+        len
+    }
+}
+
 pub struct PropertiesBuilder {
     payload_format_indicator: Option<bool>,
     message_expire_interval: Option<u32>,
-    content_type: Option<Bytes>,
-    response_topic: Option<Bytes>,
+    content_type: Option<MqttString>,
+    response_topic: Option<MqttString>,
     correlation_data: Option<Bytes>,
     subscription_identifier: Option<u32>,
     session_expire_interval: Option<u32>,
-    assigned_client_identifier: Option<Bytes>,
+    assigned_client_identifier: Option<MqttString>,
     server_keep_alive: Option<u16>,
-    authentication_method: Option<Bytes>,
+    authentication_method: Option<MqttString>,
     authentication_data: Option<Bytes>,
     request_problem_information: Option<bool>,
     will_delay_interval: Option<u32>,
     request_response_information: Option<bool>,
-    response_information: Option<Bytes>,
-    server_reference: Option<Bytes>,
-    reason_string: Option<Bytes>,
+    response_information: Option<MqttString>,
+    server_reference: Option<MqttString>,
+    reason_string: Option<MqttString>,
     receive_maximum: Option<u16>,
     topic_alias_maximum: Option<u16>,
     topic_alias: Option<u16>,
     maximum_qos: Option<QoS>,
     retain_available: Option<bool>,
-    user_properties: Vec<(Bytes, Bytes)>,
+    user_properties: Vec<(MqttString, MqttString)>,
     maximum_packet_size: Option<u32>,
     wildcard_subscription_available: Option<bool>,
     subscription_identifier_available: Option<bool>,
@@ -343,11 +377,11 @@ impl PropertiesBuilder {
     pub fn request_problem_information(mut self, value: u8) -> Result<Self> {
         check_and_set!(self, request_problem_information, value != 0)
     }
-    pub fn user_properties(mut self, value: (Bytes, Bytes)) -> Self {
+    pub fn user_properties(mut self, value: (MqttString, MqttString)) -> Self {
         self.user_properties.push(value);
         self
     }
-    pub fn authentication_method(mut self, value: Bytes) -> Result<Self> {
+    pub fn authentication_method(mut self, value: MqttString) -> Result<Self> {
         check_and_set!(self, authentication_method, value)
     }
     pub fn will_delay_interval(mut self, value: u32) -> Result<Self> {
@@ -359,19 +393,19 @@ impl PropertiesBuilder {
     pub fn message_expire_interval(mut self, value: u32) -> Result<Self> {
         check_and_set!(self, message_expire_interval, value)
     }
-    pub fn content_type(mut self, value: Option<Bytes>) -> Result<Self> {
+    pub fn content_type(mut self, value: Option<MqttString>) -> Result<Self> {
         if let Some(v) = value {
             check_and_set!(self, content_type, v)
         } else { Err(anyhow!("empty content type")) }
     }
-    pub fn response_topic(mut self, value: Option<Bytes>) -> Result<Self> {
+    pub fn response_topic(mut self, value: Option<MqttString>) -> Result<Self> {
         if let Some(v) = value {
             check_and_set!(self, response_topic, v)
         } else {
             Err(anyhow!("empty response topic"))
         }
     }
-    pub fn server_reference(mut self, value: Option<Bytes>) -> Result<Self> {
+    pub fn server_reference(mut self, value: Option<MqttString>) -> Result<Self> {
         if let Some(v) = value {
             check_and_set!(self, server_reference, v)
         } else {
@@ -479,6 +513,28 @@ impl PropertiesBuilder {
             reason_string: self.reason_string,
             user_properties: self.user_properties,
             server_reference: self.server_reference
+        }
+    }
+
+    pub fn subscribe(self) -> SubscribeProperties {
+        SubscribeProperties {
+            subscription_identifier: self.subscription_identifier,
+            user_properties: self.user_properties
+        }
+    }
+
+    pub fn unsubscribe(self) -> UnSubscribeProperties {
+        UnSubscribeProperties {
+            user_properties: self.user_properties
+        }
+    }
+
+    pub fn auth(self) -> AuthProperties {
+        AuthProperties {
+            authentication_method: self.authentication_method,
+            authentication_data: self.authentication_data,
+            reason_string: self.reason_string,
+            user_properties: self.user_properties
         }
     }
 }

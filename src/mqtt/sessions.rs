@@ -24,7 +24,7 @@ struct Session {
 pub enum Command {
     Connect(String),
     Subscribe,
-    Unsubscribe,
+    UnSubscribe,
     Disconnect
 }
 
