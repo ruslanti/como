@@ -1,8 +1,6 @@
 use config::{ConfigError, Config, File};
 use serde::Deserialize;
 use crate::mqtt::proto::types::QoS;
-use std::time::Duration;
-use std::rc::Rc;
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]

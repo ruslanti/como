@@ -8,15 +8,12 @@ use crate::mqtt::connection::ConnectionHandler;
 use crate::mqtt::sessions::SessionManager;
 use crate::mqtt::shutdown::Shutdown;
 use tracing::{trace, debug, error, info, instrument};
-use crate::settings::{Settings, ConnectionSettings};
+use crate::settings::ConnectionSettings;
 use tokio_util::codec::Framed;
 use tokio::stream::StreamExt;
-use futures::sink::SinkExt;
 use crate::mqtt::proto::types::{MQTTCodec, ControlPacket};
 use crate::mqtt::topic::{Message, TopicManager};
 use tokio_native_tls::TlsAcceptor;
-use tokio::io::{AsyncRead, AsyncWrite};
-use std::borrow::Borrow;
 
 #[derive(Debug)]
 struct Service {

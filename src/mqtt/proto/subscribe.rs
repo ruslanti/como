@@ -1,8 +1,8 @@
 use std::convert::TryInto;
 use anyhow::{anyhow, Result};
 use bytes::{Buf, BytesMut, BufMut};
-use crate::mqtt::proto::types::{ControlPacket, QoS, Publish, Subscribe, SubOption, Retain, SubAck, MqttString};
-use crate::mqtt::proto::property::{PropertiesBuilder, Property, PublishProperties, SubscribeProperties, SubAckProperties};
+use crate::mqtt::proto::types::{ControlPacket, QoS, Subscribe, SubOption, Retain, MqttString};
+use crate::mqtt::proto::property::{PropertiesBuilder, Property, SubscribeProperties, SubAckProperties};
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::mqtt::proto::encoder::encode_utf8_string;
 

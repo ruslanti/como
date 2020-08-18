@@ -6,7 +6,6 @@ use crate::mqtt::proto::property::{PropertiesLength};
 use crate::mqtt::proto::pubres::encode_pubres_properties;
 use crate::mqtt::proto::disconnect::encode_disconnect_properties;
 use crate::mqtt::proto::subscribe::encode_suback_properties;
-use std::ops::Deref;
 use tracing::{trace, debug, error, instrument};
 
 impl Encoder<Connect> for MQTTCodec {

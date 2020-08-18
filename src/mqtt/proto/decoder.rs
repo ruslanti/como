@@ -1,5 +1,5 @@
 use std::convert::TryInto;
-use bytes::{BytesMut, Buf, Bytes};
+use bytes::{BytesMut, Buf};
 use tokio_util::codec::Decoder;
 use tracing::{trace, instrument};
 use anyhow::{anyhow, Result, Context};

@@ -1,10 +1,9 @@
 use std::convert::TryInto;
 use anyhow::{anyhow, Result};
-use bytes::{Buf, BytesMut, BufMut};
-use crate::mqtt::proto::types::{ControlPacket, QoS, Publish, Subscribe, SubOption, Retain, SubAck, MqttString, UnSubscribe};
-use crate::mqtt::proto::property::{PropertiesBuilder, Property, PublishProperties, SubscribeProperties, SubAckProperties, UnSubscribeProperties};
+use bytes::{Buf, BytesMut};
+use crate::mqtt::proto::types::{ControlPacket, MqttString, UnSubscribe};
+use crate::mqtt::proto::property::{PropertiesBuilder, Property, UnSubscribeProperties};
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
-use crate::mqtt::proto::encoder::encode_utf8_string;
 
 pub fn decode_unsubscribe(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     end_of_stream!(reader.remaining() < 2, "unsubscribe packet identifier");

@@ -1,6 +1,6 @@
 use std::convert::{TryFrom, TryInto};
 use anyhow::{anyhow, Result};
-use crate::mqtt::proto::types::{QoS, Subscribe};
+use crate::mqtt::proto::types::QoS;
 use bytes::Bytes;
 use std::mem::size_of_val;
 use crate::mqtt::proto::types::MqttString;

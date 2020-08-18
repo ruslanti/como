@@ -3,7 +3,7 @@ use bytes::{BytesMut, Buf, BufMut};
 use crate::mqtt::proto::types::{ControlPacket, ReasonCode, PubResp, PacketType};
 use std::convert::TryInto;
 use crate::mqtt::proto::decoder::{decode_variable_integer, decode_utf8_string};
-use crate::mqtt::proto::property::{PropertiesBuilder, Property, PubResProperties, DisconnectProperties};
+use crate::mqtt::proto::property::{PropertiesBuilder, Property, PubResProperties};
 use crate::mqtt::proto::encoder::encode_utf8_string;
 use tracing::{trace, debug, error, instrument};
 

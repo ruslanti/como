@@ -9,16 +9,14 @@ use tokio_util::codec::Framed;
 //use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use crate::mqtt::shutdown::Shutdown;
-use tokio::net::TcpStream;
-use tokio::sync::{broadcast, mpsc, Semaphore, oneshot};
+use tokio::sync::{mpsc, Semaphore, oneshot};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use std::ops::Add;
-use crate::mqtt::proto::types::ControlPacket::PubComp;
 use std::collections::BTreeMap;
 use crate::mqtt::topic::Message;
-use tokio::stream::{Stream, StreamExt};
+use tokio::stream::StreamExt;
 use futures::SinkExt;
 
 #[derive(Debug)]
