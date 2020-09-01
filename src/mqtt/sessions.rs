@@ -1,18 +1,15 @@
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+
+use anyhow::Result;
 use tokio::stream::StreamExt;
-use tracing::{trace, debug, error, instrument};
-use anyhow::{anyhow, Result, Context};
+use tokio::sync::mpsc;
+use tracing::trace;
+
 use crate::mqtt::shutdown::Shutdown;
-use crate::mqtt::proto::types::{ControlPacket, Connect, ConnAck, ReasonCode};
-use uuid::Uuid;
-use bytes::Bytes;
-use crate::mqtt::proto::property::ConnAckProperties;
-use crate::mqtt::connection::State;
 use crate::settings::ConnectionSettings;
 
 pub struct SessionManager {
-    sessions_states_rx: mpsc::Receiver<(Command)>,
+    sessions_states_rx: mpsc::Receiver<Command>,
     sessions: HashMap<String, Session>,
     config: ConnectionSettings
 }
@@ -31,7 +28,7 @@ pub enum Command {
 
 impl SessionManager {
 
-    pub fn new(config: ConnectionSettings, sessions_states_rx: mpsc::Receiver<(Command)>) -> Self {
+    pub fn new(config: ConnectionSettings, sessions_states_rx: mpsc::Receiver<Command>) -> Self {
         SessionManager {
             sessions_states_rx,
             sessions: HashMap::new(),

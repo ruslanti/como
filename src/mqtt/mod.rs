@@ -1,4 +1,4 @@
-mod topic;
+pub mod topic;
 mod sessions;
 pub mod proto;
 pub mod service;

@@ -1,17 +1,19 @@
 use std::convert::TryInto;
-use bytes::{BytesMut, Buf};
+
+use anyhow::{anyhow, Context, Result};
+use bytes::{Buf, BytesMut};
 use tokio_util::codec::Decoder;
-use tracing::{trace, instrument};
-use anyhow::{anyhow, Result, Context};
-use crate::mqtt::proto::types::{MQTTCodec, ControlPacket, PacketPart, PacketType, MqttString};
-use crate::mqtt::proto::connect::decode_connect;
+use tracing::{instrument, trace};
+
+use crate::mqtt::proto::auth::decode_auth;
 use crate::mqtt::proto::connack::decode_connack;
-use crate::mqtt::proto::publish::decode_publish;
+use crate::mqtt::proto::connect::decode_connect;
 use crate::mqtt::proto::disconnect::decode_disconnect;
+use crate::mqtt::proto::publish::decode_publish;
 use crate::mqtt::proto::pubres::{decode_puback, decode_pubrec, decode_pubrel};
 use crate::mqtt::proto::subscribe::decode_subscribe;
+use crate::mqtt::proto::types::{ControlPacket, MQTTCodec, MqttString, PacketPart, PacketType};
 use crate::mqtt::proto::unsubscribe::decode_unsubscribe;
-use crate::mqtt::proto::auth::decode_auth;
 
 const MIN_FIXED_HEADER_LEN: usize = 2;
 

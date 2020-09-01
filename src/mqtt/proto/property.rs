@@ -1,9 +1,11 @@
 use std::convert::{TryFrom, TryInto};
-use anyhow::{anyhow, Result};
-use crate::mqtt::proto::types::QoS;
-use bytes::Bytes;
 use std::mem::size_of_val;
+
+use anyhow::{anyhow, Result};
+use bytes::Bytes;
+
 use crate::mqtt::proto::types::MqttString;
+use crate::mqtt::proto::types::QoS;
 
 macro_rules! check_and_set {
     ($self:ident, $property:ident, $value: expr) => {
@@ -542,7 +544,7 @@ impl PropertiesBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_connection_properties_default() {
         assert_eq!( PropertiesBuilder::new().connect(),

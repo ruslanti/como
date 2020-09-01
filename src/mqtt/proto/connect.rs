@@ -1,9 +1,11 @@
 use std::convert::TryInto;
+
 use anyhow::{anyhow, Result};
-use bytes::{BytesMut, Buf, Bytes};
-use crate::mqtt::proto::types::{ControlPacket, Will, QoS, Connect};
-use crate::mqtt::proto::property::{PropertiesBuilder, ConnectProperties, Property};
+use bytes::{Buf, Bytes, BytesMut};
+
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
+use crate::mqtt::proto::property::{ConnectProperties, PropertiesBuilder, Property};
+use crate::mqtt::proto::types::{Connect, ControlPacket, QoS, Will};
 use crate::mqtt::proto::will::decode_will_properties;
 
 const MQTT: &'static str = "MQTT";

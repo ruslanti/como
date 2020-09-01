@@ -1,23 +1,26 @@
-use anyhow::{anyhow, Result, Context};
-use tracing::{trace, debug, error, instrument};
-use crate::mqtt::proto::types::{ControlPacket, ReasonCode, MQTTCodec, Will, Connect, Publish, ConnAck, QoS, PubResp, Disconnect, PacketType, SubAck, Auth};
-use crate::mqtt::proto::property::{ConnAckProperties, DisconnectProperties, ConnectProperties, PubResProperties, SubAckProperties};
-use crate::settings::ConnectionSettings;
-use bytes::Bytes;
-use uuid::Uuid;
-use tokio_util::codec::Framed;
-//use futures::{SinkExt, StreamExt};
-use tokio::io::{AsyncRead, AsyncWrite};
-use crate::mqtt::shutdown::Shutdown;
-use tokio::sync::{mpsc, Semaphore, oneshot};
+use std::collections::BTreeMap;
+use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
-use std::ops::Add;
-use std::collections::BTreeMap;
-use crate::mqtt::topic::Message;
+
+use anyhow::{anyhow, Result};
+use bytes::{BufMut, Bytes, BytesMut};
+use futures::{SinkExt, TryFutureExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::stream::StreamExt;
-use futures::SinkExt;
+use tokio::sync::{mpsc, oneshot, RwLock, Semaphore};
+use tokio::sync::broadcast::RecvError::Lagged;
+use tokio::time::timeout;
+use tokio_util::codec::Framed;
+use tracing::{debug, error, instrument, trace, warn};
+use uuid::Uuid;
+
+use crate::mqtt::connection::ExactlyOnceState::Received;
+use crate::mqtt::proto::property::{ConnAckProperties, ConnectProperties, DisconnectProperties, PublishProperties, PubResProperties, SubAckProperties};
+use crate::mqtt::proto::types::{Auth, ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, PacketType, Publish, PubResp, QoS, ReasonCode, SubAck, Subscribe, UnSubscribe, Will};
+use crate::mqtt::shutdown::Shutdown;
+use crate::mqtt::topic::{Message, Topic};
+use crate::settings::ConnectionSettings;
 
 #[derive(Debug)]
 enum ExactlyOnceState {
@@ -33,7 +36,6 @@ type ExactlyOnceSender = mpsc::Sender<(ControlPacket, oneshot::Sender<ControlPac
 struct ExactlyOnceFlow {
     id: u16,
     rx: ExactlyOnceReceiver,
-    topic_tx: mpsc::Sender<Message>,
     state: ExactlyOnceState
 }
 
@@ -62,12 +64,12 @@ pub struct ConnectionHandler<S> {
     connection_rx: mpsc::Receiver<()>,
     stream_timeout: Option<Duration>,
     publish_flows: BTreeMap<u16, ExactlyOnceSender>,
-    topic_tx: mpsc::Sender<Message>,
+    topic_manager: Arc<RwLock<Topic>>
 }
 
 impl ExactlyOnceFlow {
-    fn new(id: u16, rx: ExactlyOnceReceiver, topic_tx: mpsc::Sender<Message>) -> Self {
-        ExactlyOnceFlow { id, rx, topic_tx, state: ExactlyOnceState::Init }
+    fn new(id: u16, rx: ExactlyOnceReceiver) -> Self {
+        ExactlyOnceFlow { id, rx, state: ExactlyOnceState::Init }
     }
 
     async fn run(&mut self) -> Result<()> {
@@ -75,8 +77,8 @@ impl ExactlyOnceFlow {
         while let Ok(Some(cmd)) = timeout(Duration::from_secs(1),self.rx.recv()).await {
             trace!("ExactlyOnceFlow: {:?}", cmd);
             match (&self.state, cmd) {
-                (ExactlyOnceState::Init, (ControlPacket::Publish(msg), tx)) => {
-                    self.topic_tx.send(Message::new(msg.retain, msg.topic_name, msg.payload)).await?;
+                (ExactlyOnceState::Init, (ControlPacket::Publish(_msg), tx)) => {
+                    //self.topic_tx.send(Message::new(msg.retain, msg.topic_name, msg.payload)).await?;
                     let rec = ControlPacket::PubRec(PubResp {
                         packet_type: PacketType::PUBREC,
                         packet_identifier: self.id,
@@ -89,7 +91,7 @@ impl ExactlyOnceFlow {
                         debug!("the receiver dropped");
                     }
                 },
-                (ExactlyOnceState::Received, (ControlPacket::PubRel(msg), tx)) => {
+                (ExactlyOnceState::Received, (ControlPacket::PubRel(_msg), tx)) => {
                     let comp = ControlPacket::PubComp(PubResp {
                         packet_type: PacketType::PUBCOMP,
                         packet_identifier: self.id,
@@ -114,8 +116,7 @@ impl<S> ConnectionHandler<S> where S: AsyncRead + AsyncWrite + Unpin {
     pub(crate) fn new(stream: Framed<S, MQTTCodec>, limit_connections: Arc<Semaphore>,
                sessions_states_tx: mpsc::Sender<ControlPacket>,
                shutdown_complete: mpsc::Sender<()>,
-               topic_tx: mpsc::Sender<Message>,
-               config: ConnectionSettings) -> Self {
+               config: ConnectionSettings, topic_manager: Arc<RwLock<Topic>>) -> Self {
         let (_connection_tx, connection_rx) = mpsc::channel(32);
         ConnectionHandler {
             stream,
@@ -127,7 +128,7 @@ impl<S> ConnectionHandler<S> where S: AsyncRead + AsyncWrite + Unpin {
             connection_rx,
             stream_timeout: Some(Duration::from_millis(config.idle_keep_alive as u64)),
             publish_flows: Default::default(),
-            topic_tx
+            topic_manager
         }
     }
 
@@ -184,12 +185,23 @@ impl<S> ConnectionHandler<S> where S: AsyncRead + AsyncWrite + Unpin {
         match msg.qos {
             QoS::AtMostOnce => {
                 //todo store topic
+                let mut root = self.topic_manager.write().await;
+                let topic_name = std::str::from_utf8(&msg.topic_name[..])?;
+                let channel = root.publish(topic_name);
+                let message = Message{
+                    retain: msg.retain,
+                    content_type: msg.properties.content_type,
+                    data: msg.payload
+                };
+                if let Err(err) = channel.send(message) {
+                    error!(cause = ?err, "publish send error for topic {}", topic_name);
+                }
             },
             QoS::AtLeastOnce => {
                 if let Some(packet_identifier) = msg.packet_identifier
                 {
                     //todo store topic
-                    self.topic_tx.send(Message::new(msg.retain, msg.topic_name, msg.payload)).await?;
+                    //self.topic_tx.send(Message::new(msg.retain, msg.topic_name, msg.payload)).await?;
                     let ack = ControlPacket::PubAck(PubResp {
                         packet_type: PacketType::PUBACK,
                         packet_identifier,
@@ -209,7 +221,7 @@ impl<S> ConnectionHandler<S> where S: AsyncRead + AsyncWrite + Unpin {
                         self.disconnect(ReasonCode::PacketIdentifierInUse).await?;
                     } else {
                         let (mut tx, rx) = mpsc::channel(1);
-                        let mut flow = ExactlyOnceFlow::new(packet_identifier, rx, self.topic_tx.clone());
+                        let mut flow = ExactlyOnceFlow::new(packet_identifier, rx);
                         self.publish_flows.insert(packet_identifier, tx.clone());
 
                         tokio::spawn(async move {
@@ -256,6 +268,85 @@ impl<S> ConnectionHandler<S> where S: AsyncRead + AsyncWrite + Unpin {
         Ok(())
     }
 
+    async fn process_subscribe(&mut self, subscribe: Subscribe) -> Result<()> {
+        debug!("subscribe topics: {:?}", subscribe.topic_filters);
+
+        let root = self.topic_manager.write().await;
+        let reason_codes = subscribe.topic_filters.iter().map(|(topic_name, topic_option)| {
+            match std::str::from_utf8(&topic_name[..]) {
+                Ok(topic) => {
+                    let channels = root.subscribe(topic);
+                    for mut channel in channels {
+                        tokio::spawn(async move {
+                            debug!("new subscribe spawn start  {:?}", channel);
+                            loop {
+                                match channel.recv().await {
+                                    Ok(msg) => {
+                                        debug!("received: {:?}", msg);
+                                        let properties = PublishProperties{
+                                            payload_format_indicator: None,
+                                            message_expire_interval: None,
+                                            topic_alias: None,
+                                            response_topic: None,
+                                            correlation_data: None,
+                                            user_properties: vec![],
+                                            subscription_identifier: None,
+                                            content_type: None
+                                        };
+                                        let publish = ControlPacket::Publish(Publish{
+                                            dup: false,
+                                            qos: QoS::AtMostOnce,
+                                            retain: false,
+                                            topic_name: "".to_string().into(),
+                                            packet_identifier: None,
+                                            properties,
+                                            payload: Default::default()
+                                        });
+                                        //self.stream.send(publish);
+                                    },
+                                    Err(Lagged(lag)) => {
+                                        warn!("lagged: {}", lag);
+                                    }
+                                    Err(err) => {
+                                        error!(cause = ?err, "topic error: ");
+                                        break
+                                    }
+                                }
+                            }
+                            debug!("new subscribe spawn stop {:?}", channel);
+                        });
+                    }
+                    ReasonCode::Success
+                },
+                Err(err) => {
+                    debug!(cause = ?err, "subscribe error: ");
+                    ReasonCode::TopicFilterInvalid
+                }
+            }
+        }).collect();
+        let suback = ControlPacket::SubAck(SubAck{
+            packet_identifier: subscribe.packet_identifier,
+            properties: SubAckProperties { reason_string: None, user_properties: vec![] },
+            reason_codes
+        });
+        trace!("send {:?}", suback);
+        self.stream.send(suback).await?;
+        Ok(())
+    }
+
+    async fn process_unsubscribe(&mut self, unsubscribe: UnSubscribe) -> Result<()> {
+        debug!("unsubscribe topics: {:?}", unsubscribe.topic_filters);
+        let reason_codes = unsubscribe.topic_filters.iter().map(|_t| ReasonCode::Success).collect();
+        let suback = ControlPacket::UnSubAck(SubAck{
+            packet_identifier: unsubscribe.packet_identifier,
+            properties: SubAckProperties { reason_string: None, user_properties: vec![] },
+            reason_codes
+        });
+        trace!("send {:?}", suback);
+        self.stream.send(suback).await?;
+        Ok(())
+    }
+
     async fn process_packet(&mut self, packet: ControlPacket) -> Result<()> {
         trace!("recv {:?}", packet);
         match (&self.state, packet) {
@@ -282,32 +373,8 @@ impl<S> ConnectionHandler<S> where S: AsyncRead + AsyncWrite + Unpin {
                 self.stream.send(ControlPacket::PingResp).await?;
                 Ok(())
             },
-            (State::Established{..}, ControlPacket::Subscribe(subscribe)) => {
-                debug!("subscribe topics: {:?}", subscribe.topic_filters);
-                let reason_codes = subscribe.topic_filters.iter().map(|_t| ReasonCode::Success).collect();
-
-                let suback = ControlPacket::SubAck(SubAck{
-                    packet_identifier: subscribe.packet_identifier,
-                    properties: SubAckProperties { reason_string: None, user_properties: vec![] },
-                    reason_codes
-                });
-                trace!("send {:?}", suback);
-                self.stream.send(suback).await?;
-                Ok(())
-            },
-            (State::Established{..}, ControlPacket::UnSubscribe(unsubscribe)) => {
-                debug!("unsubscribe topics: {:?}", unsubscribe.topic_filters);
-                let reason_codes = unsubscribe.topic_filters.iter().map(|_t| ReasonCode::Success).collect();
-
-                let suback = ControlPacket::UnSubAck(SubAck{
-                    packet_identifier: unsubscribe.packet_identifier,
-                    properties: SubAckProperties { reason_string: None, user_properties: vec![] },
-                    reason_codes
-                });
-                trace!("send {:?}", suback);
-                self.stream.send(suback).await?;
-                Ok(())
-            },
+            (State::Established{..}, ControlPacket::Subscribe(subscribe)) => self.process_subscribe(subscribe).await,
+            (State::Established{..}, ControlPacket::UnSubscribe(unsubscribe)) => self.process_unsubscribe(unsubscribe).await,
             (State::Established{..}, packet) => {
                 error!("unacceptable packet {:?} in established state", packet);
                 Err(anyhow!("unacceptable event").context(""))
@@ -398,16 +465,28 @@ impl<S> ConnectionHandler<S> where S: AsyncRead + AsyncWrite + Unpin {
         Ok(())
     }
 
+    #[instrument(skip(self))]
+    pub async fn process_sink(&self) -> Result<()> {
+        trace!("process sink start");
+        loop {}
+        trace!("process sink end");
+        Ok(())
+    }
+
     //#[instrument(skip(self))]
     pub(crate) async fn run(&mut self, mut shutdown: Shutdown) -> Result<()> {
         trace!("run start");
-        while !shutdown.is_shutdown() {
+        while !shutdown.is_shutdown() {  
             // While reading a request frame, also listen for the shutdown signal.
             tokio::select! {
                 res = self.process_stream() => {
                     res?; // handle error
                     break; // disconnect
                 },
+/*                res = self.process_sink() => {
+                    res?; // handle error
+                    break; // disconnect
+                },*/
                 _ = shutdown.recv() => {
                     trace!("shutdown received");
                     self.disconnect(ReasonCode::ServerShuttingDown).await?;

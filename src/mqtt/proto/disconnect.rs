@@ -1,10 +1,12 @@
-use bytes::{Buf, BytesMut, BufMut};
-use anyhow::{anyhow, Result, Context};
 use std::convert::TryInto;
-use crate::mqtt::proto::types::{ControlPacket, ReasonCode, Disconnect};
-use crate::mqtt::proto::decoder::{decode_variable_integer, decode_utf8_string};
-use crate::mqtt::proto::property::{PropertiesBuilder, DisconnectProperties, Property};
+
+use anyhow::{anyhow, Context, Result};
+use bytes::{Buf, BufMut, BytesMut};
+
+use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::mqtt::proto::encoder::encode_utf8_string;
+use crate::mqtt::proto::property::{DisconnectProperties, PropertiesBuilder, Property};
+use crate::mqtt::proto::types::{ControlPacket, Disconnect, ReasonCode};
 
 pub fn decode_disconnect(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     let reason_code = if reader.remaining() > 0 { reader.get_u8().try_into()? } else { ReasonCode::Success };

@@ -1,32 +1,40 @@
-mod settings;
-mod mqtt;
+use std::fs::File;
+use std::io::Read;
+use std::sync::Arc;
 
-use tokio::signal;
 use anyhow::Result;
-use mqtt::service;
-use tracing::Level;
-use tokio::net::TcpListener;
 use native_tls::Identity;
 use native_tls::TlsAcceptor;
-use crate::settings::Settings;
+use tokio::net::TcpListener;
+use tokio::signal;
+use tokio::sync::RwLock;
 use tracing::debug;
-use std::fs::File;
-use std::sync::Arc;
-use std::io::Read;
+use tracing::Level;
+
+use mqtt::service;
+
+use crate::mqtt::topic::Topic;
+use crate::settings::Settings;
+
+mod settings;
+mod mqtt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // a builder for `FmtSubscriber`.
-    let subscriber = tracing_subscriber::fmt().with_max_level(Level::TRACE).finish();
+    let subscriber = tracing_subscriber::fmt().with_max_level(Level::DEBUG).finish();
     tracing::subscriber::set_global_default(subscriber)
         .expect("no global subscriber has been set");
 
     let settings = Settings::new()?;
     debug!("{:?}", settings);
 
+    let topic_manager = Arc::new(RwLock::new(Topic::new()));
+
     // Bind a TCP listener
     let listener = TcpListener::bind(&format!("{}:{}", settings.service.bind, settings.service.port)).await?;
-    let srv = service::run(listener, None,settings.connection, settings.service.max_connections, signal::ctrl_c());
+    let srv = service::run(listener, None, settings.connection,
+                           settings.service.max_connections, signal::ctrl_c(), topic_manager.clone());
 
     if let Some(tls) = settings.service.tls {
         // Bind a TLS listener
@@ -39,7 +47,8 @@ async fn main() -> Result<()> {
         let acceptor = Arc::new(acceptor.into());
 
         let tls_listener = TcpListener::bind(&format!("{}:{}", tls.bind, tls.port)).await?;
-        let tls_srv = service::run(tls_listener, Some(acceptor),settings.connection, settings.service.max_connections, signal::ctrl_c());
+        let tls_srv = service::run(tls_listener, Some(acceptor),
+                                   settings.connection, settings.service.max_connections, signal::ctrl_c(), topic_manager.clone());
         let (res, tls_res) = tokio::join!( srv, tls_srv);
         res.and(tls_res)
     } else {

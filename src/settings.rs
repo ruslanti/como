@@ -1,5 +1,6 @@
-use config::{ConfigError, Config, File};
+use config::{Config, ConfigError, File};
 use serde::Deserialize;
+
 use crate::mqtt::proto::types::QoS;
 
 #[derive(Debug, Deserialize)]

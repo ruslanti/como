@@ -1,9 +1,11 @@
 use std::convert::TryInto;
+
 use anyhow::{anyhow, Result};
 use bytes::{Buf, BytesMut};
-use crate::mqtt::proto::types::{ControlPacket, Auth};
-use crate::mqtt::proto::property::{PropertiesBuilder, Property, AuthProperties};
+
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
+use crate::mqtt::proto::property::{AuthProperties, PropertiesBuilder, Property};
+use crate::mqtt::proto::types::{Auth, ControlPacket};
 
 pub fn decode_auth(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     end_of_stream!(reader.remaining() < 1, "auth reason conde");

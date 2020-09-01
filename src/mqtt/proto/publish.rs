@@ -1,9 +1,11 @@
 use std::convert::TryInto;
+
 use anyhow::{anyhow, Result};
-use bytes::{BytesMut, Buf};
-use crate::mqtt::proto::types::{ControlPacket, QoS, Publish};
-use crate::mqtt::proto::property::{PropertiesBuilder, Property, PublishProperties};
+use bytes::{Buf, BytesMut};
+
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
+use crate::mqtt::proto::property::{PropertiesBuilder, Property, PublishProperties};
+use crate::mqtt::proto::types::{ControlPacket, Publish, QoS};
 
 pub fn decode_publish(dup: bool, qos: QoS, retain: bool, reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     end_of_stream!(reader.remaining() < 3, "publish topic name");

@@ -1,10 +1,12 @@
 use core::fmt;
 use std::convert::{TryFrom, TryInto};
+
 use anyhow::anyhow;
-use crate::mqtt::proto::property::{WillProperties, ConnectProperties, ConnAckProperties, PublishProperties, DisconnectProperties, PubResProperties, SubscribeProperties, SubAckProperties, UnSubscribeProperties, AuthProperties};
 use bytes::Bytes;
-use serde::{Deserialize, Deserializer, de};
+use serde::{de, Deserialize, Deserializer};
 use serde::de::Visitor;
+
+use crate::mqtt::proto::property::{AuthProperties, ConnAckProperties, ConnectProperties, DisconnectProperties, PublishProperties, PubResProperties, SubAckProperties, SubscribeProperties, UnSubscribeProperties, WillProperties};
 
 pub type MqttString = Bytes;
 
@@ -184,6 +186,7 @@ pub enum ReasonCode {
     ServerShuttingDown          = 0x8B,
     BadAuthenticationMethod     = 0x8C,
     KeepAliveTimeout            = 0x8D,
+    TopicFilterInvalid          = 0x8F,
     TopicNameInvalid            = 0x90,
     PacketIdentifierInUse       = 0x91,
     PacketIdentifierNotFound    = 0x92,
@@ -218,6 +221,7 @@ impl TryFrom<u8> for ReasonCode {
             0x8B => Ok(ReasonCode::ServerShuttingDown),
             0x8C => Ok(ReasonCode::BadAuthenticationMethod),
             0x8D => Ok(ReasonCode::KeepAliveTimeout),
+            0x8F => Ok(ReasonCode::TopicFilterInvalid),
             0x90 => Ok(ReasonCode::TopicNameInvalid),
             0x91 => Ok(ReasonCode::PacketIdentifierInUse),
             0x92 => Ok(ReasonCode::PacketIdentifierNotFound),
@@ -253,6 +257,7 @@ impl Into<u8> for ReasonCode {
             ReasonCode::ServerShuttingDown => 0x8B,
             ReasonCode::BadAuthenticationMethod => 0x8C,
             ReasonCode::KeepAliveTimeout => 0x8D,
+            ReasonCode::TopicFilterInvalid => 0x8F,
             ReasonCode::TopicNameInvalid => 0x90,
             ReasonCode::PacketIdentifierInUse => 0x91,
             ReasonCode::PacketIdentifierNotFound => 0x92,
@@ -263,7 +268,7 @@ impl Into<u8> for ReasonCode {
             ReasonCode::QoSNotSupported => 0x9B,
             ReasonCode::UseAnotherServer => 0x9C,
             ReasonCode::ServerMoved => 0x9D,
-            ReasonCode::ConnectionRateExceeded => 0x9F
+            ReasonCode::ConnectionRateExceeded => 0x9F,
         }
     }
 }

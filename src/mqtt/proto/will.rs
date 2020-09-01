@@ -1,8 +1,10 @@
 use std::convert::TryInto;
+
 use anyhow::{anyhow, Result};
-use bytes::{BytesMut, Buf};
-use crate::mqtt::proto::property::{PropertiesBuilder, Property, WillProperties};
+use bytes::{Buf, BytesMut};
+
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
+use crate::mqtt::proto::property::{PropertiesBuilder, Property, WillProperties};
 
 pub fn decode_will_properties(reader: &mut BytesMut) -> Result<WillProperties> {
     let mut builder = PropertiesBuilder::new();

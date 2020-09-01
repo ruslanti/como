@@ -1,12 +1,13 @@
-use crate::mqtt::proto::types::{MQTTCodec, ControlPacket, PacketType, Connect, ConnAck, Publish, PubResp, Disconnect, SubAck};
+use anyhow::{anyhow, Context, Result};
+use bytes::{BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
-use bytes::{BytesMut, BufMut, Bytes};
-use anyhow::{anyhow, Result, Context};
-use crate::mqtt::proto::property::{PropertiesLength};
-use crate::mqtt::proto::pubres::encode_pubres_properties;
+use tracing::trace;
+
 use crate::mqtt::proto::disconnect::encode_disconnect_properties;
+use crate::mqtt::proto::property::PropertiesLength;
+use crate::mqtt::proto::pubres::encode_pubres_properties;
 use crate::mqtt::proto::subscribe::encode_suback_properties;
-use tracing::{trace, debug, error, instrument};
+use crate::mqtt::proto::types::{ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, PacketType, Publish, PubResp, SubAck};
 
 impl Encoder<Connect> for MQTTCodec {
     type Error = anyhow::Error;

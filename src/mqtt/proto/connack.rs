@@ -1,11 +1,13 @@
 use std::convert::TryInto;
+
 use anyhow::{anyhow, Result};
-use bytes::{BytesMut, Buf, BufMut};
-use crate::mqtt::proto::types::{ControlPacket, ConnAck, MQTTCodec};
-use crate::mqtt::proto::property::*;
-use crate::mqtt::proto::decoder::{decode_variable_integer, decode_utf8_string};
-use crate::mqtt::proto::encoder::encode_utf8_string;
+use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::Encoder;
+
+use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
+use crate::mqtt::proto::encoder::encode_utf8_string;
+use crate::mqtt::proto::property::*;
+use crate::mqtt::proto::types::{ConnAck, ControlPacket, MQTTCodec};
 
 pub fn decode_connack(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     end_of_stream!(reader.remaining() < 3, "connack flags");

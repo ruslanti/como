@@ -1,11 +1,12 @@
-use anyhow::{anyhow, Result};
-use bytes::{BytesMut, Buf, BufMut};
-use crate::mqtt::proto::types::{ControlPacket, ReasonCode, PubResp, PacketType};
 use std::convert::TryInto;
-use crate::mqtt::proto::decoder::{decode_variable_integer, decode_utf8_string};
-use crate::mqtt::proto::property::{PropertiesBuilder, Property, PubResProperties};
+
+use anyhow::{anyhow, Result};
+use bytes::{Buf, BufMut, BytesMut};
+
+use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::mqtt::proto::encoder::encode_utf8_string;
-use tracing::{trace, debug, error, instrument};
+use crate::mqtt::proto::property::{PropertiesBuilder, Property, PubResProperties};
+use crate::mqtt::proto::types::{ControlPacket, PacketType, PubResp, ReasonCode};
 
 pub fn decode_pubres(reader: &mut BytesMut) -> Result<(u16, ReasonCode, PubResProperties)> {
     end_of_stream!(reader.remaining() < 2, "pubres variable header");

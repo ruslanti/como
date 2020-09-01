@@ -1,19 +1,19 @@
 use std::future::Future;
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, Semaphore};
-use tokio::time::{self, Duration};
+
 use anyhow::Result;
-use crate::mqtt::connection::ConnectionHandler;
-use crate::mqtt::sessions::SessionManager;
-use crate::mqtt::shutdown::Shutdown;
-use tracing::{trace, debug, error, info, instrument};
-use crate::settings::ConnectionSettings;
-use tokio_util::codec::Framed;
-use tokio::stream::StreamExt;
-use crate::mqtt::proto::types::{MQTTCodec, ControlPacket};
-use crate::mqtt::topic::{Message, TopicManager};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
+use tokio::time::{self, Duration};
 use tokio_native_tls::TlsAcceptor;
+use tokio_util::codec::Framed;
+use tracing::{debug, error, info};
+
+use crate::mqtt::connection::ConnectionHandler;
+use crate::mqtt::proto::types::{ControlPacket, MQTTCodec};
+use crate::mqtt::shutdown::Shutdown;
+use crate::mqtt::topic::Topic;
+use crate::settings::ConnectionSettings;
 
 #[derive(Debug)]
 struct Service {
@@ -24,15 +24,16 @@ struct Service {
     shutdown_complete_rx: mpsc::Receiver<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
     sessions_states_tx: mpsc::Sender<ControlPacket>,
-    topic_tx: mpsc::Sender<Message>,
-    config: ConnectionSettings
+    config: ConnectionSettings,
+    topic_manager: Arc<RwLock<Topic>>
 }
 
-pub async fn run(listener: TcpListener, acceptor: Option<Arc<TlsAcceptor>>, config: ConnectionSettings, max_connections: usize, shutdown: impl Future) -> Result<()> {
+pub async fn run(listener: TcpListener, acceptor: Option<Arc<TlsAcceptor>>,
+                 config: ConnectionSettings, max_connections: usize, shutdown: impl Future,
+                    topic_manager: Arc<RwLock<Topic>>) -> Result<()> {
     let (notify_shutdown, _) = broadcast::channel(1);
     let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel(1);
     let (sessions_states_tx, sessions_states_rx) = mpsc::channel(32);
-    let (topic_tx, topic_rx) = mpsc::channel(128);
 
     // Initialize the listener state
     let mut service = Service {
@@ -43,16 +44,9 @@ pub async fn run(listener: TcpListener, acceptor: Option<Arc<TlsAcceptor>>, conf
         shutdown_complete_rx,
         shutdown_complete_tx,
         sessions_states_tx,
-        topic_tx,
-        config
+        config,
+        topic_manager
     };
-
-    let mut topic_manager = TopicManager::new(topic_rx);
-    tokio::spawn(async move {
-        if let Err(err) =  topic_manager.run().await {
-            error!(cause = ?err, "topic manager failure");
-        }
-    });
 
     tokio::select! {
         res = service.listen() => {
@@ -60,16 +54,6 @@ pub async fn run(listener: TcpListener, acceptor: Option<Arc<TlsAcceptor>>, conf
                 error!(cause = %err, "failed to accept");
             }
         }
-/*        res = topic_manager.run() => {
-            if let Err(err) = res {
-                error!(cause = %err, "topic manager failure");
-            }
-        }*/
-/*        res = service.sessions_manager(sessions_states_rx) => {
-            if let Err(err) = res {
-                error!(cause = %err, "failure in sessions manager");
-            }
-        }*/
         _ = shutdown => {
             // The shutdown signal has been received.
             info!("shutting down");
@@ -92,20 +76,6 @@ pub async fn run(listener: TcpListener, acceptor: Option<Arc<TlsAcceptor>>, conf
 }
 
 impl Service {
-
-/*    async fn sessions_manager(&mut self, session_states_rx: mpsc::Receiver<(ControlPacket)>) -> Result<()> {
-        let mut sessions = SessionManager::new(
-            self.settings.connection, session_states_rx);
-        let shutdown_service = Shutdown::new(self.notify_shutdown.subscribe());
-        tokio::spawn(async move {
-            if let Err(err) = sessions.run(shutdown_service).await {
-                error!(cause = ?err, "session manager error");
-            }
-        });
-
-        Ok(())
-    }*/
-
     async fn listen(&mut self) -> Result<()> {
         info!("{} accepting inbound connections", self.listener.local_addr().unwrap());
         loop {
@@ -120,8 +90,7 @@ impl Service {
                     self.limit_connections.clone(),
                     self.sessions_states_tx.clone(),
                     self.shutdown_complete_tx.clone(),
-                    self.topic_tx.clone(),
-                    self.config,
+                    self.config, self.topic_manager.clone()
                 );
 
                 let shutdown = Shutdown::new(self.notify_shutdown.subscribe());
@@ -136,8 +105,7 @@ impl Service {
                     self.limit_connections.clone(),
                     self.sessions_states_tx.clone(),
                     self.shutdown_complete_tx.clone(),
-                    self.topic_tx.clone(),
-                    self.config,
+                    self.config, self.topic_manager.clone()
                 );
 
                 let shutdown = Shutdown::new(self.notify_shutdown.subscribe());
