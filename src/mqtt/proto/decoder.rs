@@ -27,8 +27,8 @@ impl Decoder for MQTTCodec {
             PacketPart::FixedHeader => {
                 trace!("fixed header");
                 if reader.len() < MIN_FIXED_HEADER_LEN {
-                   // trace!(?self.part, "src buffer may not have entire fixed header");
-                    return Ok(None)
+                    // trace!(?self.part, "src buffer may not have entire fixed header");
+                    return Ok(None);
                 }
                 let packet_type: PacketType = reader.get_u8().try_into()?;
                 let remaining = decode_variable_integer(reader)? as usize;
@@ -36,35 +36,39 @@ impl Decoder for MQTTCodec {
 
                 self.part = PacketPart::VariableHeader {
                     remaining,
-                    packet_type
+                    packet_type,
                 };
                 self.decode(reader)
-            },
-            PacketPart::VariableHeader{remaining, packet_type} => {
+            }
+            PacketPart::VariableHeader {
+                remaining,
+                packet_type,
+            } => {
                 trace!("variable header");
                 if reader.len() < remaining {
                     trace!(?self.part, "src buffer does not have entire variable header and payload");
-                    return Ok(None)
+                    return Ok(None);
                 }
                 self.part = PacketPart::FixedHeader;
                 let mut packet = reader.split_to(remaining);
                 match packet_type {
-                    PacketType::CONNECT     => decode_connect(&mut packet),
-                    PacketType::CONNACK     => decode_connack(&mut packet),
-                    PacketType::PUBLISH{dup, qos, retain}
-                                            => decode_publish(dup, qos, retain, &mut packet),
-                    PacketType::PUBACK      => decode_puback(&mut packet),
-                    PacketType::PUBREC      => decode_pubrec(&mut packet),
-                    PacketType::PUBREL      => decode_pubrel(&mut packet),
-                    PacketType::PUBCOMP     => unimplemented!(),
-                    PacketType::SUBSCRIBE   => decode_subscribe(&mut packet),
-                    PacketType::SUBACK      => unimplemented!(),
+                    PacketType::CONNECT => decode_connect(&mut packet),
+                    PacketType::CONNACK => decode_connack(&mut packet),
+                    PacketType::PUBLISH { dup, qos, retain } => {
+                        decode_publish(dup, qos, retain, &mut packet)
+                    }
+                    PacketType::PUBACK => decode_puback(&mut packet),
+                    PacketType::PUBREC => decode_pubrec(&mut packet),
+                    PacketType::PUBREL => decode_pubrel(&mut packet),
+                    PacketType::PUBCOMP => unimplemented!(),
+                    PacketType::SUBSCRIBE => decode_subscribe(&mut packet),
+                    PacketType::SUBACK => unimplemented!(),
                     PacketType::UNSUBSCRIBE => decode_unsubscribe(&mut packet),
-                    PacketType::UNSUBACK    => unimplemented!(),
-                    PacketType::PINGREQ     => Ok(Some(ControlPacket::PingReq)),
-                    PacketType::PINGRESP    => Ok(Some(ControlPacket::PingResp)),
-                    PacketType::DISCONNECT  => decode_disconnect(&mut packet),
-                    PacketType::AUTH        => decode_auth(&mut packet)
+                    PacketType::UNSUBACK => unimplemented!(),
+                    PacketType::PINGREQ => Ok(Some(ControlPacket::PingReq)),
+                    PacketType::PINGRESP => Ok(Some(ControlPacket::PingResp)),
+                    PacketType::DISCONNECT => decode_disconnect(&mut packet),
+                    PacketType::AUTH => decode_auth(&mut packet),
                 }
             }
         }
@@ -75,11 +79,14 @@ pub fn decode_variable_integer(reader: &mut BytesMut) -> Result<u32> {
     let mut multiplier = 1;
     let mut value = 0;
     loop {
-        if reader.remaining() < 1 { return Err(anyhow!("end of stream")).context("decode_variable_integer") }
+        if reader.remaining() < 1 {
+            return Err(anyhow!("end of stream")).context("decode_variable_integer");
+        }
         let encoded_byte: u8 = reader.get_u8().into();
         value += (encoded_byte & 0x7F) as u32 * multiplier;
         if multiplier > (0x80 * 0x80 * 0x80) {
-            return Err(anyhow!("malformed variable integer: {}", value)).context("decode_variable_integer")
+            return Err(anyhow!("malformed variable integer: {}", value))
+                .context("decode_variable_integer");
         }
         multiplier *= 0x80;
         if (encoded_byte & 0x80) == 0 {
@@ -93,7 +100,15 @@ pub fn decode_utf8_string(reader: &mut BytesMut) -> Result<Option<MqttString>> {
     if reader.remaining() >= 2 {
         let len = reader.get_u16() as usize;
         if reader.remaining() >= len {
-            if len > 0 { Ok(Some(reader.split_to(len).to_bytes())) } else { Ok(None) }
-        } else { Err(anyhow!("end of stream")).context("decode_utf8_string") }
-    } else { Err(anyhow!("end of stream")).context("decode_utf8_string") }
+            if len > 0 {
+                Ok(Some(reader.split_to(len).to_bytes()))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Err(anyhow!("end of stream")).context("decode_utf8_string")
+        }
+    } else {
+        Err(anyhow!("end of stream")).context("decode_utf8_string")
+    }
 }

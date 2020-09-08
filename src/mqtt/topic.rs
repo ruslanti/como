@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
-use anyhow::Result;
 use bytes::Bytes;
-use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::sync::broadcast::RecvError::Lagged;
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{debug, error, trace, warn};
 
 #[derive(Debug, Clone)]
@@ -15,19 +14,19 @@ pub(crate) struct Message {
 }
 
 type PublishTopic = broadcast::Sender<Message>;
-type SubscribeTopic = broadcast::Receiver<Message>;
+pub(crate) type SubscribeTopic = broadcast::Receiver<Message>;
 
 #[derive(Debug)]
 pub struct Topic {
     channel: PublishTopic,
-    topics: HashMap<String, Self>
+    topics: HashMap<String, Self>,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum MatchState<'a> {
     Topic(&'a str),
     SingleLevel,
-    MultiLevel
+    MultiLevel,
 }
 
 impl Topic {
@@ -38,15 +37,13 @@ impl Topic {
             debug!("new topic spawn start {:?}", rx);
             loop {
                 match rx.recv().await {
-                    Ok(msg) => {
-                        debug!("received: {:?}", msg)
-                    },
+                    Ok(msg) => debug!("received: {:?}", msg),
                     Err(Lagged(lag)) => {
                         warn!("lagged: {}", lag);
                     }
                     Err(err) => {
                         error!(cause = ?err, "topic error: ");
-                        break
+                        break;
                     }
                 }
             }
@@ -54,7 +51,7 @@ impl Topic {
         });
         Topic {
             channel,
-            topics: Default::default()
+            topics: Default::default(),
         }
     }
 
@@ -63,13 +60,16 @@ impl Topic {
         let mut s = path.splitn(2, '/');
         match s.next() {
             Some(prefix) => {
-                let topic = self.topics.entry(prefix.to_string()).or_insert_with(|| Topic::new());
+                let topic = self
+                    .topics
+                    .entry(prefix.to_string())
+                    .or_insert_with(|| Topic::new());
                 match s.next() {
                     Some(suffix) => topic.publish(suffix),
-                    None => topic.channel.clone()
+                    None => topic.channel.clone(),
                 }
-            },
-            None => self.channel.clone()
+            }
+            None => self.channel.clone(),
         }
     }
 
@@ -79,16 +79,16 @@ impl Topic {
             match item {
                 "#" => pattern.push(MatchState::MultiLevel),
                 "+" => pattern.push(MatchState::SingleLevel),
-                _ => pattern.push(MatchState::Topic(item))
+                _ => pattern.push(MatchState::Topic(item)),
             }
-        };
+        }
         println!("find path: {:?} => {:?}", path, pattern);
         let mut res = Vec::new();
 
         let mut stack = VecDeque::new();
         for (node_name, node) in self.topics.iter() {
             stack.push_back((0, node_name, node))
-        };
+        }
 
         while let Some((level, name, node)) = stack.pop_front() {
             if let Some(&state) = pattern.get(level) {
@@ -98,17 +98,17 @@ impl Topic {
                     MatchState::Topic(pattern) => {
                         println!("pattern {:?} - name {:?}", pattern, name);
                         if name == pattern {
-                            if (level+1) == max_level {
+                            if (level + 1) == max_level {
                                 // FINAL
                                 res.push(node.channel.subscribe());
                                 println!("FOUND {}", name)
                             }
 
                             for (node_name, node) in node.topics.iter() {
-                                stack.push_back((level+1, node_name, node))
-                            };
+                                stack.push_back((level + 1, node_name, node))
+                            }
                         }
-                    },
+                    }
                     MatchState::SingleLevel => {
                         println!("pattern + - level {:?}", level);
                         if !name.starts_with("$") {
@@ -120,9 +120,9 @@ impl Topic {
 
                             for (node_name, node) in node.topics.iter() {
                                 stack.push_back((level + 1, node_name, node))
-                            };
+                            }
                         }
-                    },
+                    }
                     MatchState::MultiLevel => {
                         println!("pattern # - level {:?}", level);
                         if !name.starts_with("$") {
@@ -130,12 +130,12 @@ impl Topic {
                             res.push(node.channel.subscribe());
                             for (node_name, node) in node.topics.iter() {
                                 stack.push_back((level, node_name, node))
-                            };
+                            }
                         }
                     }
                 }
             }
-        };
+        }
         res
     }
 }
@@ -158,5 +158,4 @@ mod tests {
         //root.find("aaa/ddd");
         println!("subscribe: {:?}", root.subscribe("/aaa/#"));
     }
-
 }

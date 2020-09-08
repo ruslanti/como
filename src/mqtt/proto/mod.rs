@@ -2,15 +2,14 @@
 pub mod types;
 #[macro_use]
 pub mod property;
-mod decoder;
-mod encoder;
-mod connect;
+mod auth;
 mod connack;
+mod connect;
+mod decoder;
+mod disconnect;
+mod encoder;
 mod publish;
 mod pubres;
-mod disconnect;
 mod subscribe;
 mod unsubscribe;
-mod auth;
 mod will;
-

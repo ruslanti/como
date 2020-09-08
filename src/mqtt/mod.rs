@@ -1,6 +1,7 @@
-pub mod topic;
-mod sessions;
+pub mod connection;
+pub mod context;
 pub mod proto;
 pub mod service;
-pub mod connection;
+mod session;
 mod shutdown;
+pub mod topic;

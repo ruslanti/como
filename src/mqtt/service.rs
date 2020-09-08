@@ -3,17 +3,18 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock, Semaphore};
 use tokio::time::{self, Duration};
 use tokio_native_tls::TlsAcceptor;
 use tokio_util::codec::Framed;
 use tracing::{debug, error, info};
 
 use crate::mqtt::connection::ConnectionHandler;
+use crate::mqtt::context::AppContext;
 use crate::mqtt::proto::types::{ControlPacket, MQTTCodec};
 use crate::mqtt::shutdown::Shutdown;
 use crate::mqtt::topic::Topic;
-use crate::settings::ConnectionSettings;
+use crate::settings::{ConnectionSettings, Settings};
 
 #[derive(Debug)]
 struct Service {
@@ -24,13 +25,17 @@ struct Service {
     shutdown_complete_rx: mpsc::Receiver<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
     sessions_states_tx: mpsc::Sender<ControlPacket>,
-    config: ConnectionSettings,
-    topic_manager: Arc<RwLock<Topic>>
+    config: Arc<Settings>,
+    context: Arc<Mutex<AppContext>>,
 }
 
-pub async fn run(listener: TcpListener, acceptor: Option<Arc<TlsAcceptor>>,
-                 config: ConnectionSettings, max_connections: usize, shutdown: impl Future,
-                    topic_manager: Arc<RwLock<Topic>>) -> Result<()> {
+pub(crate) async fn run(
+    listener: TcpListener,
+    acceptor: Option<Arc<TlsAcceptor>>,
+    config: Arc<Settings>,
+    shutdown: impl Future,
+    context: Arc<Mutex<AppContext>>,
+) -> Result<()> {
     let (notify_shutdown, _) = broadcast::channel(1);
     let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel(1);
     let (sessions_states_tx, sessions_states_rx) = mpsc::channel(32);
@@ -39,13 +44,13 @@ pub async fn run(listener: TcpListener, acceptor: Option<Arc<TlsAcceptor>>,
     let mut service = Service {
         listener,
         acceptor,
-        limit_connections: Arc::new(Semaphore::new(max_connections)),
+        limit_connections: Arc::new(Semaphore::new(config.service.max_connections)),
         notify_shutdown,
         shutdown_complete_rx,
         shutdown_complete_tx,
         sessions_states_tx,
         config,
-        topic_manager
+        context,
     };
 
     tokio::select! {
@@ -77,40 +82,36 @@ pub async fn run(listener: TcpListener, acceptor: Option<Arc<TlsAcceptor>>,
 
 impl Service {
     async fn listen(&mut self) -> Result<()> {
-        info!("{} accepting inbound connections", self.listener.local_addr().unwrap());
+        info!(
+            "{} accepting inbound connections",
+            self.listener.local_addr().unwrap()
+        );
         loop {
             self.limit_connections.acquire().await.forget();
 
             let stream = self.accept().await?;
 
+            let context = self.context.lock().await;
+            let mut handler = ConnectionHandler::new(
+                self.limit_connections.clone(),
+                self.sessions_states_tx.clone(),
+                self.shutdown_complete_tx.clone(),
+                self.context.clone(),
+                context.config.connection,
+            );
+
+            let shutdown = Shutdown::new(self.notify_shutdown.subscribe());
+
             if let Some(acceptor) = self.acceptor.as_ref() {
                 let stream = acceptor.accept(stream).await?;
-                let mut handler = ConnectionHandler::new(
-                    Framed::new(stream, MQTTCodec::new()),
-                    self.limit_connections.clone(),
-                    self.sessions_states_tx.clone(),
-                    self.shutdown_complete_tx.clone(),
-                    self.config, self.topic_manager.clone()
-                );
-
-                let shutdown = Shutdown::new(self.notify_shutdown.subscribe());
                 tokio::spawn(async move {
-                    if let Err(err) = handler.run(shutdown).await {
+                    if let Err(err) = handler.run(stream, shutdown).await {
                         error!(cause = ?err, "connection error");
                     }
                 });
             } else {
-                let mut handler = ConnectionHandler::new(
-                    Framed::new(stream, MQTTCodec::new()),
-                    self.limit_connections.clone(),
-                    self.sessions_states_tx.clone(),
-                    self.shutdown_complete_tx.clone(),
-                    self.config, self.topic_manager.clone()
-                );
-
-                let shutdown = Shutdown::new(self.notify_shutdown.subscribe());
                 tokio::spawn(async move {
-                    if let Err(err) = handler.run(shutdown).await {
+                    if let Err(err) = handler.run(stream, shutdown).await {
                         error!(cause = ?err, "connection error");
                     }
                 });
@@ -125,8 +126,8 @@ impl Service {
             match self.listener.accept().await {
                 Ok((socket, address)) => {
                     debug!("inbound connection: {:?} ", address);
-                    return Ok(socket)
-                },
+                    return Ok(socket);
+                }
                 Err(err) => {
                     if backoff > 64 {
                         error!("error on accepting connection: {}", err);

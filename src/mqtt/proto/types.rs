@@ -3,17 +3,23 @@ use std::convert::{TryFrom, TryInto};
 
 use anyhow::anyhow;
 use bytes::Bytes;
-use serde::{de, Deserialize, Deserializer};
 use serde::de::Visitor;
+use serde::{de, Deserialize, Deserializer};
 
-use crate::mqtt::proto::property::{AuthProperties, ConnAckProperties, ConnectProperties, DisconnectProperties, PublishProperties, PubResProperties, SubAckProperties, SubscribeProperties, UnSubscribeProperties, WillProperties};
+use crate::mqtt::proto::property::{
+    AuthProperties, ConnAckProperties, ConnectProperties, DisconnectProperties, PubResProperties,
+    PublishProperties, SubAckProperties, SubscribeProperties, UnSubscribeProperties,
+    WillProperties,
+};
 
 pub type MqttString = Bytes;
 
 #[macro_use]
 macro_rules! end_of_stream {
     ($condition: expr, $context: expr) => {
-       if $condition {return Err(anyhow!("end of stream").context($context))};
+        if $condition {
+            return Err(anyhow!("end of stream").context($context));
+        };
     };
 }
 
@@ -21,7 +27,7 @@ macro_rules! end_of_stream {
 pub enum QoS {
     AtMostOnce,
     AtLeastOnce,
-    ExactlyOnce
+    ExactlyOnce,
 }
 
 impl TryFrom<u8> for QoS {
@@ -40,7 +46,7 @@ impl TryFrom<u8> for QoS {
 impl Into<u8> for QoS {
     fn into(self) -> u8 {
         match self {
-            QoS::AtMostOnce  => 0,
+            QoS::AtMostOnce => 0,
             QoS::AtLeastOnce => 1,
             QoS::ExactlyOnce => 2,
         }
@@ -56,7 +62,10 @@ impl<'de> Visitor<'de> for QoSVisitor {
         formatter.write_str("an integer between 0 and 2")
     }
 
-    fn visit_u8<E>(self, value: u8) -> Result<Self::Value, E> where E: de::Error, {
+    fn visit_u8<E>(self, value: u8) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
         if let Ok(ret) = value.try_into() {
             Ok(ret)
         } else {
@@ -66,7 +75,10 @@ impl<'de> Visitor<'de> for QoSVisitor {
 }
 
 impl<'de> Deserialize<'de> for QoS {
-    fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error> where D: Deserializer<'de> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error>
+    where
+        D: Deserializer<'de>,
+    {
         deserializer.deserialize_u8(QoSVisitor)
     }
 }
@@ -75,7 +87,7 @@ impl<'de> Deserialize<'de> for QoS {
 pub enum Retain {
     SendAtTime,
     SendAtSubscribe,
-    DoNotSend
+    DoNotSend,
 }
 
 impl TryFrom<u8> for Retain {
@@ -94,7 +106,7 @@ impl TryFrom<u8> for Retain {
 impl Into<u8> for Retain {
     fn into(self) -> u8 {
         match self {
-            Retain::SendAtTime  => 0,
+            Retain::SendAtTime => 0,
             Retain::SendAtSubscribe => 1,
             Retain::DoNotSend => 2,
         }
@@ -105,7 +117,7 @@ impl Into<u8> for Retain {
 pub enum PacketType {
     CONNECT,
     CONNACK,
-    PUBLISH{ dup: bool, qos: QoS, retain: bool },
+    PUBLISH { dup: bool, qos: QoS, retain: bool },
     PUBACK,
     PUBREC,
     PUBREL,
@@ -127,7 +139,11 @@ impl TryFrom<u8> for PacketType {
         match v {
             0x10 => Ok(PacketType::CONNECT),
             0x20 => Ok(PacketType::CONNACK),
-            0x30..=0x3F => Ok(PacketType::PUBLISH {dup: v&0b0000_1000 != 0, qos:((v&0b0000_0110)>>1).try_into()?, retain: v&0b0000_0001 != 0}),
+            0x30..=0x3F => Ok(PacketType::PUBLISH {
+                dup: v & 0b0000_1000 != 0,
+                qos: ((v & 0b0000_0110) >> 1).try_into()?,
+                retain: v & 0b0000_0001 != 0,
+            }),
             0x40 => Ok(PacketType::PUBACK),
             0x50 => Ok(PacketType::PUBREC),
             0x62 => Ok(PacketType::PUBREL),
@@ -148,56 +164,57 @@ impl TryFrom<u8> for PacketType {
 impl Into<u8> for PacketType {
     fn into(self) -> u8 {
         match self {
-            PacketType::CONNECT     => 0x10,
-            PacketType::CONNACK     => 0x20,
-            PacketType::PUBLISH{dup, qos, retain}
-            => 0x30 | ((dup as u8) << 3) | ((qos as u8) << 1) | (retain as u8),
-            PacketType::PUBACK      => 0x40,
-            PacketType::PUBREC      => 0x50,
-            PacketType::PUBREL      => 0x62,
-            PacketType::PUBCOMP     => 0x70,
-            PacketType::SUBSCRIBE   => 0x82,
-            PacketType::SUBACK      => 0x90,
+            PacketType::CONNECT => 0x10,
+            PacketType::CONNACK => 0x20,
+            PacketType::PUBLISH { dup, qos, retain } => {
+                0x30 | ((dup as u8) << 3) | ((qos as u8) << 1) | (retain as u8)
+            }
+            PacketType::PUBACK => 0x40,
+            PacketType::PUBREC => 0x50,
+            PacketType::PUBREL => 0x62,
+            PacketType::PUBCOMP => 0x70,
+            PacketType::SUBSCRIBE => 0x82,
+            PacketType::SUBACK => 0x90,
             PacketType::UNSUBSCRIBE => 0xA2,
-            PacketType::UNSUBACK    => 0xB0,
-            PacketType::PINGREQ     => 0xC0,
-            PacketType::PINGRESP    => 0xD0,
-            PacketType::DISCONNECT  => 0xE0,
-            PacketType::AUTH        => 0xF0,
+            PacketType::UNSUBACK => 0xB0,
+            PacketType::PINGREQ => 0xC0,
+            PacketType::PINGRESP => 0xD0,
+            PacketType::DISCONNECT => 0xE0,
+            PacketType::AUTH => 0xF0,
         }
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReasonCode {
-    Success                     = 0x00,
-    DisconnectWithWill          = 0x04,
-    UnspecifiedError            = 0x80,
-    MalformedPacket             = 0x81,
-    ProtocolError               = 0x82,
+    Success = 0x00,
+    DisconnectWithWill = 0x04,
+    UnspecifiedError = 0x80,
+    MalformedPacket = 0x81,
+    ProtocolError = 0x82,
     ImplementationSpecificError = 0x83,
-    UnsupportedProtocolVersion  = 0x84,
-    ClientIdentifiersNotValid   = 0x85,
-    BadUserNameOrPassword       = 0x86,
-    NotAuthorized               = 0x87,
-    ServerUnavailable           = 0x88,
-    ServerBusy                  = 0x89,
-    Banned                      = 0x8A,
-    ServerShuttingDown          = 0x8B,
-    BadAuthenticationMethod     = 0x8C,
-    KeepAliveTimeout            = 0x8D,
-    TopicFilterInvalid          = 0x8F,
-    TopicNameInvalid            = 0x90,
-    PacketIdentifierInUse       = 0x91,
-    PacketIdentifierNotFound    = 0x92,
-    PacketTooLarge              = 0x95,
-    QuotaExceeded               = 0x97,
-    PayloadFormatInvalid        = 0x99,
-    RetainNotSupported          = 0x9A,
-    QoSNotSupported             = 0x9B,
-    UseAnotherServer            = 0x9C,
-    ServerMoved                 = 0x9D,
-    ConnectionRateExceeded      = 0x9F
+    UnsupportedProtocolVersion = 0x84,
+    ClientIdentifiersNotValid = 0x85,
+    BadUserNameOrPassword = 0x86,
+    NotAuthorized = 0x87,
+    ServerUnavailable = 0x88,
+    ServerBusy = 0x89,
+    Banned = 0x8A,
+    ServerShuttingDown = 0x8B,
+    BadAuthenticationMethod = 0x8C,
+    KeepAliveTimeout = 0x8D,
+    TopicFilterInvalid = 0x8F,
+    TopicNameInvalid = 0x90,
+    PacketIdentifierInUse = 0x91,
+    PacketIdentifierNotFound = 0x92,
+    PacketTooLarge = 0x95,
+    QuotaExceeded = 0x97,
+    PayloadFormatInvalid = 0x99,
+    RetainNotSupported = 0x9A,
+    QoSNotSupported = 0x9B,
+    UseAnotherServer = 0x9C,
+    ServerMoved = 0x9D,
+    ConnectionRateExceeded = 0x9F,
 }
 
 impl TryFrom<u8> for ReasonCode {
@@ -233,7 +250,7 @@ impl TryFrom<u8> for ReasonCode {
             0x9C => Ok(ReasonCode::UseAnotherServer),
             0x9D => Ok(ReasonCode::ServerMoved),
             0x9F => Ok(ReasonCode::ConnectionRateExceeded),
-            _ => Err(anyhow!("malformed control packet reason code: {}", b))
+            _ => Err(anyhow!("malformed control packet reason code: {}", b)),
         }
     }
 }
@@ -279,7 +296,7 @@ pub struct Will {
     pub retain: bool,
     pub properties: WillProperties,
     pub topic: Option<MqttString>,
-    pub payload: Bytes
+    pub payload: Bytes,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -290,14 +307,14 @@ pub struct Connect {
     pub client_identifier: Option<MqttString>,
     pub username: Option<MqttString>,
     pub password: Option<MqttString>,
-    pub will: Option<Will>
+    pub will: Option<Will>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ConnAck {
     pub session_present: bool,
     pub reason_code: ReasonCode,
-    pub properties: ConnAckProperties
+    pub properties: ConnAckProperties,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -308,7 +325,7 @@ pub struct Publish {
     pub topic_name: MqttString,
     pub packet_identifier: Option<u16>,
     pub properties: PublishProperties,
-    pub payload: MqttString
+    pub payload: MqttString,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -316,13 +333,13 @@ pub struct PubResp {
     pub packet_type: PacketType,
     pub packet_identifier: u16,
     pub reason_code: ReasonCode,
-    pub properties: PubResProperties
+    pub properties: PubResProperties,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Disconnect {
     pub reason_code: ReasonCode,
-    pub properties: DisconnectProperties
+    pub properties: DisconnectProperties,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -330,28 +347,28 @@ pub struct SubOption {
     pub qos: QoS,
     pub nl: bool,
     pub rap: bool,
-    pub retain: Retain
+    pub retain: Retain,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Subscribe {
     pub packet_identifier: u16,
     pub properties: SubscribeProperties,
-    pub topic_filters: Vec<(MqttString, SubOption)>
+    pub topic_filters: Vec<(MqttString, SubOption)>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct SubAck {
     pub packet_identifier: u16,
     pub properties: SubAckProperties,
-    pub reason_codes: Vec<ReasonCode>
+    pub reason_codes: Vec<ReasonCode>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct UnSubscribe {
     pub packet_identifier: u16,
     pub properties: UnSubscribeProperties,
-    pub topic_filters: Vec<MqttString>
+    pub topic_filters: Vec<MqttString>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -376,17 +393,20 @@ pub enum ControlPacket {
     PingReq,
     PingResp,
     Disconnect(Disconnect),
-    Auth(Auth)
+    Auth(Auth),
 }
 
 pub enum PacketPart {
     FixedHeader,
-    VariableHeader{remaining: usize, packet_type: PacketType}
+    VariableHeader {
+        remaining: usize,
+        packet_type: PacketType,
+    },
 }
 
 #[derive(Debug)]
 pub struct MQTTCodec {
-    pub part: PacketPart
+    pub part: PacketPart,
 }
 
 impl fmt::Debug for PacketPart {
@@ -394,18 +414,21 @@ impl fmt::Debug for PacketPart {
         match self {
             PacketPart::FixedHeader => write!(f, "PacketPart::FixedHeader"),
             PacketPart::VariableHeader {
-                remaining, packet_type
-            } => f.debug_struct("PacketPart::VariableHeader")
+                remaining,
+                packet_type,
+            } => f
+                .debug_struct("PacketPart::VariableHeader")
                 .field("remaining", &remaining)
                 .field("packet_type", &packet_type)
-                .finish()
+                .finish(),
         }
     }
 }
 
 impl MQTTCodec {
     pub fn new() -> Self {
-        MQTTCodec{part: PacketPart::FixedHeader}
+        MQTTCodec {
+            part: PacketPart::FixedHeader,
+        }
     }
 }
-

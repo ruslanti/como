@@ -10,8 +10,8 @@ use crate::mqtt::proto::types::QoS;
 macro_rules! check_and_set {
     ($self:ident, $property:ident, $value: expr) => {
         match $self.$property.replace($value) {
-            None    => Ok($self),
-            Some(_) => Err(anyhow!("protocol error"))
+            None => Ok($self),
+            Some(_) => Err(anyhow!("protocol error")),
         }
     };
 }
@@ -19,8 +19,8 @@ macro_rules! check_and_set {
 macro_rules! check_size_of {
     ($self:ident, $property:ident) => {
         match &$self.$property {
-            None    => 0,
-            Some(v) => size_of_val(v) + 1
+            None => 0,
+            Some(v) => size_of_val(v) + 1,
         }
     };
 }
@@ -28,8 +28,8 @@ macro_rules! check_size_of {
 macro_rules! check_size_of_string {
     ($self:ident, $property:ident) => {
         match &$self.$property {
-            None    => 0,
-            Some(v) => v.len() + 3
+            None => 0,
+            Some(v) => v.len() + 3,
         }
     };
 }
@@ -42,7 +42,7 @@ macro_rules! encode_property_u8 {
             end_of_stream!($writer.capacity() < 1, "$value");
             $writer.put_u8(value);
         }
-    }
+    };
 }
 
 macro_rules! encode_property_u16 {
@@ -53,7 +53,7 @@ macro_rules! encode_property_u16 {
             end_of_stream!($writer.capacity() < 2, "$value");
             $writer.put_u16(value);
         }
-    }
+    };
 }
 
 macro_rules! encode_property_u32 {
@@ -64,7 +64,7 @@ macro_rules! encode_property_u32 {
             end_of_stream!($writer.capacity() < 4, "$value");
             $writer.put_u32(value);
         }
-    }
+    };
 }
 
 macro_rules! encode_property_string {
@@ -75,7 +75,7 @@ macro_rules! encode_property_string {
             end_of_stream!($writer.capacity() < value.len(), "$value");
             encode_utf8_string($writer, value)?;
         }
-    }
+    };
 }
 
 macro_rules! encode_property_user_properties {
@@ -86,38 +86,38 @@ macro_rules! encode_property_user_properties {
             encode_utf8_string($writer, first)?;
             encode_utf8_string($writer, second)?;
         }
-    }
+    };
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Property {
-    PayloadFormatIndicator          = 0x01,
-    MessageExpireInterval           = 0x02,
-    ContentType                     = 0x03,
-    ResponseTopic                   = 0x08,
-    CorrelationData                 = 0x09,
-    SubscriptionIdentifier          = 0x0B,
-    SessionExpireInterval           = 0x11,
-    AssignedClientIdentifier        = 0x12,
-    ServerKeepAlive                 = 0x13,
-    AuthenticationMethod            = 0x15,
-    AuthenticationData              = 0x16,
-    RequestProblemInformation       = 0x17,
-    WillDelayInterval               = 0x18,
-    RequestResponseInformation      = 0x19,
-    ResponseInformation             = 0x1A,
-    ServerReference                 = 0x1C,
-    ReasonString                    = 0x1F,
-    ReceiveMaximum                  = 0x21,
-    TopicAliasMaximum               = 0x22,
-    TopicAlias                      = 0x23,
-    MaximumQoS                      = 0x24,
-    RetainAvailable                 = 0x25,
-    UserProperty                    = 0x26,
-    MaximumPacketSize               = 0x27,
-    WildcardSubscriptionAvailable   = 0x28,
+    PayloadFormatIndicator = 0x01,
+    MessageExpireInterval = 0x02,
+    ContentType = 0x03,
+    ResponseTopic = 0x08,
+    CorrelationData = 0x09,
+    SubscriptionIdentifier = 0x0B,
+    SessionExpireInterval = 0x11,
+    AssignedClientIdentifier = 0x12,
+    ServerKeepAlive = 0x13,
+    AuthenticationMethod = 0x15,
+    AuthenticationData = 0x16,
+    RequestProblemInformation = 0x17,
+    WillDelayInterval = 0x18,
+    RequestResponseInformation = 0x19,
+    ResponseInformation = 0x1A,
+    ServerReference = 0x1C,
+    ReasonString = 0x1F,
+    ReceiveMaximum = 0x21,
+    TopicAliasMaximum = 0x22,
+    TopicAlias = 0x23,
+    MaximumQoS = 0x24,
+    RetainAvailable = 0x25,
+    UserProperty = 0x26,
+    MaximumPacketSize = 0x27,
+    WildcardSubscriptionAvailable = 0x28,
     SubscriptionIdentifierAvailable = 0x29,
-    SharedSubscriptionAvailable     = 0x2A
+    SharedSubscriptionAvailable = 0x2A,
 }
 
 impl TryFrom<u32> for Property {
@@ -181,7 +181,7 @@ pub struct ConnectProperties {
     pub request_response_information: bool,
     pub request_problem_information: bool,
     pub user_properties: Vec<(MqttString, MqttString)>,
-    pub authentication_method: Option<MqttString>
+    pub authentication_method: Option<MqttString>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -217,19 +217,53 @@ pub struct PublishProperties {
     pub content_type: Option<MqttString>,
 }
 
+impl Default for PublishProperties {
+    fn default() -> Self {
+        PublishProperties {
+            payload_format_indicator: None,
+            message_expire_interval: None,
+            topic_alias: None,
+            response_topic: None,
+            correlation_data: None,
+            user_properties: vec![],
+            subscription_identifier: None,
+            content_type: None,
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct PubResProperties {
     pub reason_string: Option<MqttString>,
     pub user_properties: Vec<(MqttString, MqttString)>,
 }
 
+impl Default for PubResProperties {
+    fn default() -> Self {
+        PubResProperties {
+            reason_string: None,
+            user_properties: vec![],
+        }
+    }
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct DisconnectProperties {
     pub session_expire_interval: Option<u32>,
     pub reason_string: Option<MqttString>,
     pub user_properties: Vec<(MqttString, MqttString)>,
-    pub server_reference: Option<MqttString>
+    pub server_reference: Option<MqttString>,
+}
+
+impl Default for DisconnectProperties {
+    fn default() -> Self {
+        DisconnectProperties {
+            session_expire_interval: None,
+            reason_string: None,
+            user_properties: vec![],
+            server_reference: None,
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -242,6 +276,15 @@ pub struct SubscribeProperties {
 pub struct SubAckProperties {
     pub reason_string: Option<MqttString>,
     pub user_properties: Vec<(MqttString, MqttString)>,
+}
+
+impl Default for SubAckProperties {
+    fn default() -> Self {
+        SubAckProperties {
+            reason_string: None,
+            user_properties: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -265,9 +308,13 @@ impl PropertiesLength for ConnAckProperties {
         len += check_size_of!(self, retain_available);
         len += check_size_of!(self, maximum_packet_size);
         len += check_size_of_string!(self, assigned_client_identifier);
-        len += check_size_of!(self, topic_alias_maximum) ;
+        len += check_size_of!(self, topic_alias_maximum);
         len += check_size_of_string!(self, reason_string);
-        len += self.user_properties.iter().map(|(x, y)| 5 + x.len() + y.len()).sum::<usize>();
+        len += self
+            .user_properties
+            .iter()
+            .map(|(x, y)| 5 + x.len() + y.len())
+            .sum::<usize>();
         len
     }
 }
@@ -275,7 +322,11 @@ impl PropertiesLength for ConnAckProperties {
 impl PropertiesLength for PubResProperties {
     fn len(&self) -> usize {
         let mut len = check_size_of_string!(self, reason_string);
-        len += self.user_properties.iter().map(|(x, y)| 5 + x.len() + y.len()).sum::<usize>();
+        len += self
+            .user_properties
+            .iter()
+            .map(|(x, y)| 5 + x.len() + y.len())
+            .sum::<usize>();
         len
     }
 }
@@ -284,7 +335,11 @@ impl PropertiesLength for DisconnectProperties {
     fn len(&self) -> usize {
         let mut len = check_size_of!(self, session_expire_interval);
         len += check_size_of_string!(self, reason_string);
-        len += self.user_properties.iter().map(|(x, y)| 5 + x.len() + y.len()).sum::<usize>();
+        len += self
+            .user_properties
+            .iter()
+            .map(|(x, y)| 5 + x.len() + y.len())
+            .sum::<usize>();
         len += check_size_of_string!(self, server_reference);
         len
     }
@@ -293,7 +348,11 @@ impl PropertiesLength for DisconnectProperties {
 impl PropertiesLength for SubAckProperties {
     fn len(&self) -> usize {
         let mut len = check_size_of_string!(self, reason_string);
-        len += self.user_properties.iter().map(|(x, y)| 5 + x.len() + y.len()).sum::<usize>();
+        len += self
+            .user_properties
+            .iter()
+            .map(|(x, y)| 5 + x.len() + y.len())
+            .sum::<usize>();
         len
     }
 }
@@ -325,12 +384,12 @@ pub struct PropertiesBuilder {
     maximum_packet_size: Option<u32>,
     wildcard_subscription_available: Option<bool>,
     subscription_identifier_available: Option<bool>,
-    shared_subscription_available: Option<bool>
+    shared_subscription_available: Option<bool>,
 }
 
 impl PropertiesBuilder {
     pub fn new() -> Self {
-        return PropertiesBuilder{
+        return PropertiesBuilder {
             session_expire_interval: None,
             assigned_client_identifier: None,
             receive_maximum: None,
@@ -357,10 +416,10 @@ impl PropertiesBuilder {
             authentication_data: None,
             reason_string: None,
             retain_available: None,
-            shared_subscription_available: None
+            shared_subscription_available: None,
         };
     }
-    
+
     pub fn session_expire_interval(mut self, value: u32) -> Result<Self> {
         check_and_set!(self, session_expire_interval, value)
     }
@@ -398,7 +457,9 @@ impl PropertiesBuilder {
     pub fn content_type(mut self, value: Option<MqttString>) -> Result<Self> {
         if let Some(v) = value {
             check_and_set!(self, content_type, v)
-        } else { Err(anyhow!("empty content type")) }
+        } else {
+            Err(anyhow!("empty content type"))
+        }
     }
     pub fn response_topic(mut self, value: Option<MqttString>) -> Result<Self> {
         if let Some(v) = value {
@@ -450,7 +511,7 @@ impl PropertiesBuilder {
             content_type: self.content_type,
             response_topic: self.response_topic,
             correlation_data: self.correlation_data,
-            user_properties: self.user_properties
+            user_properties: self.user_properties,
         }
     }
 
@@ -463,12 +524,12 @@ impl PropertiesBuilder {
             request_response_information: self.request_response_information.unwrap_or(false),
             request_problem_information: self.request_problem_information.unwrap_or(true),
             user_properties: self.user_properties,
-            authentication_method: self.authentication_method
+            authentication_method: self.authentication_method,
         }
     }
 
     pub fn connack(self) -> ConnAckProperties {
-        ConnAckProperties{
+        ConnAckProperties {
             session_expire_interval: self.session_expire_interval,
             receive_maximum: self.receive_maximum,
             maximum_qos: self.maximum_qos,
@@ -485,7 +546,7 @@ impl PropertiesBuilder {
             response_information: self.response_information,
             server_reference: self.server_reference,
             authentication_method: self.authentication_method,
-            authentication_data: self.authentication_data
+            authentication_data: self.authentication_data,
         }
     }
 
@@ -498,14 +559,14 @@ impl PropertiesBuilder {
             correlation_data: self.correlation_data,
             user_properties: self.user_properties,
             subscription_identifier: self.subscription_identifier,
-            content_type: self.content_type
+            content_type: self.content_type,
         }
     }
 
     pub fn pubres(self) -> PubResProperties {
-        PubResProperties{
+        PubResProperties {
             reason_string: self.reason_string,
-            user_properties: self.user_properties
+            user_properties: self.user_properties,
         }
     }
 
@@ -514,20 +575,20 @@ impl PropertiesBuilder {
             session_expire_interval: self.session_expire_interval,
             reason_string: self.reason_string,
             user_properties: self.user_properties,
-            server_reference: self.server_reference
+            server_reference: self.server_reference,
         }
     }
 
     pub fn subscribe(self) -> SubscribeProperties {
         SubscribeProperties {
             subscription_identifier: self.subscription_identifier,
-            user_properties: self.user_properties
+            user_properties: self.user_properties,
         }
     }
 
     pub fn unsubscribe(self) -> UnSubscribeProperties {
         UnSubscribeProperties {
-            user_properties: self.user_properties
+            user_properties: self.user_properties,
         }
     }
 
@@ -536,7 +597,7 @@ impl PropertiesBuilder {
             authentication_method: self.authentication_method,
             authentication_data: self.authentication_data,
             reason_string: self.reason_string,
-            user_properties: self.user_properties
+            user_properties: self.user_properties,
         }
     }
 }
@@ -547,16 +608,18 @@ mod tests {
 
     #[test]
     fn test_connection_properties_default() {
-        assert_eq!( PropertiesBuilder::new().connect(),
-            ConnectProperties{
-            session_expire_interval: 0,
-            receive_maximum: 65535,
-            maximum_packet_size: 4294967295,
-            topic_alias_maximum: 0,
-            request_response_information: false,
-            request_problem_information: true,
-            user_properties: vec![],
-            authentication_method: None}
+        assert_eq!(
+            PropertiesBuilder::new().connect(),
+            ConnectProperties {
+                session_expire_interval: 0,
+                receive_maximum: 65535,
+                maximum_packet_size: 4294967295,
+                topic_alias_maximum: 0,
+                request_response_information: false,
+                request_problem_information: true,
+                user_properties: vec![],
+                authentication_method: None
+            }
         );
     }
     #[test]
@@ -570,16 +633,21 @@ mod tests {
         builder = builder.request_problem_information(1).unwrap();
         builder = builder.user_properties((Bytes::from("username"), Bytes::from("admin")));
         builder = builder.user_properties((Bytes::from("password"), Bytes::from("12345")));
-        assert_eq!( builder.connect(),
-                    ConnectProperties{
-                        session_expire_interval: 20,
-                        receive_maximum: 1000,
-                        maximum_packet_size: 1024,
-                        topic_alias_maximum: 1024,
-                        request_response_information: true,
-                        request_problem_information: true,
-                        user_properties: vec![(Bytes::from("username"), Bytes::from("admin")), (Bytes::from("password"), Bytes::from("12345"))],
-                        authentication_method: None}
+        assert_eq!(
+            builder.connect(),
+            ConnectProperties {
+                session_expire_interval: 20,
+                receive_maximum: 1000,
+                maximum_packet_size: 1024,
+                topic_alias_maximum: 1024,
+                request_response_information: true,
+                request_problem_information: true,
+                user_properties: vec![
+                    (Bytes::from("username"), Bytes::from("admin")),
+                    (Bytes::from("password"), Bytes::from("12345"))
+                ],
+                authentication_method: None
+            }
         );
     }
 
@@ -589,7 +657,7 @@ mod tests {
         builder = builder.session_expire_interval(20).unwrap();
         match builder.session_expire_interval(60) {
             Err(_) => assert!(true),
-            _ => assert!(false, "should panic")
+            _ => assert!(false, "should panic"),
         }
     }
     #[test]
@@ -598,22 +666,23 @@ mod tests {
         builder = builder.receive_maximum(20).unwrap();
         match builder.receive_maximum(60) {
             Err(_) => assert!(true),
-            _ => assert!(false, "should panic")
+            _ => assert!(false, "should panic"),
         }
     }
 
     #[test]
     fn test_will_properties_default() {
-        assert_eq!( PropertiesBuilder::new().will(),
-                    WillProperties {
-                        will_delay_interval: 0,
-                        payload_format_indicator: false,
-                        message_expire_interval: None,
-                        content_type: None,
-                        response_topic: None,
-                        correlation_data: None,
-                        user_properties: vec![]
-                    } 
+        assert_eq!(
+            PropertiesBuilder::new().will(),
+            WillProperties {
+                will_delay_interval: 0,
+                payload_format_indicator: false,
+                message_expire_interval: None,
+                content_type: None,
+                response_topic: None,
+                correlation_data: None,
+                user_properties: vec![]
+            }
         );
     }
     #[test]

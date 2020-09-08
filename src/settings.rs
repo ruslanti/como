@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use config::{Config, ConfigError, File};
 use serde::Deserialize;
 
@@ -9,7 +11,7 @@ pub struct ServiceSettings {
     pub bind: String,
     pub port: u16,
     pub max_connections: usize,
-    pub tls: Option<TlsSettings>
+    pub tls: Option<TlsSettings>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,7 +40,7 @@ pub struct ConnectionSettings {
 #[serde(default)]
 pub struct Settings {
     pub service: ServiceSettings,
-    pub connection: ConnectionSettings
+    pub connection: ConnectionSettings,
 }
 
 impl Default for ServiceSettings {
@@ -47,7 +49,7 @@ impl Default for ServiceSettings {
             bind: String::from("127.0.0.1"),
             port: 1883,
             max_connections: 255,
-            tls: None
+            tls: None,
         }
     }
 }
@@ -58,14 +60,14 @@ impl Default for TlsSettings {
             bind: String::from("127.0.0.1"),
             port: 8883,
             cert: "".to_string(),
-            pass: "".to_string()
+            pass: "".to_string(),
         }
     }
 }
 
 impl Default for ConnectionSettings {
     fn default() -> Self {
-        ConnectionSettings{
+        ConnectionSettings {
             idle_keep_alive: 500,
             server_keep_alive: None,
             session_expire_interval: None,
@@ -73,7 +75,7 @@ impl Default for ConnectionSettings {
             maximum_qos: None,
             retain_available: None,
             maximum_packet_size: None,
-            topic_alias_maximum: None
+            topic_alias_maximum: None,
         }
     }
 }
@@ -82,7 +84,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             service: Default::default(),
-            connection: Default::default()
+            connection: Default::default(),
         }
     }
 }

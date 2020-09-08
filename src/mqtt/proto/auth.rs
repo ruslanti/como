@@ -14,7 +14,7 @@ pub fn decode_auth(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     let properties = decode_auth_properties(&mut reader.split_to(properties_length))?;
     Ok(Some(ControlPacket::Auth(Auth {
         reason_code,
-        properties
+        properties,
     })))
 }
 
@@ -27,22 +27,20 @@ pub fn decode_auth_properties(reader: &mut BytesMut) -> Result<AuthProperties> {
                 if let Some(authentication_method) = decode_utf8_string(reader)? {
                     builder = builder.authentication_method(authentication_method)?
                 } else {
-                    return Err(anyhow!("missing authentication method"))
+                    return Err(anyhow!("missing authentication method"));
                 }
-            },
-            Property::AuthenticationData => {
-                unimplemented!()
             }
+            Property::AuthenticationData => unimplemented!(),
             Property::ReasonString => {
                 builder = builder.response_topic(decode_utf8_string(reader)?)?;
-            },
+            }
             Property::UserProperty => {
                 let user_property = (decode_utf8_string(reader)?, decode_utf8_string(reader)?);
                 if let (Some(key), Some(value)) = user_property {
                     builder = builder.user_properties((key, value));
                 }
             }
-            _ => return Err(anyhow!("unknown subscribe property: {:x}", id))
+            _ => return Err(anyhow!("unknown subscribe property: {:x}", id)),
         }
     }
     Ok(builder.auth())

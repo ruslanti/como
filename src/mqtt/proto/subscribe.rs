@@ -5,7 +5,9 @@ use bytes::{Buf, BufMut, BytesMut};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::mqtt::proto::encoder::encode_utf8_string;
-use crate::mqtt::proto::property::{PropertiesBuilder, Property, SubAckProperties, SubscribeProperties};
+use crate::mqtt::proto::property::{
+    PropertiesBuilder, Property, SubAckProperties, SubscribeProperties,
+};
 use crate::mqtt::proto::types::{ControlPacket, MqttString, QoS, Retain, SubOption, Subscribe};
 
 pub fn decode_subscribe(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
@@ -17,7 +19,7 @@ pub fn decode_subscribe(reader: &mut BytesMut) -> Result<Option<ControlPacket>> 
     Ok(Some(ControlPacket::Subscribe(Subscribe {
         packet_identifier,
         properties,
-        topic_filters: topic_filter
+        topic_filters: topic_filter,
     })))
 }
 
@@ -29,14 +31,14 @@ pub fn decode_subscribe_properties(reader: &mut BytesMut) -> Result<SubscribePro
             Property::SubscriptionIdentifier => {
                 end_of_stream!(reader.remaining() < 4, "subscription identifier");
                 builder = builder.subscription_identifier(decode_variable_integer(reader)?)?;
-            },
+            }
             Property::UserProperty => {
                 let user_property = (decode_utf8_string(reader)?, decode_utf8_string(reader)?);
                 if let (Some(key), Some(value)) = user_property {
                     builder = builder.user_properties((key, value));
                 }
             }
-            _ => return Err(anyhow!("unknown subscribe property: {:x}", id))
+            _ => return Err(anyhow!("unknown subscribe property: {:x}", id)),
         }
     }
     Ok(builder.subscribe())
@@ -52,11 +54,19 @@ pub fn decode_subscribe_payload(reader: &mut BytesMut) -> Result<Vec<(MqttString
             let nl = ((subscription_option & 0b00000100) >> 2) != 0;
             let rap = ((subscription_option & 0b00001000) >> 3) != 0;
             let retain: Retain = ((subscription_option & 0b00110000) >> 4).try_into()?;
-            topic_filter.push((topic, SubOption{qos, nl, rap, retain}))
+            topic_filter.push((
+                topic,
+                SubOption {
+                    qos,
+                    nl,
+                    rap,
+                    retain,
+                },
+            ))
         } else {
-            return Err(anyhow!("empty topic filter"))
+            return Err(anyhow!("empty topic filter"));
         }
-    };
+    }
     Ok(topic_filter)
 }
 

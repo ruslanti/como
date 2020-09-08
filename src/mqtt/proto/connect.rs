@@ -13,11 +13,11 @@ const VERSION: u8 = 5;
 
 pub fn decode_connect(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     if Some(Bytes::from(MQTT)) != decode_utf8_string(reader)? {
-        return Err(anyhow!("wrong protocol name"))
+        return Err(anyhow!("wrong protocol name"));
     }
     end_of_stream!(reader.remaining() < 4, "connect version");
     if VERSION != reader.get_u8() {
-        return Err(anyhow!("wrong protocol version"))
+        return Err(anyhow!("wrong protocol version"));
     }
 
     let flags = reader.get_u8();
@@ -40,12 +40,12 @@ pub fn decode_connect(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
         let properties = decode_will_properties(&mut reader.split_to(will_properties_length))?;
         let topic = decode_utf8_string(reader)?;
         let payload = Default::default();
-        Some(Will{
+        Some(Will {
             qos: will_qos_flag,
             retain: will_retain_flag,
             properties,
             topic,
-            payload
+            payload,
         })
     } else {
         None
@@ -70,7 +70,7 @@ pub fn decode_connect(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
         client_identifier,
         username,
         password,
-        will
+        will,
     })))
 }
 
@@ -82,15 +82,15 @@ fn decode_connect_properties(reader: &mut BytesMut) -> Result<ConnectProperties>
             Property::SessionExpireInterval => {
                 end_of_stream!(reader.remaining() < 4, "session expire interval");
                 builder = builder.session_expire_interval(reader.get_u32())?;
-            },
+            }
             Property::ReceiveMaximum => {
                 end_of_stream!(reader.remaining() < 2, "receive maximum");
                 builder = builder.receive_maximum(reader.get_u16())?;
-            },
+            }
             Property::MaximumPacketSize => {
                 end_of_stream!(reader.remaining() < 4, "maximum packet size");
                 builder = builder.maximum_packet_size(reader.get_u32())?;
-            },
+            }
             Property::TopicAliasMaximum => {
                 end_of_stream!(reader.remaining() < 2, "topic alias maximum");
                 builder = builder.topic_alias_maximum(reader.get_u16())?;
@@ -98,11 +98,11 @@ fn decode_connect_properties(reader: &mut BytesMut) -> Result<ConnectProperties>
             Property::RequestResponseInformation => {
                 end_of_stream!(reader.remaining() < 1, "request response information");
                 builder = builder.request_response_information(reader.get_u8())?;
-            },
+            }
             Property::RequestProblemInformation => {
                 end_of_stream!(reader.remaining() < 1, "request problem information");
                 builder = builder.request_problem_information(reader.get_u8())?;
-            },
+            }
             Property::UserProperty => {
                 let user_property = (decode_utf8_string(reader)?, decode_utf8_string(reader)?);
                 if let (Some(key), Some(value)) = user_property {
@@ -113,10 +113,10 @@ fn decode_connect_properties(reader: &mut BytesMut) -> Result<ConnectProperties>
                 if let Some(authentication_method) = decode_utf8_string(reader)? {
                     builder = builder.authentication_method(authentication_method)?
                 } else {
-                    return Err(anyhow!("missing authentication method"))
+                    return Err(anyhow!("missing authentication method"));
                 }
             }
-            _ => return Err(anyhow!("unknown connect property: {:x}", id))
+            _ => return Err(anyhow!("unknown connect property: {:x}", id)),
         }
     }
     Ok(builder.connect())

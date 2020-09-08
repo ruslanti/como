@@ -14,28 +14,24 @@ pub fn decode_will_properties(reader: &mut BytesMut) -> Result<WillProperties> {
             Property::WillDelayInterval => {
                 end_of_stream!(reader.remaining() < 4, "will delay interval");
                 builder = builder.will_delay_interval(reader.get_u32())?;
-            },
+            }
             Property::PayloadFormatIndicator => {
                 end_of_stream!(reader.remaining() < 1, "will payload format indicator");
                 builder = builder.payload_format_indicator(reader.get_u8())?;
-            },
+            }
             Property::MessageExpireInterval => {
                 end_of_stream!(reader.remaining() < 4, "will message expire interval");
                 builder = builder.message_expire_interval(reader.get_u32())?;
-            },
+            }
             Property::ContentType => {
                 builder = builder.content_type(decode_utf8_string(reader)?)?;
             }
             Property::ResponseTopic => {
                 builder = builder.response_topic(decode_utf8_string(reader)?)?;
-            },
-            Property::CorrelationData => {
-                unimplemented!()
-            },
-            Property::UserProperty => {
-                unimplemented!()
             }
-            _ => return Err(anyhow!("unknown will property: {:x}", id))
+            Property::CorrelationData => unimplemented!(),
+            Property::UserProperty => unimplemented!(),
+            _ => return Err(anyhow!("unknown will property: {:x}", id)),
         }
     }
     Ok(builder.will())
