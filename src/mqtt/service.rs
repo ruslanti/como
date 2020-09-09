@@ -7,7 +7,7 @@ use tokio::sync::{broadcast, mpsc, Mutex, RwLock, Semaphore};
 use tokio::time::{self, Duration};
 use tokio_native_tls::TlsAcceptor;
 use tokio_util::codec::Framed;
-use tracing::{debug, error, info};
+use tracing::{debug, error, field, info, instrument};
 
 use crate::mqtt::connection::ConnectionHandler;
 use crate::mqtt::context::AppContext;
@@ -61,7 +61,7 @@ pub(crate) async fn run(
         }
         _ = shutdown => {
             // The shutdown signal has been received.
-            info!("shutting down");
+            info!("shutting down {}", service.listener.local_addr().unwrap());
         }
     }
 
@@ -81,11 +81,10 @@ pub(crate) async fn run(
 }
 
 impl Service {
+    #[instrument(skip(self), fields(addr = field::display(& self.listener.local_addr().unwrap())),
+    err)]
     async fn listen(&mut self) -> Result<()> {
-        info!(
-            "{} accepting inbound connections",
-            self.listener.local_addr().unwrap()
-        );
+        info!("accepting inbound connections");
         loop {
             self.limit_connections.acquire().await.forget();
 
@@ -93,8 +92,8 @@ impl Service {
 
             let context = self.context.lock().await;
             let mut handler = ConnectionHandler::new(
+                stream.peer_addr()?,
                 self.limit_connections.clone(),
-                self.sessions_states_tx.clone(),
                 self.shutdown_complete_tx.clone(),
                 self.context.clone(),
                 context.config.connection,
@@ -105,13 +104,13 @@ impl Service {
             if let Some(acceptor) = self.acceptor.as_ref() {
                 let stream = acceptor.accept(stream).await?;
                 tokio::spawn(async move {
-                    if let Err(err) = handler.run(stream, shutdown).await {
+                    if let Err(err) = handler.connection(stream, shutdown).await {
                         error!(cause = ?err, "connection error");
                     }
                 });
             } else {
                 tokio::spawn(async move {
-                    if let Err(err) = handler.run(stream, shutdown).await {
+                    if let Err(err) = handler.connection(stream, shutdown).await {
                         error!(cause = ?err, "connection error");
                     }
                 });
@@ -119,6 +118,7 @@ impl Service {
         }
     }
 
+    #[instrument(skip(self), err)]
     async fn accept(&mut self) -> Result<TcpStream> {
         let mut backoff = 1;
 

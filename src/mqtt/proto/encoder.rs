@@ -5,6 +5,7 @@ use tracing::trace;
 
 use crate::mqtt::proto::disconnect::encode_disconnect_properties;
 use crate::mqtt::proto::property::PropertiesLength;
+use crate::mqtt::proto::publish::encode_publish_properties;
 use crate::mqtt::proto::pubres::encode_pubres_properties;
 use crate::mqtt::proto::subscribe::encode_suback_properties;
 use crate::mqtt::proto::types::{
@@ -41,8 +42,37 @@ impl Encoder<ConnAck> for MQTTCodec {
 impl Encoder<Publish> for MQTTCodec {
     type Error = anyhow::Error;
 
-    fn encode(&mut self, _msg: Publish, _writer: &mut BytesMut) -> Result<(), Self::Error> {
-        unimplemented!()
+    fn encode(&mut self, msg: Publish, writer: &mut BytesMut) -> Result<(), Self::Error> {
+        let properties_length = msg.properties.len(); // properties
+        let properties_length_size = encoded_variable_integer_len(properties_length); // properties length
+        let packet_identifier_len = if let Some(id) = msg.packet_identifier {
+            2
+        } else {
+            0
+        };
+        let remaining_length = 1
+            + msg.topic_name.len()
+            + packet_identifier_len
+            + properties_length_size
+            + properties_length
+            + msg.payload.len();
+        let remaining_length_size = encoded_variable_integer_len(remaining_length); // remaining length size
+        writer.reserve(1 + remaining_length_size + remaining_length);
+
+        let packet_type = PacketType::PUBLISH {
+            dup: msg.dup,
+            qos: msg.qos,
+            retain: msg.retain,
+        };
+        writer.put_u8(packet_type.into());
+        encode_variable_integer(writer, remaining_length)?; // remaining length
+        encode_utf8_string(writer, msg.topic_name)?;
+        if let Some(packet_identifier) = msg.packet_identifier {
+            writer.put_u16(packet_identifier); // packet identifier
+        };
+        encode_variable_integer(writer, properties_length)?; // properties length
+        encode_publish_properties(writer, msg.properties)?;
+        encode_utf8_string(writer, msg.payload)
     }
 }
 
@@ -110,7 +140,7 @@ impl Encoder<ControlPacket> for MQTTCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, packet: ControlPacket, writer: &mut BytesMut) -> Result<(), Self::Error> {
-        trace!("encode {:?}", packet);
+        // trace!("encode {:?}", packet);
         match packet {
             ControlPacket::Connect(connect) => self.encode(connect, writer)?,
             ControlPacket::ConnAck(connack) => self.encode(connack, writer)?,
@@ -168,7 +198,7 @@ pub fn encode_variable_integer(writer: &mut BytesMut, v: usize) -> Result<()> {
     Ok(())
 }
 
-fn encoded_variable_integer_len(value: usize) -> usize {
+pub(crate) fn encoded_variable_integer_len(value: usize) -> usize {
     match value {
         0x00..=0x07F => 1,
         0x80..=0x3FFF => 2,

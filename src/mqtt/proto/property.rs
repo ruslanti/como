@@ -4,6 +4,7 @@ use std::mem::size_of_val;
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 
+use crate::mqtt::proto::encoder::encoded_variable_integer_len;
 use crate::mqtt::proto::types::MqttString;
 use crate::mqtt::proto::types::QoS;
 
@@ -74,6 +75,16 @@ macro_rules! encode_property_string {
             $writer.put_u8(Property::$property as u8);
             end_of_stream!($writer.capacity() < value.len(), "$value");
             encode_utf8_string($writer, value)?;
+        }
+    };
+}
+
+macro_rules! encode_property_variable_integer {
+    ($writer:ident, $property:ident, $value:expr) => {
+        if let Some(value) = $value {
+            end_of_stream!($writer.capacity() < 1, "$value id");
+            $writer.put_u8(Property::$property as u8);
+            encode_variable_integer($writer, value as usize)?;
         }
     };
 }
@@ -298,6 +309,26 @@ pub struct AuthProperties {
     pub authentication_data: Option<Bytes>,
     pub reason_string: Option<MqttString>,
     pub user_properties: Vec<(MqttString, MqttString)>,
+}
+
+impl PropertiesLength for PublishProperties {
+    fn len(&self) -> usize {
+        let mut len = check_size_of!(self, payload_format_indicator);
+        len += check_size_of!(self, message_expire_interval);
+        len += check_size_of!(self, topic_alias);
+        len += check_size_of_string!(self, response_topic);
+        len += check_size_of!(self, correlation_data);
+        len += self
+            .user_properties
+            .iter()
+            .map(|(x, y)| 5 + x.len() + y.len())
+            .sum::<usize>();
+        if let Some(id) = self.subscription_identifier {
+            len += encoded_variable_integer_len(id as usize);
+        };
+        len += check_size_of_string!(self, content_type);
+        len
+    }
 }
 
 impl PropertiesLength for ConnAckProperties {

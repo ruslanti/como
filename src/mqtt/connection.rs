@@ -1,11 +1,12 @@
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
+use std::net::SocketAddr;
 use std::ops::{Add, Div};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Error, Result};
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::future;
 use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
@@ -16,10 +17,9 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock, Semaphore};
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
-use tracing::{debug, error, instrument, trace, warn};
+use tracing::{debug, error, field, instrument, span, trace, warn};
 use uuid::Uuid;
 
-use crate::mqtt::connection::ExactlyOnceState::Received;
 use crate::mqtt::context::{AppContext, SessionContext};
 use crate::mqtt::proto::property::{
     ConnAckProperties, ConnectProperties, DisconnectProperties, PubResProperties,
@@ -34,32 +34,15 @@ use crate::mqtt::shutdown::Shutdown;
 use crate::mqtt::topic::{Message, Topic};
 use crate::settings::{ConnectionSettings, Settings};
 
-//use tokio::stream::StreamExt;
-
-#[derive(Debug)]
-enum ExactlyOnceState {
-    Init,
-    Received,
-    Released,
-}
-
 type ExactlyOnceReceiver = mpsc::Receiver<(ControlPacket, oneshot::Sender<ControlPacket>)>;
 type ExactlyOnceSender = mpsc::Sender<(ControlPacket, oneshot::Sender<ControlPacket>)>;
 
 #[derive(Debug)]
-struct ExactlyOnceFlow {
-    id: u16,
-    rx: ExactlyOnceReceiver,
-    state: ExactlyOnceState,
-}
-
-#[derive(Debug)]
 pub struct ConnectionHandler {
+    peer: SocketAddr,
     limit_connections: Arc<Semaphore>,
-    sessions_states_tx: mpsc::Sender<ControlPacket>,
     shutdown_complete: mpsc::Sender<()>,
     keep_alive: Option<Duration>,
-    publish_flows: BTreeMap<u16, ExactlyOnceSender>,
     context: Arc<Mutex<AppContext>>,
     session: SessionContext,
     config: ConnectionSettings,
@@ -67,35 +50,35 @@ pub struct ConnectionHandler {
 
 impl ConnectionHandler {
     pub(crate) fn new(
+        peer: SocketAddr,
         limit_connections: Arc<Semaphore>,
-        sessions_states_tx: mpsc::Sender<ControlPacket>,
         shutdown_complete: mpsc::Sender<()>,
         context: Arc<Mutex<AppContext>>,
         config: ConnectionSettings,
     ) -> Self {
         ConnectionHandler {
+            peer,
             limit_connections,
-            sessions_states_tx,
             shutdown_complete,
             keep_alive: Some(Duration::from_millis(config.idle_keep_alive as u64)),
-            publish_flows: Default::default(),
             context,
             session: None,
             config,
         }
     }
 
-    async fn process_connect(
-        &mut self,
-        msg: Connect,
-        mut conn_tx: Sender<ControlPacket>,
-    ) -> Result<()> {
+    #[instrument(skip(self, conn_tx, msg), err)]
+    async fn connect(&mut self, msg: Connect, mut conn_tx: Sender<ControlPacket>) -> Result<()> {
+        trace!("{:?}", msg);
         let (assigned_client_identifier, identifier) = if let Some(id) = msg.client_identifier {
             (None, id)
         } else {
             let id: Bytes = Uuid::new_v4().to_hyphenated().to_string().into();
             (Some(id.clone()), id)
         };
+
+        let id = std::str::from_utf8(&identifier[..])?;
+        debug!("client identifier: {}", id);
 
         let client_keep_alive = if msg.keep_alive != 0 {
             Some(msg.keep_alive)
@@ -138,7 +121,6 @@ impl ConnectionHandler {
         });
 
         conn_tx.send(ack).await?;
-        let id = std::str::from_utf8(&identifier[..])?;
         let mut context = self.context.lock().await;
         let session_tx = context.connect_session(id, conn_tx).await;
         self.session = Some((
@@ -151,71 +133,6 @@ impl ConnectionHandler {
 
     /*
 
-        async fn process_subscribe(&self, subscribe: Subscribe) -> Result<()> {
-            debug!("subscribe topics: {:?}", subscribe.topic_filters);
-
-            let root = self.topic_manager.read().await;
-            let reason_codes = subscribe.topic_filters.iter().map(|(topic_name, topic_option)| {
-                match std::str::from_utf8(&topic_name[..]) {
-                    Ok(topic) => {
-                        let channels = root.subscribe(topic);
-                        for mut channel in channels {
-                            tokio::spawn(async move {
-                                debug!("new subscribe spawn start  {:?}", channel);
-                                loop {
-                                    match channel.recv().await {
-                                        Ok(msg) => {
-                                            debug!("received: {:?}", msg);
-                                            let properties = PublishProperties{
-                                                payload_format_indicator: None,
-                                                message_expire_interval: None,
-                                                topic_alias: None,
-                                                response_topic: None,
-                                                correlation_data: None,
-                                                user_properties: vec![],
-                                                subscription_identifier: None,
-                                                content_type: None
-                                            };
-                                            let publish = ControlPacket::Publish(Publish{
-                                                dup: false,
-                                                qos: QoS::AtMostOnce,
-                                                retain: false,
-                                                topic_name: "".to_string().into(),
-                                                packet_identifier: None,
-                                                properties,
-                                                payload: Default::default()
-                                            });
-                                            //self.stream.send(publish);
-                                        },
-                                        Err(Lagged(lag)) => {
-                                            warn!("lagged: {}", lag);
-                                        }
-                                        Err(err) => {
-                                            error!(cause = ?err, "topic error: ");
-                                            break
-                                        }
-                                    }
-                                }
-                                debug!("new subscribe spawn stop {:?}", channel);
-                            });
-                        }
-                        ReasonCode::Success
-                    },
-                    Err(err) => {
-                        debug!(cause = ?err, "subscribe error: ");
-                        ReasonCode::TopicFilterInvalid
-                    }
-                }
-            }).collect();
-            let suback = ControlPacket::SubAck(SubAck{
-                packet_identifier: subscribe.packet_identifier,
-                properties: SubAckProperties { reason_string: None, user_properties: vec![] },
-                reason_codes
-            });
-            trace!("send {:?}", suback);
-            //self.stream.send(suback).await?;
-            Ok(())
-        }
 
         async fn process_unsubscribe(&self, unsubscribe: UnSubscribe) -> Result<()> {
             debug!("unsubscribe topics: {:?}", unsubscribe.topic_filters);
@@ -230,14 +147,15 @@ impl ConnectionHandler {
             Ok(())
         }
     */
-    async fn process_packet(
+    #[instrument(skip(self, packet, conn_tx), err)]
+    async fn receiving(
         &mut self,
         packet: ControlPacket,
         mut conn_tx: Sender<ControlPacket>,
     ) -> Result<()> {
-        trace!("recv {:?}", packet);
+        //trace!("{:?}", packet);
         match (self.session.clone(), packet) {
-            (None, ControlPacket::Connect(connect)) => self.process_connect(connect, conn_tx).await,
+            (None, ControlPacket::Connect(connect)) => self.connect(connect, conn_tx).await,
             (None, ControlPacket::Auth(auth)) => unimplemented!(), //self.process_auth(auth).await,
             (None, packet) => {
                 error!(
@@ -249,31 +167,31 @@ impl ConnectionHandler {
             (Some((_, mut session_tx, _)), ControlPacket::Publish(publish)) => {
                 session_tx
                     .send(SessionEvent::Publish(publish))
-                    .map_err(|e| anyhow!("session_tx send error"))
+                    .map_err(Error::msg)
                     .await
             }
             (Some((_, mut session_tx, _)), ControlPacket::PubRel(pubresp)) => {
                 session_tx
                     .send(SessionEvent::PubRel(pubresp))
-                    .map_err(|e| anyhow!("session_tx send error"))
+                    .map_err(Error::msg)
                     .await
             }
             (Some((_, mut session_tx, _)), ControlPacket::Subscribe(sub)) => {
                 session_tx
                     .send(SessionEvent::Subscribe(sub))
-                    .map_err(|e| anyhow!("session_tx send error"))
+                    .map_err(Error::msg)
                     .await
             }
             (Some((_, mut session_tx, _)), ControlPacket::UnSubscribe(sub)) => {
                 session_tx
                     .send(SessionEvent::UnSubscribe(sub))
-                    .map_err(|e| anyhow!("session_tx send error"))
+                    .map_err(Error::msg)
                     .await
             }
-            (Some(_), ControlPacket::PingReq) => {
+            (Some((_)), ControlPacket::PingReq) => {
                 conn_tx
                     .send(ControlPacket::PingResp)
-                    .map_err(|e| anyhow!("conn_tx send error"))
+                    .map_err(Error::msg)
                     .await
             }
 
@@ -289,50 +207,31 @@ impl ConnectionHandler {
                 }
                 session_tx
                     .send(SessionEvent::Disconnect(disconnect))
-                    .map_err(|e| anyhow!("session_tx send error"))
+                    .map_err(Error::msg)
                     .await
             }
             (Some(_), _) => unimplemented!(),
         }
     }
 
-    async fn process_auth(&self, _msg: Auth) -> Result<()> {
+    async fn process_auth(&self, msg: Auth) -> Result<()> {
+        trace!("{:?}", msg);
         Ok(())
     }
 
-    #[instrument(skip(self))]
-    async fn disconnect(&self, reason_code: ReasonCode) -> Result<()> {
+    #[instrument(skip(self, conn_tx), err)]
+    async fn disconnect(
+        &self,
+        mut conn_tx: Sender<ControlPacket>,
+        reason_code: ReasonCode,
+    ) -> Result<()> {
         let disc = ControlPacket::Disconnect(Disconnect {
             reason_code,
             properties: Default::default(),
         });
-        trace!("send {:?}", disc);
-        //self.stream.send(disc).await?;
-        Ok(())
+        conn_tx.send(disc).await.map_err(Error::msg)
     }
 
-    //#[instrument(skip(self))]
-    /*    async fn process_next(&mut self) -> Result<(bool)> {
-        trace!("process next start");
-        if let Some(packet) = stream.next().await {
-            match packet {
-                Ok(packet) => {
-                    //self.process_packet(packet).await?;
-                }
-                Err(e) => {
-                    error!("error on process connection: {}", e);
-                    return Err(e.into());
-                }
-            };
-            trace!("process next end");
-            Ok((true))
-        } else {
-            trace!("process next disconnected");
-            Ok((false))
-        }
-    }*/
-
-    //#[instrument(skip(self))]
     async fn process_stream<S>(
         &mut self,
         mut stream: S,
@@ -341,9 +240,7 @@ impl ConnectionHandler {
     where
         S: Stream<Item = Result<ControlPacket, anyhow::Error>> + Unpin,
     {
-        trace!("process start");
         loop {
-            trace!("stream timeout  {:?}", self.keep_alive);
             let duration = self
                 .keep_alive
                 .map_or(Duration::from_secs(u16::max_value() as u64), |d| {
@@ -352,9 +249,9 @@ impl ConnectionHandler {
             match timeout(duration, stream.next()).await {
                 Ok(timeout_res) => {
                     if let Some(res) = timeout_res {
-                        self.process_packet(res?, conn_tx.clone()).await?;
+                        self.receiving(res?, conn_tx.clone()).await?;
                     } else {
-                        trace!("process next disconnected");
+                        trace!("disconnected");
                         break;
                     }
                 }
@@ -368,32 +265,25 @@ impl ConnectionHandler {
                                 let mut context = self.context.lock().await;
                                 context.disconnect_session(&id, *expire).await;
                             }
-                            session_tx
-                                .send(SessionEvent::Disconnect(Disconnect {
-                                    reason_code: ReasonCode::KeepAliveTimeout,
-                                    properties: Default::default(),
-                                }))
+                            self.disconnect(conn_tx, ReasonCode::KeepAliveTimeout)
                                 .await?;
-                            self.disconnect(ReasonCode::KeepAliveTimeout).await?;
                             break;
                         }
                     }
                 }
             }
         }
-        trace!("process end");
         Ok(())
     }
 
-    //#[instrument(skip(self))]
-    pub(crate) async fn run<S>(&mut self, socket: S, mut shutdown: Shutdown) -> Result<()>
+    #[instrument(skip(self, socket, shutdown), fields(remote = field::display(& self.peer)), err)]
+    pub(crate) async fn connection<S>(&mut self, socket: S, mut shutdown: Shutdown) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        trace!("run start");
         let framed = Framed::new(socket, MQTTCodec::new());
         let (sink, stream) = framed.split::<ControlPacket>();
-        let (conn_tx, connection_rx) = mpsc::channel(32);
+        let (conn_tx, conn_rx) = mpsc::channel(32);
         while !shutdown.is_shutdown() {
             // While reading a request frame, also listen for the shutdown signal.
             tokio::select! {
@@ -401,40 +291,32 @@ impl ConnectionHandler {
                     res?; // handle error
                     break; // disconnect
                 },
-                res = process_sink(sink, connection_rx) => {
+                res = sending(sink, conn_rx) => {
                     res?; // handle error
                     break; // disconnect
                 },
                 _ = shutdown.recv() => {
-                    self.disconnect(ReasonCode::ServerShuttingDown).await?;
+                    //self.disconnect(conn_tx.clone(), ReasonCode::ServerShuttingDown).await?;
                     break;
                 }
             };
         }
-        trace!("run end");
         Ok(())
     }
 }
 
-//#[instrument(skip(self))]
-async fn process_sink<S>(mut sink: S, mut reply: Receiver<ControlPacket>) -> Result<()>
+#[instrument(skip(sink, reply), err)]
+async fn sending<S>(mut sink: S, mut reply: Receiver<ControlPacket>) -> Result<()>
 where
     S: Sink<ControlPacket> + Unpin,
 {
-    trace!("process sink start");
     while let Some(msg) = reply.next().await {
-        debug!("reply: {:?}", msg);
-        sink.send(msg)
-            .map_err(|e| anyhow!("sink send error"))
-            .await?;
+        trace!("{:?}", msg);
+        if let Err(err) = sink.send(msg).await {
+            return Err(anyhow!("socket send error"));
+        }
     }
-    /*    pin!(sink);
-    reply.map(|msg| {
-        debug!("reply: {:?}", msg);
-        Ok(msg)
-    }
-    ).forward(&mut sink).await;*/
-    trace!("process sink end");
+    debug!("###########################");
     Ok(())
 }
 

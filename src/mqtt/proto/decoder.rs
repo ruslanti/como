@@ -21,11 +21,11 @@ impl Decoder for MQTTCodec {
     type Item = ControlPacket;
     type Error = anyhow::Error;
 
-    #[instrument]
+    #[instrument(skip(self), err)]
     fn decode(&mut self, reader: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         match self.part {
             PacketPart::FixedHeader => {
-                trace!("fixed header");
+                // trace!("fixed header");
                 if reader.len() < MIN_FIXED_HEADER_LEN {
                     // trace!(?self.part, "src buffer may not have entire fixed header");
                     return Ok(None);
@@ -44,7 +44,7 @@ impl Decoder for MQTTCodec {
                 remaining,
                 packet_type,
             } => {
-                trace!("variable header");
+                // trace!("variable header");
                 if reader.len() < remaining {
                     trace!(?self.part, "src buffer does not have entire variable header and payload");
                     return Ok(None);

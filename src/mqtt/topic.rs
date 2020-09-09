@@ -1,14 +1,20 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::fmt;
+use std::fmt::Display;
 
 use bytes::Bytes;
+use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::RecvError::Lagged;
 use tokio::sync::{broadcast, mpsc, RwLock};
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, field, instrument, trace, warn};
+
+use crate::mqtt::proto::types::MqttString;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Message {
     pub retain: bool,
+    pub topic_name: MqttString,
     pub content_type: Option<Bytes>,
     pub data: Bytes,
 }
@@ -30,24 +36,11 @@ enum MatchState<'a> {
 }
 
 impl Topic {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(name: String) -> Self {
         let (channel, mut rx) = broadcast::channel(32);
-        debug!("new topic channel {:?}", channel);
+        debug!("new topic");
         tokio::spawn(async move {
-            debug!("new topic spawn start {:?}", rx);
-            loop {
-                match rx.recv().await {
-                    Ok(msg) => debug!("received: {:?}", msg),
-                    Err(Lagged(lag)) => {
-                        warn!("lagged: {}", lag);
-                    }
-                    Err(err) => {
-                        error!(cause = ?err, "topic error: ");
-                        break;
-                    }
-                }
-            }
-            debug!("new topic spawn stop {:?}", rx);
+            Topic::topic(name, rx).await;
         });
         Topic {
             channel,
@@ -55,17 +48,36 @@ impl Topic {
         }
     }
 
-    pub(crate) fn publish(&mut self, path: &str) -> PublishTopic {
-        println!("get {:?}", path);
-        let mut s = path.splitn(2, '/');
+    #[instrument(skip(rx))]
+    async fn topic(name: String, mut rx: Receiver<Message>) {
+        trace!("new topic spawn start {:?}", rx);
+        loop {
+            match rx.recv().await {
+                Ok(msg) => trace!("{:?}", msg),
+                Err(Lagged(lag)) => {
+                    warn!("lagged: {}", lag);
+                }
+                Err(err) => {
+                    error!(cause = ?err, "topic error: ");
+                    break;
+                }
+            }
+        }
+        trace!("new topic spawn stop {:?}", rx);
+    }
+
+    #[instrument(skip(self))]
+    pub(crate) fn publish_topic(&mut self, topic_name: &str) -> PublishTopic {
+        //  println!("get {:?}", topic_name);
+        let mut s = topic_name.splitn(2, '/');
         match s.next() {
             Some(prefix) => {
                 let topic = self
                     .topics
                     .entry(prefix.to_string())
-                    .or_insert_with(|| Topic::new());
+                    .or_insert_with(|| Topic::new(prefix.to_string()));
                 match s.next() {
-                    Some(suffix) => topic.publish(suffix),
+                    Some(suffix) => topic.publish_topic(suffix),
                     None => topic.channel.clone(),
                 }
             }
@@ -73,16 +85,17 @@ impl Topic {
         }
     }
 
-    pub(crate) fn subscribe(&self, path: &str) -> Vec<SubscribeTopic> {
+    #[instrument(skip(self))]
+    pub(crate) fn subscribe_topic(&self, topic_name: &str) -> Vec<SubscribeTopic> {
         let mut pattern = Vec::new();
-        for item in path.split('/') {
+        for item in topic_name.split('/') {
             match item {
                 "#" => pattern.push(MatchState::MultiLevel),
                 "+" => pattern.push(MatchState::SingleLevel),
                 _ => pattern.push(MatchState::Topic(item)),
             }
         }
-        println!("find path: {:?} => {:?}", path, pattern);
+        //  println!("find path: {:?} => {:?}", topic_name, pattern);
         let mut res = Vec::new();
 
         let mut stack = VecDeque::new();
@@ -93,15 +106,14 @@ impl Topic {
         while let Some((level, name, node)) = stack.pop_front() {
             if let Some(&state) = pattern.get(level) {
                 let max_level = pattern.len();
-                println!("state {:?} level: {} len: {}", state, level, pattern.len());
+                // println!("state {:?} level: {} len: {}", state, level, pattern.len());
                 match state {
                     MatchState::Topic(pattern) => {
-                        println!("pattern {:?} - name {:?}", pattern, name);
+                        //  println!("pattern {:?} - name {:?}", pattern, name);
                         if name == pattern {
                             if (level + 1) == max_level {
                                 // FINAL
                                 res.push(node.channel.subscribe());
-                                println!("FOUND {}", name)
                             }
 
                             for (node_name, node) in node.topics.iter() {
@@ -110,12 +122,12 @@ impl Topic {
                         }
                     }
                     MatchState::SingleLevel => {
-                        println!("pattern + - level {:?}", level);
+                        //  println!("pattern + - level {:?}", level);
                         if !name.starts_with("$") {
                             if (level + 1) == max_level {
                                 // FINAL
                                 res.push(node.channel.subscribe());
-                                println!("FOUND {}", name)
+                                // println!("FOUND {}", name)
                             }
 
                             for (node_name, node) in node.topics.iter() {
@@ -124,9 +136,9 @@ impl Topic {
                         }
                     }
                     MatchState::MultiLevel => {
-                        println!("pattern # - level {:?}", level);
+                        //println!("pattern # - level {:?}", level);
                         if !name.starts_with("$") {
-                            println!("FOUND {}", name);
+                            //  println!("FOUND {}", name);
                             res.push(node.channel.subscribe());
                             for (node_name, node) in node.topics.iter() {
                                 stack.push_back((level, node_name, node))
@@ -146,16 +158,16 @@ mod tests {
 
     #[test]
     fn test_insert() {
-        let mut root = Topic::new();
+        let mut root = Topic::new("".to_string());
 
-        println!("topic: {:?}", root.publish("aaa/ddd"));
-        println!("topic: {:?}", root.publish("/aaa/bbb"));
-        println!("topic: {:?}", root.publish("/aaa/ccc"));
-        println!("topic: {:?}", root.publish("/aaa/ccc/"));
-        println!("topic: {:?}", root.publish("/aaa/bbb/ccc"));
-        println!("topic: {:?}", root.publish("ggg"));
+        println!("topic: {:?}", root.publish_topic("aaa/ddd"));
+        println!("topic: {:?}", root.publish_topic("/aaa/bbb"));
+        println!("topic: {:?}", root.publish_topic("/aaa/ccc"));
+        println!("topic: {:?}", root.publish_topic("/aaa/ccc/"));
+        println!("topic: {:?}", root.publish_topic("/aaa/bbb/ccc"));
+        println!("topic: {:?}", root.publish_topic("ggg"));
 
         //root.find("aaa/ddd");
-        println!("subscribe: {:?}", root.subscribe("/aaa/#"));
+        println!("subscribe: {:?}", root.subscribe_topic("/aaa/#"));
     }
 }

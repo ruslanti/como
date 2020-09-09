@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,9 +11,10 @@ use tokio::sync::broadcast::RecvError::Lagged;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::timeout;
-use tracing::{debug, error, instrument, trace, warn};
+use tracing::{debug, error, field, instrument, trace, warn};
 use uuid::Uuid;
 
+use crate::mqtt;
 use crate::mqtt::proto::property::{
     ConnAckProperties, ConnectProperties, DisconnectProperties, PubResProperties,
     PublishProperties, SubAckProperties,
@@ -57,8 +59,14 @@ pub(crate) struct Session {
     root_topic: Arc<RwLock<Topic>>,
 }
 
-async fn subscribe_flow(mut channel: SubscribeTopic, mut tx: Sender<ControlPacket>) -> Result<()> {
-    debug!("new subscribe spawn start  {:?}", channel);
+#[instrument(skip(channel, tx), err)]
+async fn subscribe(
+    session: String,
+    topic_name: String,
+    mut channel: SubscribeTopic,
+    mut tx: Sender<ControlPacket>,
+) -> Result<()> {
+    debug!("new subscribe spawn start");
     loop {
         match channel.recv().await {
             Ok(msg) => {
@@ -66,15 +74,13 @@ async fn subscribe_flow(mut channel: SubscribeTopic, mut tx: Sender<ControlPacke
                 let publish = ControlPacket::Publish(Publish {
                     dup: false,
                     qos: QoS::AtMostOnce,
-                    retain: false,
-                    topic_name: "".to_string().into(),
+                    retain: msg.retain,
+                    topic_name: msg.topic_name,
                     packet_identifier: None,
                     properties: Default::default(),
-                    payload: Default::default(),
+                    payload: msg.data,
                 });
-                tx.send(publish)
-                    .await
-                    .map_err(|e| anyhow!("publish send error"))?
+                tx.send(publish).await.map_err(Error::msg)?
             }
             Err(Lagged(lag)) => {
                 warn!("lagged: {}", lag);
@@ -85,23 +91,24 @@ async fn subscribe_flow(mut channel: SubscribeTopic, mut tx: Sender<ControlPacke
             }
         }
     }
-    debug!("new subscribe spawn stop {:?}", channel);
+    debug!("new subscribe spawn stop");
     Ok(())
 }
 
 async fn publish_topic(root: Arc<RwLock<Topic>>, msg: Publish) -> Result<()> {
     let mut root = root.write().await;
     let topic = std::str::from_utf8(&msg.topic_name[..])?;
-    let channel = root.publish(topic);
+    let channel = root.publish_topic(topic);
     let message = Message {
         retain: msg.retain,
+        topic_name: msg.topic_name,
         content_type: msg.properties.content_type,
         data: msg.payload,
     };
     channel
         .send(message)
-        .map_err(|e| anyhow!("publish send error for topic {}", topic))
-        .map(|size| trace!("publish topic {} size {}", topic, size))
+        .map_err(|e| anyhow!("{:?}", e))
+        .map(|size| trace!("publish topic  size {}", size))
 }
 
 async fn exactly_once_flow(
@@ -164,9 +171,9 @@ impl Session {
         }
     }
 
-    #[instrument(skip(self))]
-    pub(crate) async fn run(&mut self) -> Result<()> {
-        trace!("start session {}", self.id);
+    #[instrument(skip(self), fields(identifier = field::display(& self.id)), err)]
+    pub(crate) async fn session(&mut self) -> Result<()> {
+        trace!("start");
         while let Some(msg) = self.rx.next().await {
             debug!("{:?}", msg);
             match msg {
@@ -182,11 +189,11 @@ impl Session {
                 SessionEvent::Disconnect(d) => self.disconnect(d).await?,
             }
         }
-        trace!("end session {}", self.id);
+        trace!("end");
         Ok(())
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, msg), err)]
     async fn publish(&mut self, msg: Publish) -> Result<()> {
         match msg.qos {
             QoS::AtMostOnce => publish_topic(self.root_topic.clone(), msg).await?,
@@ -238,13 +245,13 @@ impl Session {
         Ok(())
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), err)]
     async fn pubrel(&self, msg: PubResp) -> Result<()> {
         if let Some(tx) = self.flows.get(&msg.packet_identifier) {
             tx.clone()
                 .send(PublishEvent::PubRel(msg))
                 .await
-                .map_err(|e| anyhow!("pubrel send error"))
+                .map_err(Error::msg)
         } else {
             Err(anyhow!(
                 "protocol flow error: not found flow for packet identifier {}",
@@ -253,22 +260,25 @@ impl Session {
         }
     }
 
-    #[instrument(skip(self))]
-    async fn subscribe(&mut self, subscribe: Subscribe) -> Result<()> {
-        debug!("subscribe topics: {:?}", subscribe.topic_filters);
-
+    #[instrument(skip(self, msg), err)]
+    async fn subscribe(&mut self, msg: Subscribe) -> Result<()> {
+        debug!("subscribe topics: {:?}", msg.topic_filters);
+        //return Err(anyhow!("EROARE"));
         let root = self.root_topic.read().await;
-        let reason_codes = subscribe
+        let reason_codes = msg
             .topic_filters
             .iter()
             .map(
                 |(topic_name, topic_option)| match std::str::from_utf8(&topic_name[..]) {
                     Ok(topic) => {
-                        let channels = root.subscribe(topic);
-                        for mut channel in channels {
+                        let channels = root.subscribe_topic(topic);
+                        for channel in channels {
+                            let id = self.id.clone();
                             let resp_tx = self.tx.clone();
+                            let topic_name = topic.to_string();
                             tokio::spawn(async move {
-                                if let Err(err) = subscribe_flow(channel, resp_tx).await {
+                                if let Err(err) = subscribe(id, topic_name, channel, resp_tx).await
+                                {
                                     error!(cause = ?err, "Subscribe flow error: {}", err);
                                 }
                             });
@@ -284,12 +294,12 @@ impl Session {
             .collect();
 
         let suback = ControlPacket::SubAck(SubAck {
-            packet_identifier: subscribe.packet_identifier,
+            packet_identifier: msg.packet_identifier,
             properties: Default::default(),
             reason_codes,
         });
-        trace!("send {:?}", suback);
-        Ok(())
+        self.tx.send(suback).await.map_err(Error::msg)
+        // trace!("send {:?}", suback);
     }
 
     #[instrument(skip(self))]

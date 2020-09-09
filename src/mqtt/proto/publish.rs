@@ -1,9 +1,10 @@
 use std::convert::TryInto;
 
 use anyhow::{anyhow, Result};
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
+use crate::mqtt::proto::encoder::{encode_utf8_string, encode_variable_integer};
 use crate::mqtt::proto::property::{PropertiesBuilder, Property, PublishProperties};
 use crate::mqtt::proto::types::{ControlPacket, Publish, QoS};
 
@@ -75,4 +76,33 @@ pub fn decode_publish_properties(reader: &mut BytesMut) -> Result<PublishPropert
         }
     }
     Ok(builder.publish())
+}
+
+pub fn encode_publish_properties(
+    writer: &mut BytesMut,
+    properties: PublishProperties,
+) -> Result<()> {
+    encode_property_u8!(
+        writer,
+        PayloadFormatIndicator,
+        properties.payload_format_indicator.map(|b| b as u8)
+    );
+    encode_property_u32!(
+        writer,
+        MessageExpireInterval,
+        properties.message_expire_interval
+    );
+    encode_property_u16!(writer, TopicAlias, properties.topic_alias);
+    encode_property_string!(writer, ResponseTopic, properties.response_topic);
+    if let Some(_) = properties.correlation_data {
+        unimplemented!()
+    }
+    encode_property_user_properties!(writer, UserProperty, properties.user_properties);
+    encode_property_variable_integer!(
+        writer,
+        SubscriptionIdentifier,
+        properties.subscription_identifier
+    );
+    encode_property_string!(writer, ContentType, properties.content_type);
+    Ok(())
 }

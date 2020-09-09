@@ -35,7 +35,7 @@ impl AppContext {
             sessions: HashMap::new(),
             sessions_expire: DelayQueue::new(),
             config,
-            topic_manager: Arc::new(RwLock::new(Topic::new())),
+            topic_manager: Arc::new(RwLock::new(Topic::new("".to_string()))),
         }
     }
 
@@ -57,8 +57,8 @@ impl AppContext {
                 self.topic_manager.clone(),
             );
             tokio::spawn(async move {
-                if let Err(err) = session.run().await {
-                    warn!(cause = ?err, "session {:?} error", session);
+                if let Err(err) = session.session().await {
+                    warn!(cause = ?err, "session error");
                 }
             });
             self.sessions.insert(key.to_string(), tx.clone());
