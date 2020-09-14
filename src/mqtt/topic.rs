@@ -1,19 +1,18 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::fmt;
-use std::fmt::Display;
 
 use bytes::Bytes;
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::RecvError::Lagged;
-use tokio::sync::{broadcast, mpsc, RwLock};
-use tracing::{debug, error, field, instrument, trace, warn};
+use tracing::{debug, error, instrument, trace, warn};
 
-use crate::mqtt::proto::types::MqttString;
+use crate::mqtt::proto::types::{MqttString, QoS};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Message {
     pub retain: bool,
+    pub qos: QoS,
     pub topic_name: MqttString,
     pub content_type: Option<Bytes>,
     pub data: Bytes,
@@ -37,7 +36,7 @@ enum MatchState<'a> {
 
 impl Topic {
     pub(crate) fn new(name: String) -> Self {
-        let (channel, mut rx) = broadcast::channel(32);
+        let (channel, rx) = broadcast::channel(32);
         debug!("new topic");
         tokio::spawn(async move {
             Topic::topic(name, rx).await;

@@ -1,41 +1,27 @@
-use std::borrow::Borrow;
-use std::collections::BTreeMap;
-use std::convert::TryInto;
 use std::net::SocketAddr;
 use std::ops::{Add, Div};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Error, Result};
-use bytes::{BufMut, Bytes, BytesMut};
-use futures::future;
+use bytes::Bytes;
 use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::pin;
-use tokio::sync::broadcast::RecvError::Lagged;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock, Semaphore};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
-use tracing::{debug, error, field, instrument, span, trace, warn};
+use tracing::{debug, error, field, instrument, trace};
 use uuid::Uuid;
 
 use crate::mqtt::context::{AppContext, SessionContext};
-use crate::mqtt::proto::property::{
-    ConnAckProperties, ConnectProperties, DisconnectProperties, PubResProperties,
-    PublishProperties, SubAckProperties,
-};
+use crate::mqtt::proto::property::ConnAckProperties;
 use crate::mqtt::proto::types::{
-    Auth, ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, PacketType, PubResp, Publish,
-    QoS, ReasonCode, SubAck, Subscribe, UnSubscribe, Will,
+    Auth, ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, QoS, ReasonCode,
 };
-use crate::mqtt::session::{Session, SessionEvent};
+use crate::mqtt::session::SessionEvent;
 use crate::mqtt::shutdown::Shutdown;
-use crate::mqtt::topic::{Message, Topic};
-use crate::settings::{ConnectionSettings, Settings};
-
-type ExactlyOnceReceiver = mpsc::Receiver<(ControlPacket, oneshot::Sender<ControlPacket>)>;
-type ExactlyOnceSender = mpsc::Sender<(ControlPacket, oneshot::Sender<ControlPacket>)>;
+use crate::settings::ConnectionSettings;
 
 #[derive(Debug)]
 pub struct ConnectionHandler {
@@ -156,7 +142,7 @@ impl ConnectionHandler {
         //trace!("{:?}", packet);
         match (self.session.clone(), packet) {
             (None, ControlPacket::Connect(connect)) => self.connect(connect, conn_tx).await,
-            (None, ControlPacket::Auth(auth)) => unimplemented!(), //self.process_auth(auth).await,
+            (None, ControlPacket::Auth(_auth)) => unimplemented!(), //self.process_auth(auth).await,
             (None, packet) => {
                 error!(
                     "unacceptable packet {:?} in not defined session state",
@@ -170,9 +156,15 @@ impl ConnectionHandler {
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, mut session_tx, _)), ControlPacket::PubRel(pubresp)) => {
+            (Some((_, mut session_tx, _)), ControlPacket::PubAck(response)) => {
                 session_tx
-                    .send(SessionEvent::PubRel(pubresp))
+                    .send(SessionEvent::PubAck(response))
+                    .map_err(Error::msg)
+                    .await
+            }
+            (Some((_, mut session_tx, _)), ControlPacket::PubRel(response)) => {
+                session_tx
+                    .send(SessionEvent::PubRel(response))
                     .map_err(Error::msg)
                     .await
             }
@@ -188,7 +180,7 @@ impl ConnectionHandler {
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_)), ControlPacket::PingReq) => {
+            (Some(_), ControlPacket::PingReq) => {
                 conn_tx
                     .send(ControlPacket::PingResp)
                     .map_err(Error::msg)
@@ -260,7 +252,7 @@ impl ConnectionHandler {
                     // handle timeout
                     match self.session.as_mut() {
                         None => return Err(e.into()),
-                        Some((id, session_tx, expire)) => {
+                        Some((id, _session_tx, expire)) => {
                             {
                                 let mut context = self.context.lock().await;
                                 context.disconnect_session(&id, *expire).await;
@@ -312,11 +304,10 @@ where
 {
     while let Some(msg) = reply.next().await {
         trace!("{:?}", msg);
-        if let Err(err) = sink.send(msg).await {
+        if let Err(_err) = sink.send(msg).await {
             return Err(anyhow!("socket send error"));
         }
     }
-    debug!("###########################");
     Ok(())
 }
 

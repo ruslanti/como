@@ -23,7 +23,7 @@ macro_rules! end_of_stream {
     };
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Ord, PartialOrd, Hash)]
 pub enum QoS {
     AtMostOnce,
     AtLeastOnce,
@@ -83,7 +83,7 @@ impl<'de> Deserialize<'de> for QoS {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Hash)]
 pub enum Retain {
     SendAtTime,
     SendAtSubscribe,
@@ -342,7 +342,7 @@ pub struct Disconnect {
     pub properties: DisconnectProperties,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub struct SubOption {
     pub qos: QoS,
     pub nl: bool,

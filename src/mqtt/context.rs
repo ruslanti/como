@@ -1,22 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::time::Duration;
 
-use anyhow::Result;
-use futures::ready;
-use tokio::stream::Stream;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{mpsc, Mutex, RwLock};
-use tokio::time::{delay_queue, DelayQueue, Error};
-use tracing::{debug, error, instrument, trace, warn};
-use uuid::Uuid;
+use tokio::sync::{mpsc, RwLock};
+use tokio::time::DelayQueue;
+use tracing::warn;
 
-use crate::mqtt::proto::types::{ControlPacket, MqttString};
-use crate::mqtt::session::SessionEvent::Disconnect;
+use crate::mqtt::proto::types::ControlPacket;
 use crate::mqtt::session::{Session, SessionEvent};
 use crate::mqtt::topic::Topic;
-use crate::settings::{ConnectionSettings, Settings};
+use crate::settings::Settings;
 
 type SessionSender = Sender<SessionEvent>;
 pub(crate) type SessionContext = Option<(String, SessionSender, Option<u32>)>;
@@ -66,7 +59,7 @@ impl AppContext {
         }
     }
 
-    pub async fn disconnect_session(&mut self, key: &str, expire: Option<u32>) {
+    pub async fn disconnect_session(&mut self, key: &str, _expire: Option<u32>) {
         /*        if let Some(expire) = expire {
             self.sessions_expire.insert(key.to_string(), Duration::from_secs(expire as u64));
         } else {*/

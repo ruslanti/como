@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
-use tracing::trace;
 
 use crate::mqtt::proto::disconnect::encode_disconnect_properties;
 use crate::mqtt::proto::property::PropertiesLength;
@@ -45,17 +44,18 @@ impl Encoder<Publish> for MQTTCodec {
     fn encode(&mut self, msg: Publish, writer: &mut BytesMut) -> Result<(), Self::Error> {
         let properties_length = msg.properties.len(); // properties
         let properties_length_size = encoded_variable_integer_len(properties_length); // properties length
-        let packet_identifier_len = if let Some(id) = msg.packet_identifier {
+        let packet_identifier_len = if let Some(_) = msg.packet_identifier {
             2
         } else {
             0
         };
-        let remaining_length = 1
-            + msg.topic_name.len()
+        let remaining_length = msg.topic_name.len()
+            + 2
             + packet_identifier_len
             + properties_length_size
             + properties_length
-            + msg.payload.len();
+            + msg.payload.len()
+            + 2;
         let remaining_length_size = encoded_variable_integer_len(remaining_length); // remaining length size
         writer.reserve(1 + remaining_length_size + remaining_length);
 
@@ -164,7 +164,7 @@ impl Encoder<ControlPacket> for MQTTCodec {
                 writer.put_u8(0); // remaining length
             }
             ControlPacket::Disconnect(disconnect) => self.encode(disconnect, writer)?,
-            ControlPacket::Auth(auth) => unimplemented!(),
+            ControlPacket::Auth(_auth) => unimplemented!(),
         };
         Ok(())
     }

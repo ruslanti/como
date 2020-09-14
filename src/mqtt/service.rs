@@ -3,18 +3,15 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, Mutex, RwLock, Semaphore};
+use tokio::sync::{broadcast, mpsc, Mutex, Semaphore};
 use tokio::time::{self, Duration};
 use tokio_native_tls::TlsAcceptor;
-use tokio_util::codec::Framed;
 use tracing::{debug, error, field, info, instrument};
 
 use crate::mqtt::connection::ConnectionHandler;
 use crate::mqtt::context::AppContext;
-use crate::mqtt::proto::types::{ControlPacket, MQTTCodec};
 use crate::mqtt::shutdown::Shutdown;
-use crate::mqtt::topic::Topic;
-use crate::settings::{ConnectionSettings, Settings};
+use crate::settings::Settings;
 
 #[derive(Debug)]
 struct Service {
@@ -24,7 +21,6 @@ struct Service {
     notify_shutdown: broadcast::Sender<()>,
     shutdown_complete_rx: mpsc::Receiver<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
-    sessions_states_tx: mpsc::Sender<ControlPacket>,
     config: Arc<Settings>,
     context: Arc<Mutex<AppContext>>,
 }
@@ -38,7 +34,6 @@ pub(crate) async fn run(
 ) -> Result<()> {
     let (notify_shutdown, _) = broadcast::channel(1);
     let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel(1);
-    let (sessions_states_tx, sessions_states_rx) = mpsc::channel(32);
 
     // Initialize the listener state
     let mut service = Service {
@@ -48,7 +43,6 @@ pub(crate) async fn run(
         notify_shutdown,
         shutdown_complete_rx,
         shutdown_complete_tx,
-        sessions_states_tx,
         config,
         context,
     };

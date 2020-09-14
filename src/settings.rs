@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use config::{Config, ConfigError, File};
 use serde::Deserialize;
 

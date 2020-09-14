@@ -1,30 +1,22 @@
+use std::cmp::min;
 use std::collections::HashMap;
-use std::fmt;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{anyhow, Error, Result};
-use bytes::Bytes;
-use futures::{future, Future};
-use tokio::stream::StreamExt;
+use tokio::stream::{StreamExt, StreamMap};
 use tokio::sync::broadcast::RecvError::Lagged;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, RwLock};
-use tokio::time::timeout;
 use tracing::{debug, error, field, instrument, trace, warn};
-use uuid::Uuid;
 
-use crate::mqtt;
-use crate::mqtt::proto::property::{
-    ConnAckProperties, ConnectProperties, DisconnectProperties, PubResProperties,
-    PublishProperties, SubAckProperties,
-};
+use crate::mqtt::proto::property::PubResProperties;
 use crate::mqtt::proto::types::{
-    Auth, ConnAck, Connect, ControlPacket, Disconnect, PacketType, PubResp, Publish, QoS,
-    ReasonCode, SubAck, Subscribe, UnSubscribe, Will,
+    ControlPacket, Disconnect, PacketType, PubResp, Publish, QoS, ReasonCode, SubAck, SubOption,
+    Subscribe, UnSubscribe,
 };
 use crate::mqtt::topic::{Message, SubscribeTopic, Topic};
-use crate::settings::{ConnectionSettings, Settings};
+use crate::settings::Settings;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum SessionEvent {
@@ -55,43 +47,20 @@ pub(crate) struct Session {
     rx: Receiver<SessionEvent>,
     tx: Sender<ControlPacket>,
     config: Arc<Settings>,
-    flows: HashMap<u16, Sender<PublishEvent>>,
+    server_flows: HashMap<u16, Sender<PublishEvent>>,
+    client_flows: HashMap<u16, Sender<PublishEvent>>,
     root_topic: Arc<RwLock<Topic>>,
+    packet_identifier_seq: Arc<AtomicU16>,
+    subscriptions: StreamMap<(String, SubOption), SubscribeTopic>,
 }
 
-#[instrument(skip(channel, tx), err)]
-async fn subscribe(
+#[instrument(skip(rx, tx), err)]
+async fn exactly_once_client(
     session: String,
-    topic_name: String,
-    mut channel: SubscribeTopic,
+    packet_identifier: u16,
+    mut rx: Receiver<PublishEvent>,
     mut tx: Sender<ControlPacket>,
 ) -> Result<()> {
-    debug!("new subscribe spawn start");
-    loop {
-        match channel.recv().await {
-            Ok(msg) => {
-                debug!("received: {:?}", msg);
-                let publish = ControlPacket::Publish(Publish {
-                    dup: false,
-                    qos: QoS::AtMostOnce,
-                    retain: msg.retain,
-                    topic_name: msg.topic_name,
-                    packet_identifier: None,
-                    properties: Default::default(),
-                    payload: msg.data,
-                });
-                tx.send(publish).await.map_err(Error::msg)?
-            }
-            Err(Lagged(lag)) => {
-                warn!("lagged: {}", lag);
-            }
-            Err(err) => {
-                error!(cause = ?err, "topic error: ");
-                break;
-            }
-        }
-    }
-    debug!("new subscribe spawn stop");
     Ok(())
 }
 
@@ -101,6 +70,7 @@ async fn publish_topic(root: Arc<RwLock<Topic>>, msg: Publish) -> Result<()> {
     let channel = root.publish_topic(topic);
     let message = Message {
         retain: msg.retain,
+        qos: msg.qos,
         topic_name: msg.topic_name,
         content_type: msg.properties.content_type,
         data: msg.payload,
@@ -111,13 +81,14 @@ async fn publish_topic(root: Arc<RwLock<Topic>>, msg: Publish) -> Result<()> {
         .map(|size| trace!("publish topic  size {}", size))
 }
 
-async fn exactly_once_flow(
+#[instrument(skip(rx, tx, root), err)]
+async fn exactly_once_server(
+    session: String,
     packet_identifier: u16,
     root: Arc<RwLock<Topic>>,
     mut rx: Receiver<PublishEvent>,
     mut tx: Sender<ControlPacket>,
 ) -> Result<()> {
-    trace!("start flow {}", packet_identifier);
     if let Some(event) = rx.recv().await {
         if let PublishEvent::Publish(msg) = event {
             publish_topic(root, msg).await?;
@@ -129,8 +100,9 @@ async fn exactly_once_flow(
             });
             tx.send(rec).await?;
 
-            match timeout(Duration::from_secs(1), rx.recv()).await {
-                Ok(Some(PublishEvent::PubRel(rel))) => {
+            match rx.recv().await {
+                Some(PublishEvent::PubRel(rel)) => {
+                    trace!("{:?}", rel);
                     //TODO discard packet identifier
                     let comp = ControlPacket::PubComp(PubResp {
                         packet_type: PacketType::PUBCOMP,
@@ -141,15 +113,15 @@ async fn exactly_once_flow(
                     tx.send(comp).await?;
                     ()
                 }
-                Ok(Some(event)) => return Err(anyhow!("unknown event received: {:?}", event)),
-                Ok(None) => return Err(anyhow!("channel closed")),
-                Err(elapsed) => return Err(anyhow!("pub rel receive timeout: {}", elapsed)),
+                Some(event) => {
+                    return Err(anyhow!("{} unknown event received: {:?}", session, event))
+                }
+                None => return Err(anyhow!("{} channel closed", session)),
             }
         } else {
-            return Err(anyhow!("unexpected publish event {:?}", event));
+            return Err(anyhow!("{} unexpected publish event {:?}", session, event));
         }
     }
-    trace!("end flow {}", packet_identifier);
     Ok(())
 }
 
@@ -166,28 +138,65 @@ impl Session {
             rx,
             tx,
             config,
-            flows: Default::default(),
+            server_flows: Default::default(),
+            client_flows: Default::default(),
             root_topic,
+            packet_identifier_seq: Arc::new(AtomicU16::new(1)),
+            subscriptions: StreamMap::new(),
         }
     }
 
     #[instrument(skip(self), fields(identifier = field::display(& self.id)), err)]
     pub(crate) async fn session(&mut self) -> Result<()> {
         trace!("start");
-        while let Some(msg) = self.rx.next().await {
-            debug!("{:?}", msg);
-            match msg {
-                SessionEvent::Publish(p) => self.publish(p).await?,
-                SessionEvent::PubAck(p) => unimplemented!(),
-                SessionEvent::PubRec(p) => unimplemented!(),
-                SessionEvent::PubRel(p) => self.pubrel(p).await?,
-                SessionEvent::PubComp(p) => unimplemented!(),
-                SessionEvent::Subscribe(s) => self.subscribe(s).await?,
-                SessionEvent::SubAck(s) => unimplemented!(),
-                SessionEvent::UnSubscribe(s) => unimplemented!(),
-                SessionEvent::UnSubAck(s) => unimplemented!(),
-                SessionEvent::Disconnect(d) => self.disconnect(d).await?,
-            }
+        loop {
+            tokio::select! {
+                            Some(msg) = self.rx.next() => {
+                                trace!("command: {:?}", msg);
+                                match msg {
+                                    SessionEvent::Publish(p) => self.publish(p).await?,
+                                    SessionEvent::PubAck(p) => self.puback(p).await?,
+                                    SessionEvent::PubRec(_p) => unimplemented!(),
+                                    SessionEvent::PubRel(p) => self.pubrel(p).await?,
+                                    SessionEvent::PubComp(_p) => unimplemented!(),
+                                    SessionEvent::Subscribe(s) => self.subscribe(s).await?,
+                                    SessionEvent::SubAck(_s) => unimplemented!(),
+                                    SessionEvent::UnSubscribe(_s) => unimplemented!(),
+                                    SessionEvent::UnSubAck(_s) => unimplemented!(),
+                                    SessionEvent::Disconnect(d) => self.disconnect(d).await?,
+                                }
+                            },
+                            Some(((topic, option), message)) = self.subscriptions.next() => {
+                            match message {
+                                Ok(msg) => {
+                                    trace!("topic: {:?}, message: {:?}", topic, msg);
+                                    let id = self.id.clone();
+                                    let resp_tx = self.tx.clone();
+                                    //let topic_name = topic.to_string();
+                                    let packet_identifier = self.packet_identifier_seq.clone();
+            /*                        tokio::spawn(async move {
+                                        if let Err(err) = self.publish_client(
+                                                    msg,
+                                                    option,
+                                                    packet_identifier,
+                                                    resp_tx,
+                                                ).await
+                                            {
+                                                error!(cause = ?err, "Subscribe flow error: {}", err);
+                                            }
+                                    });*/
+                                },
+                                Err(Lagged(lag)) => {
+                                    warn!("lagged: {}", lag);
+                                },
+                                Err(err) => {
+                                    error!(cause = ?err, "topic error: ");
+                                    break;
+                                }
+                            }
+                            },
+                            else => break,
+                        }
         }
         trace!("end");
         Ok(())
@@ -217,24 +226,26 @@ impl Session {
             }
             QoS::ExactlyOnce => {
                 if let Some(packet_identifier) = msg.packet_identifier {
-                    if self.flows.contains_key(&packet_identifier) && !msg.dup {
+                    if self.server_flows.contains_key(&packet_identifier) && !msg.dup {
                         let disconnect = ControlPacket::Disconnect(Disconnect {
                             reason_code: ReasonCode::PacketIdentifierInUse,
                             properties: Default::default(),
                         });
                         self.tx.send(disconnect).await?;
                     } else {
+                        let session = self.id.clone();
                         let (mut tx, rx) = mpsc::channel(1);
                         let root = self.root_topic.clone();
                         let resp_tx = self.tx.clone();
                         tokio::spawn(async move {
                             if let Err(err) =
-                                exactly_once_flow(packet_identifier, root, rx, resp_tx).await
+                                exactly_once_server(session, packet_identifier, root, rx, resp_tx)
+                                    .await
                             {
                                 error!(cause = ?err, "QoS 2 protocol error: {}", err);
                             }
                         });
-                        self.flows.insert(packet_identifier, tx.clone());
+                        self.server_flows.insert(packet_identifier, tx.clone());
                         tx.send(PublishEvent::Publish(msg)).await?
                     }
                 } else {
@@ -247,7 +258,7 @@ impl Session {
 
     #[instrument(skip(self), err)]
     async fn pubrel(&self, msg: PubResp) -> Result<()> {
-        if let Some(tx) = self.flows.get(&msg.packet_identifier) {
+        if let Some(tx) = self.server_flows.get(&msg.packet_identifier) {
             tx.clone()
                 .send(PublishEvent::PubRel(msg))
                 .await
@@ -260,38 +271,34 @@ impl Session {
         }
     }
 
+    #[instrument(skip(self), err)]
+    async fn puback(&self, msg: PubResp) -> Result<()> {
+        trace!("{:?}", msg);
+        Ok(())
+    }
+
     #[instrument(skip(self, msg), err)]
     async fn subscribe(&mut self, msg: Subscribe) -> Result<()> {
         debug!("subscribe topics: {:?}", msg.topic_filters);
-        //return Err(anyhow!("EROARE"));
         let root = self.root_topic.read().await;
-        let reason_codes = msg
-            .topic_filters
-            .iter()
-            .map(
-                |(topic_name, topic_option)| match std::str::from_utf8(&topic_name[..]) {
-                    Ok(topic) => {
-                        let channels = root.subscribe_topic(topic);
-                        for channel in channels {
-                            let id = self.id.clone();
-                            let resp_tx = self.tx.clone();
-                            let topic_name = topic.to_string();
-                            tokio::spawn(async move {
-                                if let Err(err) = subscribe(id, topic_name, channel, resp_tx).await
-                                {
-                                    error!(cause = ?err, "Subscribe flow error: {}", err);
-                                }
-                            });
-                        }
-                        ReasonCode::Success
+        //let mut subscriptions = self.subscriptions;
+        let mut reason_codes = Vec::new();
+        for (topic_name, topic_option) in msg.topic_filters {
+            reason_codes.push(match std::str::from_utf8(&topic_name[..]) {
+                Ok(topic) => {
+                    let channels = root.subscribe_topic(topic);
+                    for channel in channels {
+                        self.subscriptions
+                            .insert((topic.to_string(), topic_option.clone()), channel);
                     }
-                    Err(err) => {
-                        debug!(cause = ?err, "subscribe error: ");
-                        ReasonCode::TopicFilterInvalid
-                    }
-                },
-            )
-            .collect();
+                    ReasonCode::Success
+                }
+                Err(err) => {
+                    debug!(cause = ?err, "subscribe error: ");
+                    ReasonCode::TopicFilterInvalid
+                }
+            })
+        }
 
         let suback = ControlPacket::SubAck(SubAck {
             packet_identifier: msg.packet_identifier,
@@ -300,6 +307,65 @@ impl Session {
         });
         self.tx.send(suback).await.map_err(Error::msg)
         // trace!("send {:?}", suback);
+    }
+
+    #[instrument(skip(tx), err)]
+    async fn publish_client(
+        &mut self,
+        msg: Message,
+        option: SubOption,
+        packet_identifier: Arc<AtomicU16>,
+        mut tx: Sender<ControlPacket>,
+    ) -> Result<()> {
+        debug!("new subscribe spawn start");
+
+        /* loop {
+            match channel.recv().await {
+                Ok(msg) => {
+                    debug!("received: {:?}", msg);
+                    let qos = min(msg.qos, option.qos);
+                    let packet_identifier = if QoS::AtMostOnce == qos {
+                        None
+                    } else {
+                        Some(packet_identifier.fetch_add(1, Ordering::Relaxed))
+                    };
+                    let publish = ControlPacket::Publish(Publish {
+                        dup: false,
+                        qos,
+                        retain: msg.retain,
+                        topic_name: msg.topic_name,
+                        packet_identifier,
+                        properties: Default::default(),
+                        payload: msg.data,
+                    });
+                    tx.send(publish).await.map_err(Error::msg)?;
+
+                    if QoS::ExactlyOnce == qos {
+                        let (mut tx, rx) = mpsc::channel(1);
+                        let packet_identifier = packet_identifier.unwrap();
+                        self.server_flows.insert(packet_identifier, tx.clone());
+                        let resp_tx = self.tx.clone();
+                        let session = self.id.clone();
+                        tokio::spawn(async move {
+                            if let Err(err) =
+                                exactly_once_client(session, packet_identifier, rx, resp_tx).await
+                            {
+                                error!(cause = ?err, "QoS 2 protocol error: {}", err);
+                            }
+                        });
+                    }
+                }
+                Err(Lagged(lag)) => {
+                    warn!("lagged: {}", lag);
+                }
+                Err(err) => {
+                    error!(cause = ?err, "topic error: ");
+                    break;
+                }
+            }
+        }*/
+        debug!("new subscribe spawn stop");
+        Ok(())
     }
 
     #[instrument(skip(self))]
