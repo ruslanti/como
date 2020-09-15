@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, BytesMut};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
@@ -53,6 +53,16 @@ pub fn decode_pubrel(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     })))
 }
 
+pub fn decode_pubcomp(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
+    let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
+    Ok(Some(ControlPacket::PubComp(PubResp {
+        packet_type: PacketType::PUBCOMP,
+        packet_identifier,
+        reason_code,
+        properties,
+    })))
+}
+
 pub fn decode_pubres_properties(reader: &mut BytesMut) -> Result<PubResProperties> {
     let mut builder = PropertiesBuilder::new();
     while reader.has_remaining() {
@@ -67,7 +77,7 @@ pub fn decode_pubres_properties(reader: &mut BytesMut) -> Result<PubResPropertie
                     builder = builder.user_properties((key, value));
                 }
             }
-            _ => return Err(anyhow!("unknown pubres property: {:x}", id)),
+            _ => bail!("unknown pubres property: {:x}", id),
         }
     }
     Ok(builder.pubres())

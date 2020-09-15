@@ -3,12 +3,12 @@ use std::convert::{TryFrom, TryInto};
 
 use anyhow::anyhow;
 use bytes::Bytes;
-use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer};
+use serde::de::Visitor;
 
 use crate::mqtt::proto::property::{
-    AuthProperties, ConnAckProperties, ConnectProperties, DisconnectProperties, PubResProperties,
-    PublishProperties, SubAckProperties, SubscribeProperties, UnSubscribeProperties,
+    AuthProperties, ConnAckProperties, ConnectProperties, DisconnectProperties, PublishProperties,
+    PubResProperties, SubAckProperties, SubscribeProperties, UnSubscribeProperties,
     WillProperties,
 };
 
@@ -17,9 +17,7 @@ pub type MqttString = Bytes;
 #[macro_use]
 macro_rules! end_of_stream {
     ($condition: expr, $context: expr) => {
-        if $condition {
-            return Err(anyhow!("end of stream").context($context));
-        };
+        ensure!(!$condition, anyhow!("end of stream").context($context));
     };
 }
 

@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, Bytes, BytesMut};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
@@ -13,11 +13,11 @@ const VERSION: u8 = 5;
 
 pub fn decode_connect(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     if Some(Bytes::from(MQTT)) != decode_utf8_string(reader)? {
-        return Err(anyhow!("wrong protocol name"));
+        bail!("wrong protocol name");
     }
     end_of_stream!(reader.remaining() < 4, "connect version");
     if VERSION != reader.get_u8() {
-        return Err(anyhow!("wrong protocol version"));
+        bail!("wrong protocol version");
     }
 
     let flags = reader.get_u8();
@@ -113,10 +113,10 @@ fn decode_connect_properties(reader: &mut BytesMut) -> Result<ConnectProperties>
                 if let Some(authentication_method) = decode_utf8_string(reader)? {
                     builder = builder.authentication_method(authentication_method)?
                 } else {
-                    return Err(anyhow!("missing authentication method"));
+                    bail!("missing authentication method");
                 }
             }
-            _ => return Err(anyhow!("unknown connect property: {:x}", id)),
+            _ => bail!("unknown connect property: {:x}", id),
         }
     }
     Ok(builder.connect())

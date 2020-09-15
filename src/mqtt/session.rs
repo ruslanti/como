@@ -1,18 +1,18 @@
 use std::cmp::min;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 
-use anyhow::{anyhow, Error, Result};
+use anyhow::{anyhow, bail, Error, Result};
 use tokio::stream::{StreamExt, StreamMap};
+use tokio::sync::{mpsc, RwLock};
 use tokio::sync::broadcast::RecvError::Lagged;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, field, instrument, trace, warn};
 
 use crate::mqtt::proto::property::PubResProperties;
 use crate::mqtt::proto::types::{
-    ControlPacket, Disconnect, PacketType, PubResp, Publish, QoS, ReasonCode, SubAck, SubOption,
+    ControlPacket, Disconnect, PacketType, Publish, PubResp, QoS, ReasonCode, SubAck, SubOption,
     Subscribe, UnSubscribe,
 };
 use crate::mqtt::topic::{Message, SubscribeTopic, Topic};
@@ -35,7 +35,6 @@ pub(crate) enum SessionEvent {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum PublishEvent {
     Publish(Publish),
-    PubAck(PubResp),
     PubRec(PubResp),
     PubRel(PubResp),
     PubComp(PubResp),
@@ -54,16 +53,6 @@ pub(crate) struct Session {
     subscriptions: StreamMap<(String, SubOption), SubscribeTopic>,
 }
 
-#[instrument(skip(rx, tx), err)]
-async fn exactly_once_client(
-    session: String,
-    packet_identifier: u16,
-    mut rx: Receiver<PublishEvent>,
-    mut tx: Sender<ControlPacket>,
-) -> Result<()> {
-    Ok(())
-}
-
 async fn publish_topic(root: Arc<RwLock<Topic>>, msg: Publish) -> Result<()> {
     let mut root = root.write().await;
     let topic = std::str::from_utf8(&msg.topic_name[..])?;
@@ -79,6 +68,40 @@ async fn publish_topic(root: Arc<RwLock<Topic>>, msg: Publish) -> Result<()> {
         .send(message)
         .map_err(|e| anyhow!("{:?}", e))
         .map(|size| trace!("publish topic  size {}", size))
+}
+
+#[instrument(skip(rx, tx), err)]
+async fn exactly_once_client(
+    session: String,
+    packet_identifier: u16,
+    mut rx: Receiver<PublishEvent>,
+    mut tx: Sender<ControlPacket>,
+) -> Result<()> {
+    if let Some(event) = rx.recv().await {
+        if let PublishEvent::PubRec(msg) = event {
+            let rel = ControlPacket::PubRel(PubResp {
+                packet_type: PacketType::PUBREL,
+                packet_identifier,
+                reason_code: ReasonCode::Success,
+                properties: Default::default(),
+            });
+            tx.send(rel).await?;
+
+            match rx.recv().await {
+                Some(PublishEvent::PubComp(comp)) => {
+                    trace!("{:?}", comp);
+                    ()
+                }
+                Some(event) => {
+                    bail!("{} unknown event received: {:?}", session, event)
+                }
+                None => bail!("{} channel closed", session),
+            }
+        } else {
+            bail!("{} unexpected pubrec event {:?}", session, event);
+        }
+    }
+    Ok(())
 }
 
 #[instrument(skip(rx, tx, root), err)]
@@ -114,12 +137,12 @@ async fn exactly_once_server(
                     ()
                 }
                 Some(event) => {
-                    return Err(anyhow!("{} unknown event received: {:?}", session, event))
+                    bail!("{} unknown event received: {:?}", session, event)
                 }
-                None => return Err(anyhow!("{} channel closed", session)),
+                None => bail!("{} channel closed", session),
             }
         } else {
-            return Err(anyhow!("{} unexpected publish event {:?}", session, event));
+            bail!("{} unexpected publish event {:?}", session, event);
         }
     }
     Ok(())
@@ -151,54 +174,77 @@ impl Session {
         trace!("start");
         loop {
             tokio::select! {
-                            Some(msg) = self.rx.next() => {
-                                trace!("command: {:?}", msg);
-                                match msg {
-                                    SessionEvent::Publish(p) => self.publish(p).await?,
-                                    SessionEvent::PubAck(p) => self.puback(p).await?,
-                                    SessionEvent::PubRec(_p) => unimplemented!(),
-                                    SessionEvent::PubRel(p) => self.pubrel(p).await?,
-                                    SessionEvent::PubComp(_p) => unimplemented!(),
-                                    SessionEvent::Subscribe(s) => self.subscribe(s).await?,
-                                    SessionEvent::SubAck(_s) => unimplemented!(),
-                                    SessionEvent::UnSubscribe(_s) => unimplemented!(),
-                                    SessionEvent::UnSubAck(_s) => unimplemented!(),
-                                    SessionEvent::Disconnect(d) => self.disconnect(d).await?,
-                                }
-                            },
-                            Some(((topic, option), message)) = self.subscriptions.next() => {
-                            match message {
-                                Ok(msg) => {
-                                    trace!("topic: {:?}, message: {:?}", topic, msg);
-                                    let id = self.id.clone();
-                                    let resp_tx = self.tx.clone();
-                                    //let topic_name = topic.to_string();
-                                    let packet_identifier = self.packet_identifier_seq.clone();
-            /*                        tokio::spawn(async move {
-                                        if let Err(err) = self.publish_client(
-                                                    msg,
-                                                    option,
-                                                    packet_identifier,
-                                                    resp_tx,
-                                                ).await
-                                            {
-                                                error!(cause = ?err, "Subscribe flow error: {}", err);
-                                            }
-                                    });*/
-                                },
-                                Err(Lagged(lag)) => {
-                                    warn!("lagged: {}", lag);
-                                },
-                                Err(err) => {
-                                    error!(cause = ?err, "topic error: ");
-                                    break;
-                                }
-                            }
-                            },
-                            else => break,
+                Some(msg) = self.rx.next() => {
+                    trace!("command: {:?}", msg);
+                    match msg {
+                        SessionEvent::Publish(p) => self.publish(p).await?,
+                        SessionEvent::PubAck(p) => self.puback(p).await?,
+                        SessionEvent::PubRec(p) => self.pubrec(p).await?,
+                        SessionEvent::PubRel(p) => self.pubrel(p).await?,
+                        SessionEvent::PubComp(p) => self.pubcomp(p).await?,
+                        SessionEvent::Subscribe(s) => self.subscribe(s).await?,
+                        SessionEvent::SubAck(_s) => unimplemented!(),
+                        SessionEvent::UnSubscribe(_s) => unimplemented!(),
+                        SessionEvent::UnSubAck(_s) => unimplemented!(),
+                        SessionEvent::Disconnect(d) => self.disconnect(d).await?,
+                    }
+                },
+                Some(((topic, option), message)) = self.subscriptions.next() => {
+                    match message {
+                        Ok(msg) =>  {
+                            trace!("topic: {:?}, message: {:?}", topic, msg);
+                            self.publish_client(option, msg).await?
+                        },
+                        Err(Lagged(lag)) => {
+                            warn!("lagged: {}", lag);
+                        },
+                        Err(err) => {
+                            error!(cause = ?err, "topic error: ");
+                            break;
                         }
+                    }
+                },
+                else => break,
+            }
         }
         trace!("end");
+        Ok(())
+    }
+
+    #[instrument(skip(self), fields(identifier = field::display(& self.id)), err)]
+    async fn publish_client(&mut self, option: SubOption, msg: Message) -> Result<()> {
+        let packet_identifier = self.packet_identifier_seq.clone();
+        let qos = min(msg.qos, option.qos);
+        let packet_identifier = if QoS::AtMostOnce == qos {
+            None
+        } else {
+            Some(packet_identifier.fetch_add(1, Ordering::Relaxed))
+        };
+        let publish = ControlPacket::Publish(Publish {
+            dup: false,
+            qos,
+            retain: msg.retain,
+            topic_name: msg.topic_name,
+            packet_identifier,
+            properties: Default::default(),
+            payload: msg.data,
+        });
+        self.tx.send(publish).await.map_err(Error::msg)?;
+
+        if QoS::ExactlyOnce == qos {
+            let (mut tx, rx) = mpsc::channel(1);
+            let packet_identifier = packet_identifier.unwrap();
+            self.client_flows.insert(packet_identifier, tx.clone());
+            let resp_tx = self.tx.clone();
+            let session = self.id.clone();
+            tokio::spawn(async move {
+                if let Err(err) =
+                exactly_once_client(session, packet_identifier, rx, resp_tx).await
+                {
+                    error!(cause = ?err, "QoS 2 protocol error: {}", err);
+                }
+            });
+        };
         Ok(())
     }
 
@@ -221,7 +267,7 @@ impl Session {
                     trace!("send {:?}", ack);
                     self.tx.send(ack).await?
                 } else {
-                    return Err(anyhow!("undefined packet_identifier"));
+                    bail!("undefined packet_identifier");
                 }
             }
             QoS::ExactlyOnce => {
@@ -249,10 +295,16 @@ impl Session {
                         tx.send(PublishEvent::Publish(msg)).await?
                     }
                 } else {
-                    return Err(anyhow!("undefined packet_identifier"));
+                    bail!("undefined packet_identifier");
                 }
             }
         }
+        Ok(())
+    }
+
+    #[instrument(skip(self), err)]
+    async fn puback(&self, msg: PubResp) -> Result<()> {
+        trace!("{:?}", msg);
         Ok(())
     }
 
@@ -272,9 +324,33 @@ impl Session {
     }
 
     #[instrument(skip(self), err)]
-    async fn puback(&self, msg: PubResp) -> Result<()> {
-        trace!("{:?}", msg);
-        Ok(())
+    async fn pubrec(&self, msg: PubResp) -> Result<()> {
+        if let Some(tx) = self.client_flows.get(&msg.packet_identifier) {
+            tx.clone()
+                .send(PublishEvent::PubRec(msg))
+                .await
+                .map_err(Error::msg)
+        } else {
+            Err(anyhow!(
+                "protocol flow error: not found flow for packet identifier {}",
+                msg.packet_identifier
+            ))
+        }
+    }
+
+    #[instrument(skip(self), err)]
+    async fn pubcomp(&self, msg: PubResp) -> Result<()> {
+        if let Some(tx) = self.client_flows.get(&msg.packet_identifier) {
+            tx.clone()
+                .send(PublishEvent::PubComp(msg))
+                .await
+                .map_err(Error::msg)
+        } else {
+            Err(anyhow!(
+                "protocol flow error: not found flow for packet identifier {}",
+                msg.packet_identifier
+            ))
+        }
     }
 
     #[instrument(skip(self, msg), err)]
@@ -307,65 +383,6 @@ impl Session {
         });
         self.tx.send(suback).await.map_err(Error::msg)
         // trace!("send {:?}", suback);
-    }
-
-    #[instrument(skip(tx), err)]
-    async fn publish_client(
-        &mut self,
-        msg: Message,
-        option: SubOption,
-        packet_identifier: Arc<AtomicU16>,
-        mut tx: Sender<ControlPacket>,
-    ) -> Result<()> {
-        debug!("new subscribe spawn start");
-
-        /* loop {
-            match channel.recv().await {
-                Ok(msg) => {
-                    debug!("received: {:?}", msg);
-                    let qos = min(msg.qos, option.qos);
-                    let packet_identifier = if QoS::AtMostOnce == qos {
-                        None
-                    } else {
-                        Some(packet_identifier.fetch_add(1, Ordering::Relaxed))
-                    };
-                    let publish = ControlPacket::Publish(Publish {
-                        dup: false,
-                        qos,
-                        retain: msg.retain,
-                        topic_name: msg.topic_name,
-                        packet_identifier,
-                        properties: Default::default(),
-                        payload: msg.data,
-                    });
-                    tx.send(publish).await.map_err(Error::msg)?;
-
-                    if QoS::ExactlyOnce == qos {
-                        let (mut tx, rx) = mpsc::channel(1);
-                        let packet_identifier = packet_identifier.unwrap();
-                        self.server_flows.insert(packet_identifier, tx.clone());
-                        let resp_tx = self.tx.clone();
-                        let session = self.id.clone();
-                        tokio::spawn(async move {
-                            if let Err(err) =
-                                exactly_once_client(session, packet_identifier, rx, resp_tx).await
-                            {
-                                error!(cause = ?err, "QoS 2 protocol error: {}", err);
-                            }
-                        });
-                    }
-                }
-                Err(Lagged(lag)) => {
-                    warn!("lagged: {}", lag);
-                }
-                Err(err) => {
-                    error!(cause = ?err, "topic error: ");
-                    break;
-                }
-            }
-        }*/
-        debug!("new subscribe spawn stop");
-        Ok(())
     }
 
     #[instrument(skip(self))]

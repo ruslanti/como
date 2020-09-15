@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use native_tls::Identity;
 use native_tls::TlsAcceptor;
 use tokio::net::TcpListener;
@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(Level::TRACE)
         .with_ansi(false)
-        .with_writer(non_blocking)
+        //.with_writer(non_blocking)
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("no global subscriber has been set");
 
@@ -52,12 +52,13 @@ async fn main() -> Result<()> {
 
     if let Some(tls) = &settings.clone().service.tls {
         // Bind a TLS listener
-        let mut file = File::open(&tls.cert)?;
+        let cert = &tls.cert;
+        let mut file = File::open(cert).with_context(|| format!("could not open cert file: {}", cert))?;
         let mut identity = vec![];
-        file.read_to_end(&mut identity)?;
-        let identity = Identity::from_pkcs12(&identity, tls.pass.as_str())?;
+        file.read_to_end(&mut identity).with_context(|| format!("could not read cert file: {}", cert))?;
+        let identity = Identity::from_pkcs12(&identity, tls.pass.as_str()).with_context(|| format!("could not read identity from cert file: {}", cert))?;
 
-        let acceptor = TlsAcceptor::new(identity)?;
+        let acceptor = TlsAcceptor::new(identity).context("TLS acceptor fail")?;
         let acceptor = Arc::new(acceptor.into());
 
         let tls_listener = TcpListener::bind(&format!("{}:{}", tls.bind, tls.port)).await?;

@@ -3,12 +3,12 @@ use std::ops::{Add, Div};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Error, Result};
+use anyhow::{anyhow, bail, Error, Result};
 use bytes::Bytes;
 use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
 use tracing::{debug, error, field, instrument, trace};
@@ -168,6 +168,18 @@ impl ConnectionHandler {
                     .map_err(Error::msg)
                     .await
             }
+            (Some((_, mut session_tx, _)), ControlPacket::PubRec(response)) => {
+                session_tx
+                    .send(SessionEvent::PubRec(response))
+                    .map_err(Error::msg)
+                    .await
+            }
+            (Some((_, mut session_tx, _)), ControlPacket::PubComp(response)) => {
+                session_tx
+                    .send(SessionEvent::PubComp(response))
+                    .map_err(Error::msg)
+                    .await
+            }
             (Some((_, mut session_tx, _)), ControlPacket::Subscribe(sub)) => {
                 session_tx
                     .send(SessionEvent::Subscribe(sub))
@@ -186,7 +198,6 @@ impl ConnectionHandler {
                     .map_err(Error::msg)
                     .await
             }
-
             (Some((id, mut session_tx, expire)), ControlPacket::Disconnect(disconnect)) => {
                 debug!(
                     "disconnect reason code: {:?}, reason string:{:?}",
@@ -305,7 +316,7 @@ where
     while let Some(msg) = reply.next().await {
         trace!("{:?}", msg);
         if let Err(_err) = sink.send(msg).await {
-            return Err(anyhow!("socket send error"));
+            bail!("socket send error");
         }
     }
     Ok(())

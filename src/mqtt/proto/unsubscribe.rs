@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BytesMut};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
@@ -31,7 +31,7 @@ pub fn decode_unsubscribe_properties(reader: &mut BytesMut) -> Result<UnSubscrib
                     builder = builder.user_properties((key, value));
                 }
             }
-            _ => return Err(anyhow!("unknown unsubscribe property: {:x}", id)),
+            _ => bail!("unknown unsubscribe property: {:x}", id),
         }
     }
     Ok(builder.unsubscribe())
@@ -43,7 +43,7 @@ pub fn decode_unsubscribe_payload(reader: &mut BytesMut) -> Result<Vec<MqttStrin
         if let Some(topic) = decode_utf8_string(reader)? {
             topic_filter.push(topic)
         } else {
-            return Err(anyhow!("empty topic filter"));
+            bail!("empty topic filter");
         }
     }
     Ok(topic_filter)

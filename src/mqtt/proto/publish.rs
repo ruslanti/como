@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, BytesMut};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
@@ -17,7 +17,7 @@ pub fn decode_publish(
     end_of_stream!(reader.remaining() < 3, "publish topic name");
     let topic_name = match decode_utf8_string(reader)? {
         Some(v) => v,
-        None => return Err(anyhow!("missing topic in publish message")),
+        None => bail!("missing topic in publish message"),
     };
     let packet_identifier = if qos == QoS::AtMostOnce {
         None
@@ -72,7 +72,7 @@ pub fn decode_publish_properties(reader: &mut BytesMut) -> Result<PublishPropert
                 end_of_stream!(reader.remaining() < 4, "subscription identifier");
                 builder = builder.subscription_identifier(decode_variable_integer(reader)?)?;
             }
-            _ => return Err(anyhow!("unknown publish property: {:x}", id)),
+            _ => bail!("unknown publish property: {:x}", id),
         }
     }
     Ok(builder.publish())

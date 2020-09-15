@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::Encoder;
 
@@ -80,7 +80,7 @@ pub fn decode_connack_properties(reader: &mut BytesMut) -> Result<ConnAckPropert
             }
             Property::AuthenticationMethod => unimplemented!(),
             Property::AuthenticationData => unimplemented!(),
-            _ => return Err(anyhow!("unknown connack property: {:x}", id)),
+            _ => bail!("unknown connack property: {:x}", id),
         }
     }
     Ok(builder.connack())

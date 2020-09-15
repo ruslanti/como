@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BytesMut};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
@@ -31,7 +31,7 @@ pub fn decode_will_properties(reader: &mut BytesMut) -> Result<WillProperties> {
             }
             Property::CorrelationData => unimplemented!(),
             Property::UserProperty => unimplemented!(),
-            _ => return Err(anyhow!("unknown will property: {:x}", id)),
+            _ => bail!("unknown will property: {:x}", id),
         }
     }
     Ok(builder.will())

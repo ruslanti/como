@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, ensure, Result};
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
@@ -8,7 +8,7 @@ use crate::mqtt::proto::publish::encode_publish_properties;
 use crate::mqtt::proto::pubres::encode_pubres_properties;
 use crate::mqtt::proto::subscribe::encode_suback_properties;
 use crate::mqtt::proto::types::{
-    ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, PacketType, PubResp, Publish, SubAck,
+    ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, PacketType, Publish, PubResp, SubAck,
 };
 
 impl Encoder<Connect> for MQTTCodec {
@@ -187,9 +187,7 @@ pub fn encode_variable_integer(writer: &mut BytesMut, v: usize) -> Result<()> {
         if value > 0 {
             encoded_byte = encoded_byte | 0x80;
         }
-        if writer.capacity() < 1 {
-            return Err(anyhow!("end of stream")).context("encode_variable_integer");
-        }
+        ensure!( writer.capacity() > 0, anyhow!("end of stream"));
         writer.put_u8(encoded_byte);
         if value == 0 {
             break;

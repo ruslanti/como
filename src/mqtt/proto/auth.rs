@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BytesMut};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
@@ -27,7 +27,7 @@ pub fn decode_auth_properties(reader: &mut BytesMut) -> Result<AuthProperties> {
                 if let Some(authentication_method) = decode_utf8_string(reader)? {
                     builder = builder.authentication_method(authentication_method)?
                 } else {
-                    return Err(anyhow!("missing authentication method"));
+                    bail!("missing authentication method");
                 }
             }
             Property::AuthenticationData => unimplemented!(),
@@ -40,7 +40,7 @@ pub fn decode_auth_properties(reader: &mut BytesMut) -> Result<AuthProperties> {
                     builder = builder.user_properties((key, value));
                 }
             }
-            _ => return Err(anyhow!("unknown subscribe property: {:x}", id)),
+            _ => bail!("unknown subscribe property: {:x}", id),
         }
     }
     Ok(builder.auth())

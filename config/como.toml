@@ -1,7 +1,3 @@
-[service.tls]
-cert = "domain.pfx"
-pass = "abecedar"
-
 [connection]
 maximum_qos = 2
 session_expire_interval = 60

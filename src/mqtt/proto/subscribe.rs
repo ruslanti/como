@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, BytesMut};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
@@ -38,7 +38,7 @@ pub fn decode_subscribe_properties(reader: &mut BytesMut) -> Result<SubscribePro
                     builder = builder.user_properties((key, value));
                 }
             }
-            _ => return Err(anyhow!("unknown subscribe property: {:x}", id)),
+            _ => bail!("unknown subscribe property: {:x}", id),
         }
     }
     Ok(builder.subscribe())
@@ -64,7 +64,7 @@ pub fn decode_subscribe_payload(reader: &mut BytesMut) -> Result<Vec<(MqttString
                 },
             ))
         } else {
-            return Err(anyhow!("empty topic filter"));
+            bail!("empty topic filter");
         }
     }
     Ok(topic_filter)

@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, BytesMut};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
@@ -48,8 +48,7 @@ fn decode_disconnect_properties(reader: &mut BytesMut) -> Result<DisconnectPrope
                 builder = builder.server_reference(decode_utf8_string(reader)?)?;
             }
             _ => {
-                return Err(anyhow!("unknown connect property: {:x}", id))
-                    .context("decode disconnect properties")
+                bail!("unknown connect property: {:x}", id)
             }
         }
     }

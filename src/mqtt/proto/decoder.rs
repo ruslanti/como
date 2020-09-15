@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context, ensure, Result};
 use bytes::{Buf, BytesMut};
 use tokio_util::codec::Decoder;
 use tracing::{instrument, trace};
@@ -10,7 +10,7 @@ use crate::mqtt::proto::connack::decode_connack;
 use crate::mqtt::proto::connect::decode_connect;
 use crate::mqtt::proto::disconnect::decode_disconnect;
 use crate::mqtt::proto::publish::decode_publish;
-use crate::mqtt::proto::pubres::{decode_puback, decode_pubrec, decode_pubrel};
+use crate::mqtt::proto::pubres::{decode_puback, decode_pubcomp, decode_pubrec, decode_pubrel};
 use crate::mqtt::proto::subscribe::decode_subscribe;
 use crate::mqtt::proto::types::{ControlPacket, MQTTCodec, MqttString, PacketPart, PacketType};
 use crate::mqtt::proto::unsubscribe::decode_unsubscribe;
@@ -60,7 +60,7 @@ impl Decoder for MQTTCodec {
                     PacketType::PUBACK => decode_puback(&mut packet),
                     PacketType::PUBREC => decode_pubrec(&mut packet),
                     PacketType::PUBREL => decode_pubrel(&mut packet),
-                    PacketType::PUBCOMP => unimplemented!(),
+                    PacketType::PUBCOMP => decode_pubcomp(&mut packet),
                     PacketType::SUBSCRIBE => decode_subscribe(&mut packet),
                     PacketType::SUBACK => unimplemented!(),
                     PacketType::UNSUBSCRIBE => decode_unsubscribe(&mut packet),
@@ -79,15 +79,10 @@ pub fn decode_variable_integer(reader: &mut BytesMut) -> Result<u32> {
     let mut multiplier = 1;
     let mut value = 0;
     loop {
-        if reader.remaining() < 1 {
-            return Err(anyhow!("end of stream")).context("decode_variable_integer");
-        }
+        ensure!(reader.remaining() > 0, anyhow!("end of stream"));
         let encoded_byte: u8 = reader.get_u8().into();
         value += (encoded_byte & 0x7F) as u32 * multiplier;
-        if multiplier > (0x80 * 0x80 * 0x80) {
-            return Err(anyhow!("malformed variable integer: {}", value))
-                .context("decode_variable_integer");
-        }
+        ensure!(multiplier <= (0x80 * 0x80 * 0x80), anyhow!("malformed variable integer: {}", value));
         multiplier *= 0x80;
         if (encoded_byte & 0x80) == 0 {
             break;
