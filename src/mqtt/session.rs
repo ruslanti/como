@@ -8,7 +8,7 @@ use tokio::stream::{StreamExt, StreamMap};
 use tokio::sync::{mpsc, RwLock};
 use tokio::sync::broadcast::RecvError::Lagged;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{debug, error, field, instrument, trace, warn};
+use tracing::{debug, error, field, info, instrument, trace, warn};
 
 use crate::mqtt::proto::property::PubResProperties;
 use crate::mqtt::proto::types::{
@@ -78,7 +78,7 @@ async fn exactly_once_client(
     mut tx: Sender<ControlPacket>,
 ) -> Result<()> {
     if let Some(event) = rx.recv().await {
-        if let PublishEvent::PubRec(msg) = event {
+        if let PublishEvent::PubRec(_msg) = event {
             let rel = ControlPacket::PubRel(PubResp {
                 packet_type: PacketType::PUBREL,
                 packet_identifier,
@@ -183,9 +183,9 @@ impl Session {
                         SessionEvent::PubRel(p) => self.pubrel(p).await?,
                         SessionEvent::PubComp(p) => self.pubcomp(p).await?,
                         SessionEvent::Subscribe(s) => self.subscribe(s).await?,
-                        SessionEvent::SubAck(_s) => unimplemented!(),
-                        SessionEvent::UnSubscribe(_s) => unimplemented!(),
-                        SessionEvent::UnSubAck(_s) => unimplemented!(),
+                        SessionEvent::SubAck(s) => self.suback(s).await?,
+                        SessionEvent::UnSubscribe(s) => self.unsubscribe(s).await?,
+                        SessionEvent::UnSubAck(s) => self.unsuback(s).await?,
                         SessionEvent::Disconnect(d) => self.disconnect(d).await?,
                     }
                 },
@@ -218,7 +218,13 @@ impl Session {
         let packet_identifier = if QoS::AtMostOnce == qos {
             None
         } else {
-            Some(packet_identifier.fetch_add(1, Ordering::Relaxed))
+            let id = packet_identifier.fetch_add(1, Ordering::SeqCst);
+            if id == 0 {
+                let id = packet_identifier.fetch_add(1, Ordering::SeqCst);
+                Some(id)
+            } else {
+                Some(id)
+            }
         };
         let publish = ControlPacket::Publish(Publish {
             dup: false,
@@ -232,7 +238,7 @@ impl Session {
         self.tx.send(publish).await.map_err(Error::msg)?;
 
         if QoS::ExactlyOnce == qos {
-            let (mut tx, rx) = mpsc::channel(1);
+            let (tx, rx) = mpsc::channel(1);
             let packet_identifier = packet_identifier.unwrap();
             self.client_flows.insert(packet_identifier, tx.clone());
             let resp_tx = self.tx.clone();
@@ -383,6 +389,49 @@ impl Session {
         });
         self.tx.send(suback).await.map_err(Error::msg)
         // trace!("send {:?}", suback);
+    }
+
+    #[instrument(skip(self), err)]
+    async fn suback(&self, msg: SubAck) -> Result<()> {
+        trace!("{:?}", msg);
+        Ok(())
+    }
+
+    #[instrument(skip(self, msg), err)]
+    async fn unsubscribe(&mut self, msg: UnSubscribe) -> Result<()> {
+        debug!("un subscribe topics: {:?}", msg.topic_filters);
+        let mut reason_codes = Vec::new();
+        for topic_name in msg.topic_filters {
+            reason_codes.push(match std::str::from_utf8(&topic_name[..]) {
+                Ok(topic) => {
+                    let key = self.subscriptions.keys().find(|&(k, _)| k == topic).map(|k| k.clone());
+                    if let Some(key) = key {
+                        if self.subscriptions.remove(&key).is_some() {
+                            debug!("unsubscribe topic: {}", topic);
+                        }
+                    }
+                    ReasonCode::Success
+                }
+                Err(err) => {
+                    debug!(cause = ?err, "un subscribe error: ");
+                    ReasonCode::TopicFilterInvalid
+                }
+            })
+        }
+
+        let unsuback = ControlPacket::UnSubAck(SubAck {
+            packet_identifier: msg.packet_identifier,
+            properties: Default::default(),
+            reason_codes,
+        });
+        self.tx.send(unsuback).await.map_err(Error::msg)
+        // trace!("send {:?}", suback);
+    }
+
+    #[instrument(skip(self), err)]
+    async fn unsuback(&self, msg: SubAck) -> Result<()> {
+        trace!("{:?}", msg);
+        Ok(())
     }
 
     #[instrument(skip(self))]

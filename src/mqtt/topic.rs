@@ -36,7 +36,7 @@ enum MatchState<'a> {
 
 impl Topic {
     pub(crate) fn new(name: String) -> Self {
-        let (channel, rx) = broadcast::channel(32);
+        let (channel, rx) = broadcast::channel(1024);
         debug!("new topic");
         tokio::spawn(async move {
             Topic::topic(name, rx).await;

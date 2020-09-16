@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc::Sender;
 use tokio::time::DelayQueue;
 use tracing::warn;
 
@@ -37,9 +37,9 @@ impl AppContext {
         key: &str,
         conn_tx: Sender<ControlPacket>,
     ) -> SessionSender {
-        if let Some(session_tx) = self.sessions.get(key) {
+        if let Some(tx) = self.sessions.get(key) {
             //TODO close existing connection
-            session_tx.clone()
+            tx.clone()
         } else {
             let (tx, rx) = mpsc::channel(32);
             let mut session = Session::new(

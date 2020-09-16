@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     let file_appender = tracing_appender::rolling::daily("logs", "como.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(Level::TRACE)
+        .with_max_level(Level::INFO)
         .with_ansi(false)
         //.with_writer(non_blocking)
         .finish();

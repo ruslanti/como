@@ -186,9 +186,21 @@ impl ConnectionHandler {
                     .map_err(Error::msg)
                     .await
             }
+            (Some((_, mut session_tx, _)), ControlPacket::SubAck(sub)) => {
+                session_tx
+                    .send(SessionEvent::SubAck(sub))
+                    .map_err(Error::msg)
+                    .await
+            }
             (Some((_, mut session_tx, _)), ControlPacket::UnSubscribe(sub)) => {
                 session_tx
                     .send(SessionEvent::UnSubscribe(sub))
+                    .map_err(Error::msg)
+                    .await
+            }
+            (Some((_, mut session_tx, _)), ControlPacket::UnSubAck(sub)) => {
+                session_tx
+                    .send(SessionEvent::UnSubAck(sub))
                     .map_err(Error::msg)
                     .await
             }
