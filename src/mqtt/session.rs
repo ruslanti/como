@@ -1,5 +1,5 @@
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 
@@ -8,14 +8,11 @@ use tokio::stream::{StreamExt, StreamMap};
 use tokio::sync::{mpsc, RwLock};
 use tokio::sync::broadcast::RecvError::Lagged;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{debug, error, field, info, instrument, trace, warn};
+use tracing::{debug, error, field, instrument, trace, warn};
 
 use crate::mqtt::proto::property::PubResProperties;
-use crate::mqtt::proto::types::{
-    ControlPacket, Disconnect, PacketType, Publish, PubResp, QoS, ReasonCode, SubAck, SubOption,
-    Subscribe, UnSubscribe,
-};
-use crate::mqtt::topic::{Message, SubscribeTopic, Topic};
+use crate::mqtt::proto::types::{ControlPacket, Disconnect, PacketType, Publish, PubResp, QoS, ReasonCode, Retain, SubAck, SubOption, Subscribe, UnSubscribe};
+use crate::mqtt::topic::{Message, SubscribeTopic, Topic, TopicEvent};
 use crate::settings::Settings;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -51,12 +48,20 @@ pub(crate) struct Session {
     root_topic: Arc<RwLock<Topic>>,
     packet_identifier_seq: Arc<AtomicU16>,
     subscriptions: StreamMap<(String, SubOption), SubscribeTopic>,
+    topic_filters: HashSet<String>
 }
 
 async fn publish_topic(root: Arc<RwLock<Topic>>, msg: Publish) -> Result<()> {
     let mut root = root.write().await;
     let topic = std::str::from_utf8(&msg.topic_name[..])?;
-    let channel = root.publish_topic(topic);
+    let new_topic_channel = root.new_topic_channel();
+    let channel = root.publish_topic(topic, |channel| {
+        if let Err(err) = new_topic_channel.send(TopicEvent::NewTopic(topic.to_string(), channel)) {
+            error!(cause = ?err, "publish topic error");
+        };
+        ()
+    });
+
     let message = Message {
         retain: msg.retain,
         qos: msg.qos,
@@ -64,10 +69,11 @@ async fn publish_topic(root: Arc<RwLock<Topic>>, msg: Publish) -> Result<()> {
         content_type: msg.properties.content_type,
         data: msg.payload,
     };
+
     channel
-        .send(message)
+        .send(TopicEvent::Publish(message))
         .map_err(|e| anyhow!("{:?}", e))
-        .map(|size| trace!("publish topic  size {}", size))
+        .map(|size| trace!("publish topic channel send {} message", size))
 }
 
 #[instrument(skip(rx, tx), err)]
@@ -166,12 +172,22 @@ impl Session {
             root_topic,
             packet_identifier_seq: Arc::new(AtomicU16::new(1)),
             subscriptions: StreamMap::new(),
+            topic_filters: HashSet::new()
         }
     }
 
     #[instrument(skip(self), fields(identifier = field::display(& self.id)), err)]
     pub(crate) async fn session(&mut self) -> Result<()> {
         trace!("start");
+        // subscribe to root topic for new topic creation
+        self.subscriptions
+            .insert(("".to_string(), SubOption {
+                qos: QoS::AtMostOnce,
+                nl: false,
+                rap: false,
+                retain: Retain::SendAtTime,
+            }), self.root_topic.read().await.subscribe_channel());
+
         loop {
             tokio::select! {
                 Some(msg) = self.rx.next() => {
@@ -189,17 +205,26 @@ impl Session {
                         SessionEvent::Disconnect(d) => self.disconnect(d).await?,
                     }
                 },
-                Some(((topic, option), message)) = self.subscriptions.next() => {
+                Some(((topic_filter, option), message)) = self.subscriptions.next() => {
                     match message {
-                        Ok(msg) =>  {
-                            trace!("topic: {:?}, message: {:?}", topic, msg);
+                        Ok(TopicEvent::Publish(msg)) =>  {
+                            trace!("topic: {}, message: {:?}", topic_filter, msg);
                             self.publish_client(option, msg).await?
                         },
+                        Ok(TopicEvent::NewTopic(topic_name, channel)) =>  {
+                            trace!("new topic: {}", topic_name);
+                            for filter in &self.topic_filters {
+                                if Topic::match_filter(topic_name.as_str(), filter.as_str()) {
+                                    debug!("new topic: {} match topic filter {}", topic_name, filter);
+                                    self.subscriptions.insert((filter.clone(), option.clone()), channel.subscribe());
+                                }
+                            }
+                        }
                         Err(Lagged(lag)) => {
-                            warn!("lagged: {}", lag);
+                            warn!("topic filter {} lagged: {}", topic_filter, lag);
                         },
                         Err(err) => {
-                            error!(cause = ?err, "topic error: ");
+                            error!(cause = ?err, "topic filter {} error: ", topic_filter);
                             break;
                         }
                     }
@@ -363,15 +388,16 @@ impl Session {
     async fn subscribe(&mut self, msg: Subscribe) -> Result<()> {
         debug!("subscribe topics: {:?}", msg.topic_filters);
         let root = self.root_topic.read().await;
-        //let mut subscriptions = self.subscriptions;
         let mut reason_codes = Vec::new();
-        for (topic_name, topic_option) in msg.topic_filters {
-            reason_codes.push(match std::str::from_utf8(&topic_name[..]) {
-                Ok(topic) => {
-                    let channels = root.subscribe_topic(topic);
+        for (topic_filter, topic_option) in msg.topic_filters {
+            reason_codes.push(match std::str::from_utf8(&topic_filter[..]) {
+                Ok(topic_filter) => {
+                    self.topic_filters.insert(topic_filter.to_string());
+                    let channels = root.subscribe_topic(topic_filter);
+                    trace!("found channels: {:?}", channels);
                     for channel in channels {
                         self.subscriptions
-                            .insert((topic.to_string(), topic_option.clone()), channel);
+                            .insert((topic_filter.to_string(), topic_option.clone()), channel);
                     }
                     ReasonCode::Success
                 }
@@ -401,15 +427,17 @@ impl Session {
     async fn unsubscribe(&mut self, msg: UnSubscribe) -> Result<()> {
         debug!("un subscribe topics: {:?}", msg.topic_filters);
         let mut reason_codes = Vec::new();
-        for topic_name in msg.topic_filters {
-            reason_codes.push(match std::str::from_utf8(&topic_name[..]) {
-                Ok(topic) => {
-                    let key = self.subscriptions.keys().find(|&(k, _)| k == topic).map(|k| k.clone());
-                    if let Some(key) = key {
-                        if self.subscriptions.remove(&key).is_some() {
-                            debug!("unsubscribe topic: {}", topic);
+        for topic_filter in msg.topic_filters {
+            reason_codes.push(match std::str::from_utf8(&topic_filter[..]) {
+                Ok(topic_filter) => {
+                    //let key = self.subscriptions.keys().find(|&(k, _)| k == topic).map(|k| k.clone());
+                    let keys: Vec<(String, SubOption)> = self.subscriptions.keys().filter_map(|(k, opt)| if k == topic_filter { Some((k.clone(), opt.clone())) } else { None }).collect();
+                    for key in keys {
+                        if let Some(channel) = self.subscriptions.remove(&key) {
+                            debug!("unsubscribe topic_filter: {}, channel: {:?}", topic_filter, channel);
                         }
                     }
+                    self.topic_filters.remove(topic_filter);
                     ReasonCode::Success
                 }
                 Err(err) => {
@@ -435,7 +463,7 @@ impl Session {
     }
 
     #[instrument(skip(self))]
-    async fn disconnect(&self, msg: Disconnect) -> Result<()> {
+    async fn disconnect(&self, _msg: Disconnect) -> Result<()> {
         Ok(())
     }
 }

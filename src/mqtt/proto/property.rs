@@ -506,7 +506,7 @@ impl PropertiesBuilder {
             Err(anyhow!("empty server reference"))
         }
     }
-    pub fn correlation_data(mut self, value: Bytes) -> Result<Self> {
+    pub fn _correlation_data(mut self, value: Bytes) -> Result<Self> {
         check_and_set!(self, correlation_data, value)
     }
     pub fn maximum_qos(mut self, value: u8) -> Result<Self> {

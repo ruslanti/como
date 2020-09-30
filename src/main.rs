@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::Read;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -8,8 +9,7 @@ use native_tls::TlsAcceptor;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::Mutex;
-use tracing::debug;
-use tracing::Level;
+use tracing::{debug, Level};
 
 use mqtt::service;
 
@@ -21,17 +21,19 @@ mod settings;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let settings = Arc::new(Settings::new()?);
+
     // a builder for `FmtSubscriber`.
-    let file_appender = tracing_appender::rolling::daily("logs", "como.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    let (non_blocking, _guard) = if let Some(file) = settings.log.file.clone() {
+        tracing_appender::non_blocking(tracing_appender::rolling::daily("logs", file))
+    } else {
+        tracing_appender::non_blocking(std::io::stdout())
+    };
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
-        .with_ansi(false)
-        //.with_writer(non_blocking)
-        .finish();
+        .with_max_level(Level::from_str(settings.log.level.as_str())?)
+        .with_ansi(false).with_writer(non_blocking).finish();
     tracing::subscriber::set_global_default(subscriber).expect("no global subscriber has been set");
 
-    let settings = Arc::new(Settings::new()?);
     debug!("{:?}", settings);
 
     let context = Arc::new(Mutex::new(AppContext::new(settings.clone())));

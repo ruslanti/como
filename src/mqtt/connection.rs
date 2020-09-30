@@ -117,22 +117,6 @@ impl ConnectionHandler {
         Ok(())
     }
 
-    /*
-
-
-        async fn process_unsubscribe(&self, unsubscribe: UnSubscribe) -> Result<()> {
-            debug!("unsubscribe topics: {:?}", unsubscribe.topic_filters);
-            let reason_codes = unsubscribe.topic_filters.iter().map(|_t| ReasonCode::Success).collect();
-            let suback = ControlPacket::UnSubAck(SubAck{
-                packet_identifier: unsubscribe.packet_identifier,
-                properties: SubAckProperties { reason_string: None, user_properties: vec![] },
-                reason_codes
-            });
-            trace!("send {:?}", suback);
-            //self.stream.send(suback).await?;
-            Ok(())
-        }
-    */
     #[instrument(skip(self, packet, conn_tx), err)]
     async fn receiving(
         &mut self,
@@ -144,11 +128,8 @@ impl ConnectionHandler {
             (None, ControlPacket::Connect(connect)) => self.connect(connect, conn_tx).await,
             (None, ControlPacket::Auth(_auth)) => unimplemented!(), //self.process_auth(auth).await,
             (None, packet) => {
-                error!(
-                    "unacceptable packet {:?} in not defined session state",
-                    packet
-                );
-                Err(anyhow!("unacceptable event").context(""))
+                let context = format!("session: None, packet: {:?}", packet, );
+                Err(anyhow!("unacceptable event").context(context))
             }
             (Some((_, mut session_tx, _)), ControlPacket::Publish(publish)) => {
                 session_tx
@@ -225,11 +206,14 @@ impl ConnectionHandler {
                     .map_err(Error::msg)
                     .await
             }
-            (Some(_), _) => unimplemented!(),
+            (Some((id, _, _)), packet) => {
+                let context = format!("session: {}, packet: {:?}", id, packet, );
+                Err(anyhow!("unacceptable event").context(context))
+            },
         }
     }
 
-    async fn process_auth(&self, msg: Auth) -> Result<()> {
+    async fn _process_auth(&self, msg: Auth) -> Result<()> {
         trace!("{:?}", msg);
         Ok(())
     }
