@@ -31,10 +31,14 @@ async fn main() -> Result<()> {
     };
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(Level::from_str(settings.log.level.as_str())?)
-        .with_ansi(false).with_writer(non_blocking).finish();
+        .with_ansi(false)
+        .with_writer(non_blocking)
+        .finish();
     tracing::subscriber::set_global_default(subscriber).expect("no global subscriber has been set");
 
     debug!("{:?}", settings);
+
+    /*    let root = Topic::load(settings.topic.path).await?;*/
 
     let context = Arc::new(Mutex::new(AppContext::new(settings.clone())));
 
@@ -44,6 +48,7 @@ async fn main() -> Result<()> {
         settings.service.bind, settings.service.port
     ))
     .await?;
+
     let srv = service::run(
         listener,
         None,
@@ -55,10 +60,13 @@ async fn main() -> Result<()> {
     if let Some(tls) = &settings.clone().service.tls {
         // Bind a TLS listener
         let cert = &tls.cert;
-        let mut file = File::open(cert).with_context(|| format!("could not open cert file: {}", cert))?;
+        let mut file =
+            File::open(cert).with_context(|| format!("could not open cert file: {}", cert))?;
         let mut identity = vec![];
-        file.read_to_end(&mut identity).with_context(|| format!("could not read cert file: {}", cert))?;
-        let identity = Identity::from_pkcs12(&identity, tls.pass.as_str()).with_context(|| format!("could not read identity from cert file: {}", cert))?;
+        file.read_to_end(&mut identity)
+            .with_context(|| format!("could not read cert file: {}", cert))?;
+        let identity = Identity::from_pkcs12(&identity, tls.pass.as_str())
+            .with_context(|| format!("could not read identity from cert file: {}", cert))?;
 
         let acceptor = TlsAcceptor::new(identity).context("TLS acceptor fail")?;
         let acceptor = Arc::new(acceptor.into());

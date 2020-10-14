@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::convert::TryInto;
+use std::path::Path;
 
+use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
+use tokio::fs;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::RecvError::Lagged;
 use tracing::{debug, error, instrument, trace, warn};
@@ -29,6 +33,7 @@ pub(crate) enum TopicEvent {
 #[derive(Debug)]
 pub struct Topic {
     channel: PublishTopic,
+    //path: AsRef<Path>,
     topics: HashMap<String, Self>,
 }
 
@@ -40,7 +45,7 @@ enum MatchState<'a> {
 }
 
 impl Topic {
-    pub(crate) fn new(name: String) -> Self {
+    pub(crate) fn new(name: String, path: impl AsRef<Path>) -> Self {
         let (channel, rx) = broadcast::channel(1024);
         debug!("new topic");
         tokio::spawn(async move {
@@ -48,6 +53,7 @@ impl Topic {
         });
         Topic {
             channel,
+            // path,
             topics: Default::default(),
         }
     }
@@ -79,19 +85,18 @@ impl Topic {
     }
 
     #[instrument(skip(self, handler))]
-    pub(crate) fn publish_topic<F>(&mut self, topic_name: &str, handler: F) -> PublishTopic where F: Fn(PublishTopic) {
-        //  println!("get {:?}", topic_name);
+    pub(crate) fn publish_topic<F>(&mut self, topic_name: &str, handler: F) -> PublishTopic
+    where
+        F: Fn(PublishTopic),
+    {
         let mut s = topic_name.splitn(2, '/');
         match s.next() {
             Some(prefix) => {
-                let topic = self
-                    .topics
-                    .entry(prefix.to_string())
-                    .or_insert_with(|| {
-                        let topic = Topic::new(prefix.to_string());
-                        handler(topic.channel.clone());
-                        topic
-                    });
+                let topic = self.topics.entry(prefix.to_string()).or_insert_with(|| {
+                    let topic = Topic::new(prefix.to_string(), "".to_string());
+                    handler(topic.channel.clone());
+                    topic
+                });
                 match s.next() {
                     Some(suffix) => topic.publish_topic(suffix, handler),
                     None => topic.channel.clone(),
@@ -193,20 +198,20 @@ impl Topic {
                         //  println!("pattern + - level {:?}", level);
                         if !name.starts_with("$") {
                             if (level + 1) == max_level {
-                                return true
+                                return true;
                             }
                         }
                     }
                     MatchState::MultiLevel => {
                         //println!("pattern # - level {:?}", level);
                         if !name.starts_with("$") {
-                            return true
+                            return true;
                         }
                     }
                 }
             };
             level = level + 1;
-        };
+        }
         false
     }
 }
@@ -217,16 +222,19 @@ mod tests {
 
     #[test]
     fn test_insert() {
-        let mut root = Topic::new("".to_string());
-        let handler = |_| println!("new:");
-        println!("topic: {:?}", root.publish_topic("aaa/ddd", handler));
-        println!("topic: {:?}", root.publish_topic("/aaa/bbb", handler));
-        println!("topic: {:?}", root.publish_topic("/aaa/ccc", handler));
-        println!("topic: {:?}", root.publish_topic("/aaa/ccc/", handler));
-        println!("topic: {:?}", root.publish_topic("/aaa/bbb/ccc", handler));
-        println!("topic: {:?}", root.publish_topic("ggg", handler));
+        let mut rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut root = Topic::new("".to_string(), "".to_string());
+            let handler = |_| println!("new:");
+            println!("topic: {:?}", root.publish_topic("aaa/ddd", handler));
+            println!("topic: {:?}", root.publish_topic("/aaa/bbb", handler));
+            println!("topic: {:?}", root.publish_topic("/aaa/ccc", handler));
+            println!("topic: {:?}", root.publish_topic("/aaa/ccc/", handler));
+            println!("topic: {:?}", root.publish_topic("/aaa/bbb/ccc", handler));
+            println!("topic: {:?}", root.publish_topic("ggg", handler));
 
-        //root.find("aaa/ddd");
-        println!("subscribe: {:?}", root.subscribe_topic("/aaa/#"));
+            //root.find("aaa/ddd");
+            println!("subscribe: {:?}", root.subscribe_topic("/aaa/#"));
+        })
     }
 }

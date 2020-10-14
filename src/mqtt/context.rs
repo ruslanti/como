@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, RwLock};
 use tokio::sync::mpsc::Sender;
+use tokio::sync::{mpsc, RwLock};
 use tokio::time::DelayQueue;
 use tracing::warn;
 
@@ -24,11 +24,12 @@ pub(crate) struct AppContext {
 
 impl AppContext {
     pub fn new(config: Arc<Settings>) -> Self {
+        let path = config.topic.path.clone();
         Self {
             sessions: HashMap::new(),
             sessions_expire: DelayQueue::new(),
             config,
-            topic_manager: Arc::new(RwLock::new(Topic::new("".to_string()))),
+            topic_manager: Arc::new(RwLock::new(Topic::new("".to_string(), path))),
         }
     }
 

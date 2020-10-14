@@ -1,17 +1,20 @@
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Error, Result};
 use tokio::stream::{StreamExt, StreamMap};
-use tokio::sync::{mpsc, RwLock};
 use tokio::sync::broadcast::RecvError::Lagged;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, field, instrument, trace, warn};
 
 use crate::mqtt::proto::property::PubResProperties;
-use crate::mqtt::proto::types::{ControlPacket, Disconnect, PacketType, Publish, PubResp, QoS, ReasonCode, Retain, SubAck, SubOption, Subscribe, UnSubscribe};
+use crate::mqtt::proto::types::{
+    ControlPacket, Disconnect, PacketType, PubResp, Publish, QoS, ReasonCode, Retain, SubAck,
+    SubOption, Subscribe, UnSubscribe,
+};
 use crate::mqtt::topic::{Message, SubscribeTopic, Topic, TopicEvent};
 use crate::settings::Settings;
 
@@ -48,7 +51,7 @@ pub(crate) struct Session {
     root_topic: Arc<RwLock<Topic>>,
     packet_identifier_seq: Arc<AtomicU16>,
     subscriptions: StreamMap<(String, SubOption), SubscribeTopic>,
-    topic_filters: HashSet<String>
+    topic_filters: HashSet<String>,
 }
 
 async fn publish_topic(root: Arc<RwLock<Topic>>, msg: Publish) -> Result<()> {
@@ -98,9 +101,7 @@ async fn exactly_once_client(
                     trace!("{:?}", comp);
                     ()
                 }
-                Some(event) => {
-                    bail!("{} unknown event received: {:?}", session, event)
-                }
+                Some(event) => bail!("{} unknown event received: {:?}", session, event),
                 None => bail!("{} channel closed", session),
             }
         } else {
@@ -142,9 +143,7 @@ async fn exactly_once_server(
                     tx.send(comp).await?;
                     ()
                 }
-                Some(event) => {
-                    bail!("{} unknown event received: {:?}", session, event)
-                }
+                Some(event) => bail!("{} unknown event received: {:?}", session, event),
                 None => bail!("{} channel closed", session),
             }
         } else {
@@ -172,7 +171,7 @@ impl Session {
             root_topic,
             packet_identifier_seq: Arc::new(AtomicU16::new(1)),
             subscriptions: StreamMap::new(),
-            topic_filters: HashSet::new()
+            topic_filters: HashSet::new(),
         }
     }
 
@@ -180,13 +179,18 @@ impl Session {
     pub(crate) async fn session(&mut self) -> Result<()> {
         trace!("start");
         // subscribe to root topic for new topic creation
-        self.subscriptions
-            .insert(("".to_string(), SubOption {
-                qos: QoS::AtMostOnce,
-                nl: false,
-                rap: false,
-                retain: Retain::SendAtTime,
-            }), self.root_topic.read().await.subscribe_channel());
+        self.subscriptions.insert(
+            (
+                "".to_string(),
+                SubOption {
+                    qos: QoS::AtMostOnce,
+                    nl: false,
+                    rap: false,
+                    retain: Retain::SendAtTime,
+                },
+            ),
+            self.root_topic.read().await.subscribe_channel(),
+        );
 
         loop {
             tokio::select! {
@@ -269,8 +273,7 @@ impl Session {
             let resp_tx = self.tx.clone();
             let session = self.id.clone();
             tokio::spawn(async move {
-                if let Err(err) =
-                exactly_once_client(session, packet_identifier, rx, resp_tx).await
+                if let Err(err) = exactly_once_client(session, packet_identifier, rx, resp_tx).await
                 {
                     error!(cause = ?err, "QoS 2 protocol error: {}", err);
                 }
@@ -431,10 +434,23 @@ impl Session {
             reason_codes.push(match std::str::from_utf8(&topic_filter[..]) {
                 Ok(topic_filter) => {
                     //let key = self.subscriptions.keys().find(|&(k, _)| k == topic).map(|k| k.clone());
-                    let keys: Vec<(String, SubOption)> = self.subscriptions.keys().filter_map(|(k, opt)| if k == topic_filter { Some((k.clone(), opt.clone())) } else { None }).collect();
+                    let keys: Vec<(String, SubOption)> = self
+                        .subscriptions
+                        .keys()
+                        .filter_map(|(k, opt)| {
+                            if k == topic_filter {
+                                Some((k.clone(), opt.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
                     for key in keys {
                         if let Some(channel) = self.subscriptions.remove(&key) {
-                            debug!("unsubscribe topic_filter: {}, channel: {:?}", topic_filter, channel);
+                            debug!(
+                                "unsubscribe topic_filter: {}, channel: {:?}",
+                                topic_filter, channel
+                            );
                         }
                     }
                     self.topic_filters.remove(topic_filter);

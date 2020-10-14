@@ -43,10 +43,25 @@ pub struct LogSettings {
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
+pub struct TopicSettings {
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
 pub struct Settings {
+    pub topic: TopicSettings,
     pub service: ServiceSettings,
     pub connection: ConnectionSettings,
     pub log: LogSettings,
+}
+
+impl Default for TopicSettings {
+    fn default() -> Self {
+        TopicSettings {
+            path: "data".to_string(),
+        }
+    }
 }
 
 impl Default for ServiceSettings {
@@ -88,13 +103,17 @@ impl Default for ConnectionSettings {
 
 impl Default for LogSettings {
     fn default() -> Self {
-        LogSettings { file: None, level: "debug".to_string() }
+        LogSettings {
+            file: None,
+            level: "debug".to_string(),
+        }
     }
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            topic: Default::default(),
             service: Default::default(),
             connection: Default::default(),
             log: Default::default(),
