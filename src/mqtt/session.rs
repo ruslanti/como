@@ -162,12 +162,12 @@ impl Session {
         root_topic: Arc<RwLock<Topic>>,
     ) -> Self {
         Self {
-            id: id.to_string(),
+            id: id.to_owned(),
             rx,
             tx,
             config,
-            server_flows: Default::default(),
-            client_flows: Default::default(),
+            server_flows: HashMap::new(),
+            client_flows: HashMap::new(),
             root_topic,
             packet_identifier_seq: Arc::new(AtomicU16::new(1)),
             subscriptions: StreamMap::new(),
@@ -192,6 +192,7 @@ impl Session {
             self.root_topic.read().await.subscribe_channel(),
         );
 
+        let (retain_tx, mut retain_rx) = mpsc::channel(32);
         loop {
             tokio::select! {
                 Some(msg) = self.rx.next() => {
@@ -202,12 +203,16 @@ impl Session {
                         SessionEvent::PubRec(p) => self.pubrec(p).await?,
                         SessionEvent::PubRel(p) => self.pubrel(p).await?,
                         SessionEvent::PubComp(p) => self.pubcomp(p).await?,
-                        SessionEvent::Subscribe(s) => self.subscribe(s).await?,
+                        SessionEvent::Subscribe(s) => self.subscribe(s, retain_tx.clone()).await?,
                         SessionEvent::SubAck(s) => self.suback(s).await?,
                         SessionEvent::UnSubscribe(s) => self.unsubscribe(s).await?,
                         SessionEvent::UnSubAck(s) => self.unsuback(s).await?,
                         SessionEvent::Disconnect(d) => self.disconnect(d).await?,
                     }
+                },
+                Some((topic_filter, option, message)) = retain_rx.next() => {
+                    trace!("retain topic: {}, message: {:?}", topic_filter, message);
+                    self.publish_client(option, message).await?
                 },
                 Some(((topic_filter, option), message)) = self.subscriptions.next() => {
                     match message {
@@ -236,6 +241,7 @@ impl Session {
                 else => break,
             }
         }
+
         trace!("end");
         Ok(())
     }
@@ -388,19 +394,34 @@ impl Session {
     }
 
     #[instrument(skip(self, msg), err)]
-    async fn subscribe(&mut self, msg: Subscribe) -> Result<()> {
+    async fn subscribe(
+        &mut self,
+        msg: Subscribe,
+        mut retain_tx: Sender<(String, SubOption, Message)>,
+    ) -> Result<()> {
         debug!("subscribe topics: {:?}", msg.topic_filters);
         let root = self.root_topic.read().await;
         let mut reason_codes = Vec::new();
         for (topic_filter, topic_option) in msg.topic_filters {
             reason_codes.push(match std::str::from_utf8(&topic_filter[..]) {
                 Ok(topic_filter) => {
-                    self.topic_filters.insert(topic_filter.to_string());
+                    self.topic_filters.insert(topic_filter.to_owned());
                     let channels = root.subscribe_topic(topic_filter);
-                    trace!("found channels: {:?}", channels);
-                    for channel in channels {
+                    trace!("found {} channels", channels.len());
+                    for (channel, retain_rx) in channels {
                         self.subscriptions
                             .insert((topic_filter.to_string(), topic_option.clone()), channel);
+
+                        if let Some(retain) = retain_rx.borrow().clone() {
+                            let ret_msg =
+                                (topic_filter.to_owned(), topic_option.to_owned(), retain);
+                            let mut tx = retain_tx.to_owned();
+                            tokio::spawn(async move {
+                                if let Err(err) = tx.send(ret_msg).await {
+                                    warn!(cause = ?err, "session error");
+                                }
+                            });
+                        }
                     }
                     ReasonCode::Success
                 }
@@ -433,7 +454,6 @@ impl Session {
         for topic_filter in msg.topic_filters {
             reason_codes.push(match std::str::from_utf8(&topic_filter[..]) {
                 Ok(topic_filter) => {
-                    //let key = self.subscriptions.keys().find(|&(k, _)| k == topic).map(|k| k.clone());
                     let keys: Vec<(String, SubOption)> = self
                         .subscriptions
                         .keys()

@@ -24,12 +24,11 @@ pub(crate) struct AppContext {
 
 impl AppContext {
     pub fn new(config: Arc<Settings>) -> Self {
-        let path = config.topic.path.clone();
         Self {
             sessions: HashMap::new(),
             sessions_expire: DelayQueue::new(),
             config,
-            topic_manager: Arc::new(RwLock::new(Topic::new("".to_string(), path))),
+            topic_manager: Arc::new(RwLock::new(Topic::new("".to_string()))),
         }
     }
 
