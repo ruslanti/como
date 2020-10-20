@@ -30,7 +30,12 @@ pub fn decode_will_properties(reader: &mut BytesMut) -> Result<WillProperties> {
                 builder = builder.response_topic(decode_utf8_string(reader)?)?;
             }
             Property::CorrelationData => unimplemented!(),
-            Property::UserProperty => unimplemented!(),
+            Property::UserProperty => {
+                let user_property = (decode_utf8_string(reader)?, decode_utf8_string(reader)?);
+                if let (Some(key), Some(value)) = user_property {
+                    builder = builder.user_properties((key, value));
+                }
+            }
             _ => bail!("unknown will property: {:x}", id),
         }
     }

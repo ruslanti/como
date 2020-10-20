@@ -1,5 +1,6 @@
+use std::borrow::Borrow;
 use std::net::SocketAddr;
-use std::ops::{Add, Div};
+use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,8 +8,8 @@ use anyhow::{anyhow, bail, Error, Result};
 use bytes::Bytes;
 use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
 use tracing::{debug, error, field, instrument, trace};
@@ -107,8 +108,9 @@ impl ConnectionHandler {
         });
 
         conn_tx.send(ack).await?;
+
         let mut context = self.context.lock().await;
-        let session_tx = context.connect_session(id, conn_tx).await;
+        let session_tx = context.connect_session(id, conn_tx, msg.will).await;
         self.session = Some((
             id.to_string(),
             session_tx,
@@ -128,7 +130,7 @@ impl ConnectionHandler {
             (None, ControlPacket::Connect(connect)) => self.connect(connect, conn_tx).await,
             (None, ControlPacket::Auth(_auth)) => unimplemented!(), //self.process_auth(auth).await,
             (None, packet) => {
-                let context = format!("session: None, packet: {:?}", packet, );
+                let context = format!("session: None, packet: {:?}", packet,);
                 Err(anyhow!("unacceptable event").context(context))
             }
             (Some((_, mut session_tx, _)), ControlPacket::Publish(publish)) => {
@@ -207,9 +209,17 @@ impl ConnectionHandler {
                     .await
             }
             (Some((id, _, _)), packet) => {
-                let context = format!("session: {}, packet: {:?}", id, packet, );
+                let context = format!("session: {}, packet: {:?}", id, packet,);
                 Err(anyhow!("unacceptable event").context(context))
-            },
+            }
+        }
+    }
+
+    #[instrument(skip(self), err)]
+    async fn event(&self, event: SessionEvent) -> Result<()> {
+        match self.session.clone() {
+            Some((_, mut tx, _)) => tx.send(event).map_err(Error::msg).await,
+            None => Ok(()),
         }
     }
 
@@ -243,7 +253,7 @@ impl ConnectionHandler {
             let duration = self
                 .keep_alive
                 .map_or(Duration::from_secs(u16::max_value() as u64), |d| {
-                    d.add(d.div(2))
+                    d.add(Duration::from_millis(100))
                 });
             match timeout(duration, stream.next()).await {
                 Ok(timeout_res) => {
@@ -264,6 +274,12 @@ impl ConnectionHandler {
                                 let mut context = self.context.lock().await;
                                 context.disconnect_session(&id, *expire).await;
                             }
+                            trace!("DISCONNECT {}", id);
+                            self.event(SessionEvent::Disconnect(Disconnect {
+                                reason_code: ReasonCode::KeepAliveTimeout,
+                                properties: Default::default(),
+                            }))
+                            .await?;
                             self.disconnect(conn_tx, ReasonCode::KeepAliveTimeout)
                                 .await?;
                             break;

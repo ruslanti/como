@@ -175,7 +175,7 @@ pub trait PropertiesLength {
 #[derive(Debug, Eq, PartialEq)]
 pub struct WillProperties {
     pub will_delay_interval: u32,
-    pub payload_format_indicator: bool,
+    pub payload_format_indicator: Option<bool>,
     pub message_expire_interval: Option<u32>,
     pub content_type: Option<MqttString>,
     pub response_topic: Option<MqttString>,
@@ -216,7 +216,7 @@ pub struct ConnAckProperties {
     pub authentication_data: Option<Bytes>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct PublishProperties {
     pub payload_format_indicator: Option<bool>,
     pub message_expire_interval: Option<u32>,
@@ -537,7 +537,7 @@ impl PropertiesBuilder {
     pub fn will(self) -> WillProperties {
         WillProperties {
             will_delay_interval: self.will_delay_interval.unwrap_or(0),
-            payload_format_indicator: self.payload_format_indicator.unwrap_or(false),
+            payload_format_indicator: self.payload_format_indicator,
             message_expire_interval: self.message_expire_interval,
             content_type: self.content_type,
             response_topic: self.response_topic,
@@ -707,12 +707,12 @@ mod tests {
             PropertiesBuilder::new().will(),
             WillProperties {
                 will_delay_interval: 0,
-                payload_format_indicator: false,
+                payload_format_indicator: None,
                 message_expire_interval: None,
                 content_type: None,
                 response_topic: None,
                 correlation_data: None,
-                user_properties: vec![]
+                user_properties: vec![],
             }
         );
     }

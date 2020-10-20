@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::time::DelayQueue;
 use tracing::warn;
 
-use crate::mqtt::proto::types::ControlPacket;
+use crate::mqtt::proto::types::{ControlPacket, Will};
 use crate::mqtt::session::{Session, SessionEvent};
 use crate::mqtt::topic::Topic;
 use crate::settings::Settings;
@@ -36,6 +36,7 @@ impl AppContext {
         &mut self,
         key: &str,
         conn_tx: Sender<ControlPacket>,
+        will: Option<Will>,
     ) -> SessionSender {
         if let Some(tx) = self.sessions.get(key) {
             //TODO close existing connection
@@ -48,6 +49,7 @@ impl AppContext {
                 conn_tx,
                 self.config.clone(),
                 self.topic_manager.clone(),
+                will,
             );
             tokio::spawn(async move {
                 if let Err(err) = session.session().await {

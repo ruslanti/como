@@ -38,8 +38,8 @@ pub fn decode_connect(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     let will = if will_flag {
         let will_properties_length = decode_variable_integer(reader)? as usize;
         let properties = decode_will_properties(&mut reader.split_to(will_properties_length))?;
-        let topic = decode_utf8_string(reader)?;
-        let payload = Default::default();
+        let topic = decode_utf8_string(reader)?.unwrap();
+        let payload = reader.split().to_bytes();
         Some(Will {
             qos: will_qos_flag,
             retain: will_retain_flag,

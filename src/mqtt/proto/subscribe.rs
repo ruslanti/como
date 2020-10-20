@@ -8,7 +8,9 @@ use crate::mqtt::proto::encoder::encode_utf8_string;
 use crate::mqtt::proto::property::{
     PropertiesBuilder, Property, SubAckProperties, SubscribeProperties,
 };
-use crate::mqtt::proto::types::{ControlPacket, MqttString, QoS, Retain, SubOption, Subscribe};
+use crate::mqtt::proto::types::{
+    ControlPacket, MqttString, QoS, Retain, Subscribe, SubscribeOptions,
+};
 
 pub fn decode_subscribe(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     end_of_stream!(reader.remaining() < 2, "subscribe packet identifier");
@@ -44,7 +46,9 @@ pub fn decode_subscribe_properties(reader: &mut BytesMut) -> Result<SubscribePro
     Ok(builder.subscribe())
 }
 
-pub fn decode_subscribe_payload(reader: &mut BytesMut) -> Result<Vec<(MqttString, SubOption)>> {
+pub fn decode_subscribe_payload(
+    reader: &mut BytesMut,
+) -> Result<Vec<(MqttString, SubscribeOptions)>> {
     let mut topic_filter = vec![];
     while reader.has_remaining() {
         if let Some(topic) = decode_utf8_string(reader)? {
@@ -56,7 +60,7 @@ pub fn decode_subscribe_payload(reader: &mut BytesMut) -> Result<Vec<(MqttString
             let retain: Retain = ((subscription_option & 0b00110000) >> 4).try_into()?;
             topic_filter.push((
                 topic,
-                SubOption {
+                SubscribeOptions {
                     qos,
                     nl,
                     rap,

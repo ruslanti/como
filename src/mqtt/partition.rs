@@ -1,8 +1,7 @@
 use std::path::Path;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use tokio::fs;
-use tokio::stream::StreamExt;
 
 pub(crate) struct Partition {}
 

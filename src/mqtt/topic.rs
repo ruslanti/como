@@ -1,45 +1,42 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::convert::TryInto;
-use std::path::Path;
-use std::sync::Arc;
+use std::time::Instant;
 
-use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
-use futures::SinkExt;
-use tokio::fs;
 use tokio::sync::broadcast::RecvError::Lagged;
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, instrument, trace, warn};
 
+use crate::mqtt::proto::property::PublishProperties;
 use crate::mqtt::proto::types::{MqttString, QoS};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Message {
+    pub ts: Instant,
     pub retain: bool,
     pub qos: QoS,
     pub topic_name: MqttString,
-    pub content_type: Option<Bytes>,
-    pub data: Bytes,
+    pub properties: PublishProperties,
+    pub payload: Bytes,
 }
 
-type PublishTopic = broadcast::Sender<TopicEvent>;
-pub(crate) type SubscribeTopic = broadcast::Receiver<TopicEvent>;
+type PublishChannel = broadcast::Sender<TopicEvent>;
+pub(crate) type SubscribeChannel = broadcast::Receiver<TopicEvent>;
 type RetainEvent = Option<Message>;
 type RetainReceiver = watch::Receiver<RetainEvent>;
 type RetainSender = watch::Sender<RetainEvent>;
 
 #[derive(Debug, Clone)]
 pub(crate) enum TopicEvent {
-    NewTopic(String, PublishTopic),
+    NewTopic(String, PublishChannel, RetainReceiver),
     Publish(Message),
 }
 
 #[derive(Debug)]
 pub struct Topic {
-    publish_channel: PublishTopic,
+    publish_channel: PublishChannel,
+    retain_channel: RetainReceiver,
     topics: HashMap<String, Self>,
-    retain_rx: RetainReceiver,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -51,39 +48,48 @@ enum MatchState<'a> {
 
 impl Topic {
     pub(crate) fn new(name: String) -> Self {
-        let (publish_channel, rx) = broadcast::channel(1024);
-        let (retain_tx, retain_rx) = watch::channel(None);
+        let (publish_channel, subscribe_channel) = broadcast::channel(1024);
+        let (retain_sender, retain_channel) = watch::channel(None);
         debug!("new topic");
         tokio::spawn(async move {
-            Self::topic(name, rx, retain_tx).await;
+            Self::topic(name, subscribe_channel, retain_sender).await;
         });
         Self {
             publish_channel,
+            retain_channel,
             topics: HashMap::new(),
-            retain_rx,
         }
     }
 
-    pub(crate) fn subscribe_channel(&self) -> SubscribeTopic {
+    pub(crate) fn subscribe_channel(&self) -> SubscribeChannel {
         self.publish_channel.subscribe()
     }
 
-    pub(crate) fn new_topic_channel(&self) -> PublishTopic {
+    pub(crate) fn new_topic_channel(&self) -> PublishChannel {
         self.publish_channel.clone()
     }
 
-    #[instrument(skip(rx))]
-    async fn topic(name: String, mut rx: SubscribeTopic, mut retain_tx: RetainSender) {
-        trace!("new topic spawn start {:?}", rx);
+    #[instrument(skip(subscribe_channel, retain_sender))]
+    async fn topic(
+        name: String,
+        mut subscribe_channel: SubscribeChannel,
+        retain_sender: RetainSender,
+    ) {
+        trace!("new topic spawn start {}", name);
+        let mut first = true;
         loop {
-            match rx.recv().await {
+            match subscribe_channel.recv().await {
                 Ok(TopicEvent::Publish(msg)) => {
                     trace!("{:?}", msg);
-                    if let Err(err) = retain_tx.broadcast(Some(msg)) {
-                        error!(cause = ?err, "topic retain error: ");
+                    if msg.retain || first {
+                        if let Err(err) = retain_sender.broadcast(Some(msg)) {
+                            error!(cause = ?err, "topic retain error: ");
+                        } else {
+                            first = false;
+                        }
                     }
                 }
-                Ok(t) => warn!("{:?}", t),
+                Ok(TopicEvent::NewTopic(topic, _, _)) => trace!("new topic event {:?}", topic),
                 Err(Lagged(lag)) => {
                     warn!("lagged: {}", lag);
                 }
@@ -93,24 +99,28 @@ impl Topic {
                 }
             }
         }
-        trace!("new topic spawn stop {:?}", rx);
+        trace!("new topic spawn stop {}", name);
     }
 
-    #[instrument(skip(self, handler))]
-    pub(crate) fn publish_topic<F>(&mut self, topic_name: &str, handler: F) -> PublishTopic
+    #[instrument(skip(self, new_topic_handler))]
+    pub(crate) fn publish_topic<F>(
+        &mut self,
+        topic_name: &str,
+        new_topic_handler: F,
+    ) -> PublishChannel
     where
-        F: Fn(PublishTopic),
+        F: Fn(PublishChannel, RetainReceiver),
     {
         let mut s = topic_name.splitn(2, '/');
         match s.next() {
             Some(prefix) => {
                 let topic = self.topics.entry(prefix.to_string()).or_insert_with(|| {
                     let topic = Topic::new(prefix.to_string());
-                    handler(topic.publish_channel.clone());
+                    new_topic_handler(topic.publish_channel.clone(), topic.retain_channel.clone());
                     topic
                 });
                 match s.next() {
-                    Some(suffix) => topic.publish_topic(suffix, handler),
+                    Some(suffix) => topic.publish_topic(suffix, new_topic_handler),
                     None => topic.publish_channel.clone(),
                 }
             }
@@ -122,7 +132,7 @@ impl Topic {
     pub(crate) fn subscribe_topic(
         &self,
         topic_filter: &str,
-    ) -> Vec<(SubscribeTopic, RetainReceiver)> {
+    ) -> Vec<(SubscribeChannel, RetainReceiver)> {
         let pattern = Topic::pattern(topic_filter);
         trace!("find path: {:?} => {:?}", topic_filter, pattern);
         let mut res = Vec::new();
@@ -144,7 +154,7 @@ impl Topic {
                                 // FINAL
                                 res.push((
                                     node.publish_channel.subscribe(),
-                                    node.retain_rx.clone(),
+                                    node.retain_channel.clone(),
                                 ));
                             }
 
@@ -160,7 +170,7 @@ impl Topic {
                                 // FINAL
                                 res.push((
                                     node.publish_channel.subscribe(),
-                                    node.retain_rx.clone(),
+                                    node.retain_channel.clone(),
                                 ));
                                 // println!("FOUND {}", name)
                             }
@@ -174,7 +184,10 @@ impl Topic {
                         //println!("pattern # - level {:?}", level);
                         if !name.starts_with("$") {
                             //  println!("FOUND {}", name);
-                            res.push((node.publish_channel.subscribe(), node.retain_rx.clone()));
+                            res.push((
+                                node.publish_channel.subscribe(),
+                                node.retain_channel.clone(),
+                            ));
                             for (node_name, node) in node.topics.iter() {
                                 stack.push_back((level, node_name, node))
                             }
@@ -246,7 +259,7 @@ mod tests {
         let mut rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let mut root = Topic::new("".to_string());
-            let handler = |_| ();
+            let handler = |_, _| ();
             println!("topic: {:?}", root.publish_topic("aaa/ddd", handler));
             println!("topic: {:?}", root.publish_topic("/aaa/bbb", handler));
             println!("topic: {:?}", root.publish_topic("/aaa/ccc", handler));

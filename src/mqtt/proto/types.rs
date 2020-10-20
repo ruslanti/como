@@ -3,12 +3,12 @@ use std::convert::{TryFrom, TryInto};
 
 use anyhow::anyhow;
 use bytes::Bytes;
-use serde::{de, Deserialize, Deserializer};
 use serde::de::Visitor;
+use serde::{de, Deserialize, Deserializer};
 
 use crate::mqtt::proto::property::{
-    AuthProperties, ConnAckProperties, ConnectProperties, DisconnectProperties, PublishProperties,
-    PubResProperties, SubAckProperties, SubscribeProperties, UnSubscribeProperties,
+    AuthProperties, ConnAckProperties, ConnectProperties, DisconnectProperties, PubResProperties,
+    PublishProperties, SubAckProperties, SubscribeProperties, UnSubscribeProperties,
     WillProperties,
 };
 
@@ -293,7 +293,7 @@ pub struct Will {
     pub qos: QoS,
     pub retain: bool,
     pub properties: WillProperties,
-    pub topic: Option<MqttString>,
+    pub topic: MqttString,
     pub payload: Bytes,
 }
 
@@ -341,7 +341,7 @@ pub struct Disconnect {
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
-pub struct SubOption {
+pub struct SubscribeOptions {
     pub qos: QoS,
     pub nl: bool,
     pub rap: bool,
@@ -352,7 +352,7 @@ pub struct SubOption {
 pub struct Subscribe {
     pub packet_identifier: u16,
     pub properties: SubscribeProperties,
-    pub topic_filters: Vec<(MqttString, SubOption)>,
+    pub topic_filters: Vec<(MqttString, SubscribeOptions)>,
 }
 
 #[derive(Debug, Eq, PartialEq)]

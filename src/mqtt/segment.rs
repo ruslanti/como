@@ -4,8 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::stream::StreamExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 
 use crate::mqtt::topic::Message;
 
@@ -88,7 +87,7 @@ impl Segment {
         Ok(table)
     }
 
-    async fn push(&mut self, msg: Message) -> Result<(usize)> {
+    async fn push(&mut self, msg: Message) -> Result<usize> {
         let size = 16;
         self.index.write_u32(self.offset).await?;
         self.index.write_u32(self.position).await?;
@@ -101,7 +100,7 @@ impl Segment {
         self.log.write_u8(msg.qos.into()).await?;
         //self.log.write_u16(msg.topic_name.len() as u16).await?;
         self.log.write_all(msg.topic_name.as_ref()).await?;
-        self.log.write_all(msg.data.as_ref()).await?;
+        self.log.write_all(msg.payload.as_ref()).await?;
         self.index.flush().await?;
         self.log.flush().await?;
         self.offset = self.offset + 1;
@@ -112,6 +111,8 @@ impl Segment {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use bytes::Bytes;
 
     use crate::mqtt::proto::types::QoS;
@@ -125,21 +126,23 @@ mod tests {
             let mut segment = Segment::new("/tmp/topic", 323).await.unwrap();
             let w = segment
                 .push(Message {
+                    ts: Instant::now(),
                     retain: false,
                     qos: QoS::AtMostOnce,
                     topic_name: Bytes::from("1234567890"),
-                    content_type: None,
-                    data: Bytes::from("Default::default()"),
+                    properties: Default::default(),
+                    payload: Bytes::from("Default::default()"),
                 })
                 .await
                 .unwrap();
             let w = segment
                 .push(Message {
+                    ts: Instant::now(),
                     retain: false,
                     qos: QoS::AtMostOnce,
                     topic_name: Bytes::from("11111"),
-                    content_type: None,
-                    data: Bytes::from("Default::default()"),
+                    properties: Default::default(),
+                    payload: Bytes::from("Default::default()"),
                 })
                 .await
                 .unwrap();
@@ -157,11 +160,12 @@ mod tests {
             println!("offset: {}, position: {}", segment.offset, segment.position);
             segment
                 .push(Message {
+                    ts: Instant::now(),
                     retain: false,
                     qos: QoS::AtMostOnce,
                     topic_name: Bytes::from("topic3"),
-                    content_type: None,
-                    data: Bytes::from("data3"),
+                    properties: Default::default(),
+                    payload: Bytes::from("data3"),
                 })
                 .await
                 .unwrap();

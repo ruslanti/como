@@ -1,21 +1,23 @@
+use std::borrow::Borrow;
 use std::cmp::min;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{anyhow, bail, Error, Result};
 use tokio::stream::{StreamExt, StreamMap};
 use tokio::sync::broadcast::RecvError::Lagged;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, field, instrument, trace, warn};
+use tracing::{debug, error, field, info, instrument, trace, warn};
 
-use crate::mqtt::proto::property::PubResProperties;
+use crate::mqtt::proto::property::{PubResProperties, PublishProperties};
 use crate::mqtt::proto::types::{
     ControlPacket, Disconnect, PacketType, PubResp, Publish, QoS, ReasonCode, Retain, SubAck,
-    SubOption, Subscribe, UnSubscribe,
+    Subscribe, SubscribeOptions, UnSubscribe, Will,
 };
-use crate::mqtt::topic::{Message, SubscribeTopic, Topic, TopicEvent};
+use crate::mqtt::topic::{Message, SubscribeChannel, Topic, TopicEvent};
 use crate::settings::Settings;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -43,6 +45,7 @@ pub(crate) enum PublishEvent {
 #[derive(Debug)]
 pub(crate) struct Session {
     id: String,
+    created: Instant,
     rx: Receiver<SessionEvent>,
     tx: Sender<ControlPacket>,
     config: Arc<Settings>,
@@ -50,27 +53,32 @@ pub(crate) struct Session {
     client_flows: HashMap<u16, Sender<PublishEvent>>,
     root_topic: Arc<RwLock<Topic>>,
     packet_identifier_seq: Arc<AtomicU16>,
-    subscriptions: StreamMap<(String, SubOption), SubscribeTopic>,
-    topic_filters: HashSet<String>,
+    subscriptions: StreamMap<(String, SubscribeOptions), SubscribeChannel>,
+    topic_filters: HashMap<String, SubscribeOptions>,
+    will: Option<Will>,
 }
 
 async fn publish_topic(root: Arc<RwLock<Topic>>, msg: Publish) -> Result<()> {
     let mut root = root.write().await;
     let topic = std::str::from_utf8(&msg.topic_name[..])?;
+
     let new_topic_channel = root.new_topic_channel();
-    let channel = root.publish_topic(topic, |channel| {
-        if let Err(err) = new_topic_channel.send(TopicEvent::NewTopic(topic.to_string(), channel)) {
+    let channel = root.publish_topic(topic, |channel, retain| {
+        if let Err(err) =
+            new_topic_channel.send(TopicEvent::NewTopic(topic.to_string(), channel, retain))
+        {
             error!(cause = ?err, "publish topic error");
         };
         ()
     });
 
     let message = Message {
+        ts: Instant::now(),
         retain: msg.retain,
         qos: msg.qos,
         topic_name: msg.topic_name,
-        content_type: msg.properties.content_type,
-        data: msg.payload,
+        properties: msg.properties,
+        payload: msg.payload,
     };
 
     channel
@@ -154,15 +162,19 @@ async fn exactly_once_server(
 }
 
 impl Session {
+    #[instrument(skip(id, rx, tx, config, root_topic), fields(identifier = field::display(& id)))]
     pub fn new(
         id: &str,
         rx: Receiver<SessionEvent>,
         tx: Sender<ControlPacket>,
         config: Arc<Settings>,
         root_topic: Arc<RwLock<Topic>>,
+        will: Option<Will>,
     ) -> Self {
+        info!("new session");
         Self {
             id: id.to_owned(),
+            created: Instant::now(),
             rx,
             tx,
             config,
@@ -171,7 +183,8 @@ impl Session {
             root_topic,
             packet_identifier_seq: Arc::new(AtomicU16::new(1)),
             subscriptions: StreamMap::new(),
-            topic_filters: HashSet::new(),
+            topic_filters: HashMap::new(),
+            will,
         }
     }
 
@@ -182,7 +195,7 @@ impl Session {
         self.subscriptions.insert(
             (
                 "".to_string(),
-                SubOption {
+                SubscribeOptions {
                     qos: QoS::AtMostOnce,
                     nl: false,
                     rap: false,
@@ -192,7 +205,7 @@ impl Session {
             self.root_topic.read().await.subscribe_channel(),
         );
 
-        let (retain_tx, mut retain_rx) = mpsc::channel(32);
+        let (retain_sender, mut retain_receiver) = mpsc::channel(32);
         loop {
             tokio::select! {
                 Some(msg) = self.rx.next() => {
@@ -203,14 +216,18 @@ impl Session {
                         SessionEvent::PubRec(p) => self.pubrec(p).await?,
                         SessionEvent::PubRel(p) => self.pubrel(p).await?,
                         SessionEvent::PubComp(p) => self.pubcomp(p).await?,
-                        SessionEvent::Subscribe(s) => self.subscribe(s, retain_tx.clone()).await?,
+                        SessionEvent::Subscribe(s) => self.subscribe(s, retain_sender.clone()).await?,
                         SessionEvent::SubAck(s) => self.suback(s).await?,
                         SessionEvent::UnSubscribe(s) => self.unsubscribe(s).await?,
                         SessionEvent::UnSubAck(s) => self.unsuback(s).await?,
-                        SessionEvent::Disconnect(d) => self.disconnect(d).await?,
+                        SessionEvent::Disconnect(d) => {
+                            self.disconnect(d).await?;
+                            //TODO handle session expire interval
+                            break;
+                        }
                     }
                 },
-                Some((topic_filter, option, message)) = retain_rx.next() => {
+                Some((topic_filter, option, message)) = retain_receiver.next() => {
                     trace!("retain topic: {}, message: {:?}", topic_filter, message);
                     self.publish_client(option, message).await?
                 },
@@ -220,12 +237,24 @@ impl Session {
                             trace!("topic: {}, message: {:?}", topic_filter, msg);
                             self.publish_client(option, msg).await?
                         },
-                        Ok(TopicEvent::NewTopic(topic_name, channel)) =>  {
+                        Ok(TopicEvent::NewTopic(topic_name, channel, retain_channel)) =>  {
                             trace!("new topic: {}", topic_name);
-                            for filter in &self.topic_filters {
+                            for (filter, sub_option) in &self.topic_filters {
                                 if Topic::match_filter(topic_name.as_str(), filter.as_str()) {
                                     debug!("new topic: {} match topic filter {}", topic_name, filter);
-                                    self.subscriptions.insert((filter.clone(), option.clone()), channel.subscribe());
+                                    self.subscriptions.insert((filter.clone(), sub_option.clone()), channel.subscribe());
+                                    if let Some(retain) = retain_channel.borrow().clone() {
+                                        trace!("retain msg: {:?}, session created: {:?}", retain, self.created);
+                                        if retain.retain || retain.ts > self.created {
+                                            let ret_msg = (topic_filter.to_owned(), sub_option.to_owned(), retain);
+                                            let mut tx = retain_sender.to_owned();
+                                            tokio::spawn(async move {
+                                                if let Err(err) = tx.send(ret_msg).await {
+                                                    warn!(cause = ?err, "session error");
+                                                }
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -241,13 +270,12 @@ impl Session {
                 else => break,
             }
         }
-
         trace!("end");
         Ok(())
     }
 
     #[instrument(skip(self), fields(identifier = field::display(& self.id)), err)]
-    async fn publish_client(&mut self, option: SubOption, msg: Message) -> Result<()> {
+    async fn publish_client(&mut self, option: SubscribeOptions, msg: Message) -> Result<()> {
         let packet_identifier = self.packet_identifier_seq.clone();
         let qos = min(msg.qos, option.qos);
         let packet_identifier = if QoS::AtMostOnce == qos {
@@ -267,8 +295,8 @@ impl Session {
             retain: msg.retain,
             topic_name: msg.topic_name,
             packet_identifier,
-            properties: Default::default(),
-            payload: msg.data,
+            properties: msg.properties,
+            payload: msg.payload,
         });
         self.tx.send(publish).await.map_err(Error::msg)?;
 
@@ -393,11 +421,11 @@ impl Session {
         }
     }
 
-    #[instrument(skip(self, msg), err)]
+    #[instrument(skip(self, msg, retain_tx), err)]
     async fn subscribe(
         &mut self,
         msg: Subscribe,
-        mut retain_tx: Sender<(String, SubOption, Message)>,
+        retain_tx: Sender<(String, SubscribeOptions, Message)>,
     ) -> Result<()> {
         debug!("subscribe topics: {:?}", msg.topic_filters);
         let root = self.root_topic.read().await;
@@ -405,22 +433,25 @@ impl Session {
         for (topic_filter, topic_option) in msg.topic_filters {
             reason_codes.push(match std::str::from_utf8(&topic_filter[..]) {
                 Ok(topic_filter) => {
-                    self.topic_filters.insert(topic_filter.to_owned());
+                    self.topic_filters
+                        .insert(topic_filter.to_string(), topic_option.to_owned());
                     let channels = root.subscribe_topic(topic_filter);
                     trace!("found {} channels", channels.len());
                     for (channel, retain_rx) in channels {
                         self.subscriptions
-                            .insert((topic_filter.to_string(), topic_option.clone()), channel);
+                            .insert((topic_filter.to_owned(), topic_option.to_owned()), channel);
 
                         if let Some(retain) = retain_rx.borrow().clone() {
-                            let ret_msg =
-                                (topic_filter.to_owned(), topic_option.to_owned(), retain);
-                            let mut tx = retain_tx.to_owned();
-                            tokio::spawn(async move {
-                                if let Err(err) = tx.send(ret_msg).await {
-                                    warn!(cause = ?err, "session error");
-                                }
-                            });
+                            if retain.retain || retain.ts > self.created {
+                                let ret_msg =
+                                    (topic_filter.to_owned(), topic_option.to_owned(), retain);
+                                let mut tx = retain_tx.to_owned();
+                                tokio::spawn(async move {
+                                    if let Err(err) = tx.send(ret_msg).await {
+                                        warn!(cause = ?err, "session error");
+                                    }
+                                });
+                            }
                         }
                     }
                     ReasonCode::Success
@@ -454,12 +485,12 @@ impl Session {
         for topic_filter in msg.topic_filters {
             reason_codes.push(match std::str::from_utf8(&topic_filter[..]) {
                 Ok(topic_filter) => {
-                    let keys: Vec<(String, SubOption)> = self
+                    let keys: Vec<(String, SubscribeOptions)> = self
                         .subscriptions
                         .keys()
                         .filter_map(|(k, opt)| {
                             if k == topic_filter {
-                                Some((k.clone(), opt.clone()))
+                                Some((k.to_owned(), opt.to_owned()))
                             } else {
                                 None
                             }
@@ -499,7 +530,42 @@ impl Session {
     }
 
     #[instrument(skip(self))]
-    async fn disconnect(&self, _msg: Disconnect) -> Result<()> {
+    async fn disconnect(&self, msg: Disconnect) -> Result<()> {
+        if msg.reason_code != ReasonCode::Success {
+            // publish will
+            if let Some(will) = self.will.borrow() {
+                debug!("send will: {:?}", will);
+                publish_topic(
+                    self.root_topic.clone(),
+                    Publish {
+                        dup: false,
+                        qos: will.qos,
+                        retain: will.retain,
+                        topic_name: will.topic.to_owned(),
+                        packet_identifier: None,
+                        properties: PublishProperties {
+                            payload_format_indicator: will.properties.payload_format_indicator,
+                            message_expire_interval: will.properties.message_expire_interval,
+                            topic_alias: None,
+                            response_topic: will.properties.response_topic.to_owned(),
+                            correlation_data: will.properties.correlation_data.to_owned(),
+                            user_properties: will.properties.user_properties.to_owned(),
+                            subscription_identifier: None,
+                            content_type: will.properties.content_type.to_owned(),
+                        },
+                        payload: will.payload.to_owned(),
+                    },
+                )
+                .await?
+            }
+        }
         Ok(())
+    }
+}
+
+impl Drop for Session {
+    #[instrument(skip(self), fields(identifier = field::display(& self.id)))]
+    fn drop(&mut self) {
+        info!("drop session");
     }
 }
