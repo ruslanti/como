@@ -124,7 +124,7 @@ mod tests {
         let mut rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let mut segment = Segment::new("/tmp/topic", 323).await.unwrap();
-            let w = segment
+            let _w = segment
                 .push(Message {
                     ts: Instant::now(),
                     retain: false,

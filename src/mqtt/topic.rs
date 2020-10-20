@@ -44,6 +44,7 @@ enum MatchState<'a> {
     Topic(&'a str),
     SingleLevel,
     MultiLevel,
+    Dollar,
 }
 
 impl Topic {
@@ -111,20 +112,32 @@ impl Topic {
     where
         F: Fn(PublishChannel, RetainReceiver),
     {
-        let mut s = topic_name.splitn(2, '/');
-        match s.next() {
-            Some(prefix) => {
-                let topic = self.topics.entry(prefix.to_string()).or_insert_with(|| {
-                    let topic = Topic::new(prefix.to_string());
-                    new_topic_handler(topic.publish_channel.clone(), topic.retain_channel.clone());
-                    topic
-                });
-                match s.next() {
-                    Some(suffix) => topic.publish_topic(suffix, new_topic_handler),
-                    None => topic.publish_channel.clone(),
+        if let Some(topic_name) = topic_name.strip_prefix('$') {
+            let topic = self.topics.entry('$'.to_string()).or_insert_with(|| {
+                let topic = Topic::new('$'.to_string());
+                new_topic_handler(topic.publish_channel.clone(), topic.retain_channel.clone());
+                topic
+            });
+            topic.publish_topic(topic_name, new_topic_handler)
+        } else {
+            let mut s = topic_name.splitn(2, '/');
+            match s.next() {
+                Some(prefix) => {
+                    let topic = self.topics.entry(prefix.to_owned()).or_insert_with(|| {
+                        let topic = Topic::new(prefix.to_owned());
+                        new_topic_handler(
+                            topic.publish_channel.clone(),
+                            topic.retain_channel.clone(),
+                        );
+                        topic
+                    });
+                    match s.next() {
+                        Some(suffix) => topic.publish_topic(suffix, new_topic_handler),
+                        None => topic.publish_channel.clone(),
+                    }
                 }
+                None => self.publish_channel.clone(),
             }
-            None => self.publish_channel.clone(),
         }
     }
 
@@ -193,6 +206,21 @@ impl Topic {
                             }
                         }
                     }
+                    MatchState::Dollar => {
+                        if name == "$" {
+                            if (level + 1) == max_level {
+                                // FINAL
+                                res.push((
+                                    node.publish_channel.subscribe(),
+                                    node.retain_channel.clone(),
+                                ));
+                            }
+
+                            for (node_name, node) in node.topics.iter() {
+                                stack.push_back((level + 1, node_name, node))
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -201,6 +229,13 @@ impl Topic {
 
     fn pattern(topic_filter: &str) -> Vec<MatchState> {
         let mut pattern = Vec::new();
+        let topic_filter = if let Some(topic_filter) = topic_filter.strip_prefix('$') {
+            pattern.push(MatchState::Dollar);
+            topic_filter
+        } else {
+            topic_filter
+        };
+
         for item in topic_filter.split('/') {
             match item {
                 "#" => pattern.push(MatchState::MultiLevel),
@@ -215,7 +250,16 @@ impl Topic {
         let pattern = Topic::pattern(filter);
         trace!("find path: {:?} => {:?}", filter, pattern);
         let mut level = 0;
-        for name in topic_name.split('/') {
+        let topics = if let Some(topic_name) = topic_name.strip_prefix('$') {
+            let mut names = vec![];
+            names.push("$");
+            topic_name.split('/').for_each(|n| names.push(n));
+            names
+        } else {
+            topic_name.split('/').collect()
+        };
+        trace!("topics: {:?}", topics);
+        for name in topics {
             if let Some(&state) = pattern.get(level) {
                 let max_level = pattern.len();
                 // println!("state {:?} level: {} len: {}", state, level, pattern.len());
@@ -230,16 +274,23 @@ impl Topic {
                     }
                     MatchState::SingleLevel => {
                         //  println!("pattern + - level {:?}", level);
-                        if !name.starts_with("$") {
+                        if !name.starts_with('$') {
                             if (level + 1) == max_level {
                                 return true;
                             }
+                        } else {
+                            return false;
                         }
                     }
                     MatchState::MultiLevel => {
                         //println!("pattern # - level {:?}", level);
-                        if !name.starts_with("$") {
-                            return true;
+                        return if !name.starts_with('$') { true } else { false };
+                    }
+                    MatchState::Dollar => {
+                        if name == "$" {
+                            if (level + 1) == max_level {
+                                return true;
+                            }
                         }
                     }
                 }

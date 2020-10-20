@@ -347,20 +347,35 @@ impl Session {
                         });
                         self.tx.send(disconnect).await?;
                     } else {
-                        let session = self.id.clone();
-                        let (mut tx, rx) = mpsc::channel(1);
-                        let root = self.root_topic.clone();
-                        let resp_tx = self.tx.clone();
-                        tokio::spawn(async move {
-                            if let Err(err) =
-                                exactly_once_server(session, packet_identifier, root, rx, resp_tx)
-                                    .await
-                            {
-                                error!(cause = ?err, "QoS 2 protocol error: {}", err);
-                            }
-                        });
-                        self.server_flows.insert(packet_identifier, tx.clone());
-                        tx.send(PublishEvent::Publish(msg)).await?
+                        if self.server_flows.len()
+                            < self.config.connection.receive_maximum.unwrap() as usize
+                        {
+                            let session = self.id.clone();
+                            let (mut tx, rx) = mpsc::channel(1);
+                            let root = self.root_topic.clone();
+                            let resp_tx = self.tx.clone();
+                            tokio::spawn(async move {
+                                if let Err(err) = exactly_once_server(
+                                    session,
+                                    packet_identifier,
+                                    root,
+                                    rx,
+                                    resp_tx,
+                                )
+                                .await
+                                {
+                                    error!(cause = ?err, "QoS 2 protocol error: {}", err);
+                                }
+                            });
+                            self.server_flows.insert(packet_identifier, tx.clone());
+                            tx.send(PublishEvent::Publish(msg)).await?
+                        } else {
+                            let disconnect = ControlPacket::Disconnect(Disconnect {
+                                reason_code: ReasonCode::ReceiveMaximumExceeded,
+                                properties: Default::default(),
+                            });
+                            self.tx.send(disconnect).await?;
+                        }
                     }
                 } else {
                     bail!("undefined packet_identifier");

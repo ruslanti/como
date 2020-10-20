@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use anyhow::Error;
+use futures::TryFutureExt;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::DelayQueue;
 use tracing::warn;
 
-use crate::mqtt::proto::types::{ControlPacket, Will};
+use crate::mqtt::proto::types::{ControlPacket, Disconnect, ReasonCode, Will};
 use crate::mqtt::session::{Session, SessionEvent};
 use crate::mqtt::topic::Topic;
 use crate::settings::Settings;
@@ -35,11 +37,24 @@ impl AppContext {
     pub async fn connect_session(
         &mut self,
         key: &str,
+        clean_start: bool,
         conn_tx: Sender<ControlPacket>,
         will: Option<Will>,
     ) -> SessionSender {
+        //TODO close existing connection
+        if clean_start {
+            if let Some(tx) = self.sessions.remove(key) {
+                let event = SessionEvent::Disconnect(Disconnect {
+                    reason_code: ReasonCode::SessionTakenOver,
+                    properties: Default::default(),
+                });
+                if let Err(err) = tx.clone().send(event).map_err(Error::msg).await {
+                    warn!(cause = ?err, "session error");
+                }
+            }
+        }
+
         if let Some(tx) = self.sessions.get(key) {
-            //TODO close existing connection
             tx.clone()
         } else {
             let (tx, rx) = mpsc::channel(32);
