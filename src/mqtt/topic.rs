@@ -3,12 +3,12 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use bytes::Bytes;
-use tokio::sync::broadcast::RecvError::Lagged;
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, instrument, trace, warn};
 
 use crate::mqtt::proto::property::PublishProperties;
 use crate::mqtt::proto::types::{MqttString, QoS};
+use tokio::sync::broadcast::error::RecvError::Lagged;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Message {
@@ -83,7 +83,7 @@ impl Topic {
                 Ok(TopicEvent::Publish(msg)) => {
                     trace!("{:?}", msg);
                     if msg.retain || first {
-                        if let Err(err) = retain_sender.broadcast(Some(msg)) {
+                        if let Err(err) = retain_sender.send(Some(msg)) {
                             error!(cause = ?err, "topic retain error: ");
                         } else {
                             first = false;
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_insert() {
-        let mut rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let mut root = Topic::new("".to_string());
             let handler = |_, _| ();

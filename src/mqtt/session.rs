@@ -1,17 +1,3 @@
-use std::borrow::Borrow;
-use std::cmp::min;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
-
-use anyhow::{anyhow, bail, Error, Result};
-use tokio::stream::{StreamExt, StreamMap};
-use tokio::sync::broadcast::RecvError::Lagged;
-use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, field, info, instrument, trace, warn};
-
 use crate::mqtt::proto::property::{PubResProperties, PublishProperties};
 use crate::mqtt::proto::types::{
     ControlPacket, Disconnect, PacketType, PubResp, Publish, QoS, ReasonCode, Retain, SubAck,
@@ -19,6 +5,18 @@ use crate::mqtt::proto::types::{
 };
 use crate::mqtt::topic::{Message, SubscribeChannel, Topic, TopicEvent};
 use crate::settings::Settings;
+use anyhow::{anyhow, bail, Error, Result};
+use std::borrow::Borrow;
+use std::cmp::min;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::stream::{Stream, StreamExt, StreamMap};
+use tokio::sync::broadcast::error::RecvError::Lagged;
+use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{mpsc, RwLock};
+use tracing::{debug, error, field, info, instrument, trace, warn};
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum SessionEvent {
@@ -92,7 +90,7 @@ async fn exactly_once_client(
     session: String,
     packet_identifier: u16,
     mut rx: Receiver<PublishEvent>,
-    mut tx: Sender<ControlPacket>,
+    tx: Sender<ControlPacket>,
 ) -> Result<()> {
     if let Some(event) = rx.recv().await {
         if let PublishEvent::PubRec(_msg) = event {
@@ -125,7 +123,7 @@ async fn exactly_once_server(
     packet_identifier: u16,
     root: Arc<RwLock<Topic>>,
     mut rx: Receiver<PublishEvent>,
-    mut tx: Sender<ControlPacket>,
+    tx: Sender<ControlPacket>,
 ) -> Result<()> {
     if let Some(event) = rx.recv().await {
         if let PublishEvent::Publish(msg) = event {
@@ -206,73 +204,90 @@ impl Session {
         );
 
         let (retain_sender, mut retain_receiver) = mpsc::channel(32);
+
         loop {
             tokio::select! {
-                Some(msg) = self.rx.next() => {
-                    trace!("command: {:?}", msg);
-                    match msg {
-                        SessionEvent::Publish(p) => self.publish(p).await?,
-                        SessionEvent::PubAck(p) => self.puback(p).await?,
-                        SessionEvent::PubRec(p) => self.pubrec(p).await?,
-                        SessionEvent::PubRel(p) => self.pubrel(p).await?,
-                        SessionEvent::PubComp(p) => self.pubcomp(p).await?,
-                        SessionEvent::Subscribe(s) => self.subscribe(s, retain_sender.clone()).await?,
-                        SessionEvent::SubAck(s) => self.suback(s).await?,
-                        SessionEvent::UnSubscribe(s) => self.unsubscribe(s).await?,
-                        SessionEvent::UnSubAck(s) => self.unsuback(s).await?,
-                        SessionEvent::Disconnect(d) => {
-                            self.disconnect(d).await?;
-                            //TODO handle session expire interval
-                            break;
-                        }
-                    }
-                },
-                Some((topic_filter, option, message)) = retain_receiver.next() => {
-                    trace!("retain topic: {}, message: {:?}", topic_filter, message);
-                    self.publish_client(option, message).await?
-                },
-                Some(((topic_filter, option), message)) = self.subscriptions.next() => {
-                    match message {
-                        Ok(TopicEvent::Publish(msg)) =>  {
-                            trace!("topic: {}, message: {:?}", topic_filter, msg);
-                            self.publish_client(option, msg).await?
-                        },
-                        Ok(TopicEvent::NewTopic(topic_name, channel, retain_channel)) =>  {
-                            trace!("new topic: {}", topic_name);
-                            for (filter, sub_option) in &self.topic_filters {
-                                if Topic::match_filter(topic_name.as_str(), filter.as_str()) {
-                                    debug!("new topic: {} match topic filter {}", topic_name, filter);
-                                    self.subscriptions.insert((filter.clone(), sub_option.clone()), channel.subscribe());
-                                    if let Some(retain) = retain_channel.borrow().clone() {
-                                        trace!("retain msg: {:?}, session created: {:?}", retain, self.created);
-                                        if retain.retain || retain.ts > self.created {
-                                            let ret_msg = (topic_filter.to_owned(), sub_option.to_owned(), retain);
-                                            let mut tx = retain_sender.to_owned();
-                                            tokio::spawn(async move {
-                                                if let Err(err) = tx.send(ret_msg).await {
-                                                    warn!(cause = ?err, "session error");
-                                                }
-                                            });
-                                        }
+                            Some(msg) = self.rx.next() => {
+                                trace!("command: {:?}", msg);
+                                match msg {
+                                    SessionEvent::Publish(p) => self.publish(p).await?,
+                                    SessionEvent::PubAck(p) => self.puback(p).await?,
+                                    SessionEvent::PubRec(p) => self.pubrec(p).await?,
+                                    SessionEvent::PubRel(p) => self.pubrel(p).await?,
+                                    SessionEvent::PubComp(p) => self.pubcomp(p).await?,
+                                    SessionEvent::Subscribe(s) => self.subscribe(s, retain_sender.clone()).await?,
+                                    SessionEvent::SubAck(s) => self.suback(s).await?,
+                                    SessionEvent::UnSubscribe(s) => self.unsubscribe(s).await?,
+                                    SessionEvent::UnSubAck(s) => self.unsuback(s).await?,
+                                    SessionEvent::Disconnect(d) => {
+                                        self.disconnect(d).await?;
+                                        //TODO handle session expire interval
+                                        break;
                                     }
                                 }
-                            }
+                            },
+                            Some((topic_filter, option, message)) = retain_receiver.next() => {
+                                trace!("retain topic: {}, message: {:?}", topic_filter, message);
+                                self.publish_client(option, message).await?
+                            },
+            /*                res = Self::process_subscriptions(self.subscriptions) => {
+                                res?; // handle error
+                                break; // disconnect
+                            },*/
+                            /*Some(((topic_filter, option), message)) = self.subscriptions.next() => {
+                                match message {
+                                    Ok(TopicEvent::Publish(msg)) =>  {
+                                        trace!("topic: {}, message: {:?}", topic_filter, msg);
+                                        self.publish_client(option, msg).await?
+                                    },
+                                    Ok(TopicEvent::NewTopic(topic_name, channel, retain_channel)) =>  {
+                                        trace!("new topic: {}", topic_name);
+                                        for (filter, sub_option) in &self.topic_filters {
+                                            if Topic::match_filter(topic_name.as_str(), filter.as_str()) {
+                                                debug!("new topic: {} match topic filter {}", topic_name, filter);
+                                                self.subscriptions.insert((filter.clone(), sub_option.clone()), channel.subscribe());
+                                                if let Some(retain) = retain_channel.borrow().clone() {
+                                                    trace!("retain msg: {:?}, session created: {:?}", retain, self.created);
+                                                    if retain.retain || retain.ts > self.created {
+                                                        let ret_msg = (topic_filter.to_owned(), sub_option.to_owned(), retain);
+                                                        let mut tx = retain_sender.to_owned();
+                                                        tokio::spawn(async move {
+                                                            if let Err(err) = tx.send(ret_msg).await {
+                                                                warn!(cause = ?err, "session error");
+                                                            }
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(Lagged(lag)) => {
+                                        warn!("topic filter {} lagged: {}", topic_filter, lag);
+                                    },
+                                    Err(err) => {
+                                        error!(cause = ?err, "topic filter {} error: ", topic_filter);
+                                        break;
+                                    }
+                                }
+                            },*/
+                            else => break,
                         }
-                        Err(Lagged(lag)) => {
-                            warn!("topic filter {} lagged: {}", topic_filter, lag);
-                        },
-                        Err(err) => {
-                            error!(cause = ?err, "topic filter {} error: ", topic_filter);
-                            break;
-                        }
-                    }
-                },
-                else => break,
-            }
         }
         trace!("end");
         Ok(())
     }
+
+    /*    async fn process_subscriptions<K, S>(mut stream: StreamMap<K, S>) -> Result<()>
+    where
+        S: Stream<Item = TopicEvent> + Unpin,
+    {
+        match stream.next() {
+            _ => {
+                debug!("NEXT");
+                Ok(())
+            }
+        }
+    }*/
 
     #[instrument(skip(self), fields(identifier = field::display(& self.id)), err)]
     async fn publish_client(&mut self, option: SubscribeOptions, msg: Message) -> Result<()> {
@@ -351,7 +366,7 @@ impl Session {
                             < self.config.connection.receive_maximum.unwrap() as usize
                         {
                             let session = self.id.clone();
-                            let (mut tx, rx) = mpsc::channel(1);
+                            let (tx, rx) = mpsc::channel(1);
                             let root = self.root_topic.clone();
                             let resp_tx = self.tx.clone();
                             tokio::spawn(async move {
@@ -452,15 +467,24 @@ impl Session {
                         .insert(topic_filter.to_string(), topic_option.to_owned());
                     let channels = root.subscribe_topic(topic_filter);
                     trace!("found {} channels", channels.len());
-                    for (channel, retain_rx) in channels {
-                        self.subscriptions
-                            .insert((topic_filter.to_owned(), topic_option.to_owned()), channel);
+                    for (mut channel, retain_rx) in channels {
+                        //let stream = channel.into_stream();
+                        //    sub.insert((topic_filter.to_owned(), topic_option.to_owned()), channel);
+                        /*self.subscriptions
+                        .insert((topic_filter.to_owned(), topic_option.to_owned()), channel);*/
+                        tokio::spawn(async move {
+                            while let Ok(TopicEvent::Publish(msg)) = channel.recv().await {
+                                /*  self.publish_client(topic_option.to_owned(), msg)
+                                .await
+                                .unwrap()*/
+                            }
+                        });
 
                         if let Some(retain) = retain_rx.borrow().clone() {
                             if retain.retain || retain.ts > self.created {
                                 let ret_msg =
                                     (topic_filter.to_owned(), topic_option.to_owned(), retain);
-                                let mut tx = retain_tx.to_owned();
+                                let tx = retain_tx.to_owned();
                                 tokio::spawn(async move {
                                     if let Err(err) = tx.send(ret_msg).await {
                                         warn!(cause = ?err, "session error");

@@ -5,7 +5,6 @@ use anyhow::Error;
 use futures::TryFutureExt;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, RwLock};
-use tokio::time::DelayQueue;
 use tracing::warn;
 
 use crate::mqtt::proto::types::{ControlPacket, Disconnect, ReasonCode, Will};
@@ -19,7 +18,7 @@ pub(crate) type SessionContext = Option<(String, SessionSender, Option<u32>)>;
 #[derive(Debug)]
 pub(crate) struct AppContext {
     sessions: HashMap<String, SessionSender>,
-    sessions_expire: DelayQueue<String>,
+    //sessions_expire: DelayQueue<String>,
     pub(crate) config: Arc<Settings>,
     topic_manager: Arc<RwLock<Topic>>,
 }
@@ -28,7 +27,7 @@ impl AppContext {
     pub fn new(config: Arc<Settings>) -> Self {
         Self {
             sessions: HashMap::new(),
-            sessions_expire: DelayQueue::new(),
+            // sessions_expire: DelayQueue::new(),
             config,
             topic_manager: Arc::new(RwLock::new(Topic::new("".to_string()))),
         }

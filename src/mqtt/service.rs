@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, Mutex, Semaphore};
-use tokio::time::{self, Duration};
+use tokio::time::{sleep, Duration};
 use tokio_native_tls::TlsAcceptor;
 use tracing::{debug, error, field, info, instrument};
 
@@ -129,7 +129,8 @@ impl Service {
                     }
                 }
             }
-            time::delay_for(Duration::from_secs(backoff)).await;
+            sleep(Duration::from_secs(backoff)).await;
+            //time::delay_for(Duration::from_secs(backoff)).await;
             // Double the back off
             backoff *= 2;
         }

@@ -135,7 +135,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let w = segment
+            let _w = segment
                 .push(Message {
                     ts: Instant::now(),
                     retain: false,

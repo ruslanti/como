@@ -54,7 +54,7 @@ impl ConnectionHandler {
     }
 
     #[instrument(skip(self, conn_tx, msg), err)]
-    async fn connect(&mut self, msg: Connect, mut conn_tx: Sender<ControlPacket>) -> Result<()> {
+    async fn connect(&mut self, msg: Connect, conn_tx: Sender<ControlPacket>) -> Result<()> {
         trace!("{:?}", msg);
         let (assigned_client_identifier, identifier) = if let Some(id) = msg.client_identifier {
             (None, id)
@@ -123,7 +123,7 @@ impl ConnectionHandler {
     async fn receiving(
         &mut self,
         packet: ControlPacket,
-        mut conn_tx: Sender<ControlPacket>,
+        conn_tx: Sender<ControlPacket>,
     ) -> Result<()> {
         trace!("{:?}", packet);
         match (self.session.clone(), packet) {
@@ -133,55 +133,55 @@ impl ConnectionHandler {
                 let context = format!("session: None, packet: {:?}", packet,);
                 Err(anyhow!("unacceptable event").context(context))
             }
-            (Some((_, mut session_tx, _)), ControlPacket::Publish(publish)) => {
+            (Some((_, session_tx, _)), ControlPacket::Publish(publish)) => {
                 session_tx
                     .send(SessionEvent::Publish(publish))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, mut session_tx, _)), ControlPacket::PubAck(response)) => {
+            (Some((_, session_tx, _)), ControlPacket::PubAck(response)) => {
                 session_tx
                     .send(SessionEvent::PubAck(response))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, mut session_tx, _)), ControlPacket::PubRel(response)) => {
+            (Some((_, session_tx, _)), ControlPacket::PubRel(response)) => {
                 session_tx
                     .send(SessionEvent::PubRel(response))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, mut session_tx, _)), ControlPacket::PubRec(response)) => {
+            (Some((_, session_tx, _)), ControlPacket::PubRec(response)) => {
                 session_tx
                     .send(SessionEvent::PubRec(response))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, mut session_tx, _)), ControlPacket::PubComp(response)) => {
+            (Some((_, session_tx, _)), ControlPacket::PubComp(response)) => {
                 session_tx
                     .send(SessionEvent::PubComp(response))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, mut session_tx, _)), ControlPacket::Subscribe(sub)) => {
+            (Some((_, session_tx, _)), ControlPacket::Subscribe(sub)) => {
                 session_tx
                     .send(SessionEvent::Subscribe(sub))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, mut session_tx, _)), ControlPacket::SubAck(sub)) => {
+            (Some((_, session_tx, _)), ControlPacket::SubAck(sub)) => {
                 session_tx
                     .send(SessionEvent::SubAck(sub))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, mut session_tx, _)), ControlPacket::UnSubscribe(sub)) => {
+            (Some((_, session_tx, _)), ControlPacket::UnSubscribe(sub)) => {
                 session_tx
                     .send(SessionEvent::UnSubscribe(sub))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, mut session_tx, _)), ControlPacket::UnSubAck(sub)) => {
+            (Some((_, session_tx, _)), ControlPacket::UnSubAck(sub)) => {
                 session_tx
                     .send(SessionEvent::UnSubAck(sub))
                     .map_err(Error::msg)
@@ -193,7 +193,7 @@ impl ConnectionHandler {
                     .map_err(Error::msg)
                     .await
             }
-            (Some((id, mut session_tx, expire)), ControlPacket::Disconnect(disconnect)) => {
+            (Some((id, session_tx, expire)), ControlPacket::Disconnect(disconnect)) => {
                 debug!(
                     "disconnect reason code: {:?}, reason string:{:?}",
                     disconnect.reason_code, disconnect.properties.reason_string
@@ -218,7 +218,7 @@ impl ConnectionHandler {
     #[instrument(skip(self), err)]
     async fn event(&self, event: SessionEvent) -> Result<()> {
         match self.session.clone() {
-            Some((_, mut tx, _)) => tx.send(event).map_err(Error::msg).await,
+            Some((_, tx, _)) => tx.send(event).map_err(Error::msg).await,
             None => Ok(()),
         }
     }
@@ -231,7 +231,7 @@ impl ConnectionHandler {
     #[instrument(skip(self, conn_tx), err)]
     async fn disconnect(
         &self,
-        mut conn_tx: Sender<ControlPacket>,
+        conn_tx: Sender<ControlPacket>,
         reason_code: ReasonCode,
     ) -> Result<()> {
         let disc = ControlPacket::Disconnect(Disconnect {
