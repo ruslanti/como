@@ -1,23 +1,24 @@
 use std::io::Read;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::fs::OpenOptions;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use mqtt::service;
 use native_tls::Identity;
 use native_tls::TlsAcceptor;
+use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::Mutex;
+use tokio::time::sleep;
 use tracing::{debug, Level};
+
+use mqtt::service;
 
 use crate::mqtt::context::AppContext;
 use crate::settings::Settings;
-use tokio::time::sleep;
 
-use std::time::Duration;
 mod mqtt;
 mod settings;
 
@@ -38,38 +39,7 @@ async fn main() -> Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("no global subscriber has been set");
 
-    tokio::spawn(async move {
-        let index_file = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open("/tmp/test.txt")
-            .await
-            .unwrap();
-        let mut index = BufWriter::new(index_file);
-        for i in 1..1024 {
-            debug!("write_u32({})", i);
-            sleep(Duration::from_millis(200)).await;
-            index.write_u32(i).await.unwrap()
-        }
-        index.flush().await.unwrap();
-    });
-
-    tokio::spawn(async move {
-        let index_file = OpenOptions::new()
-            .read(true)
-            .open("/tmp/test.txt")
-            .await
-            .unwrap();
-        let mut index = BufReader::new(index_file);
-
-        while let Ok(g) = index.read_u32().await {
-            debug!("read_u32({})", g);
-        }
-    });
-
     debug!("{:?}", settings);
-
-    /*    let root = Topic::load(settings.topic.path).await?;*/
 
     let context = Arc::new(Mutex::new(AppContext::new(settings.clone())));
 
