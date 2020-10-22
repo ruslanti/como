@@ -186,6 +186,8 @@ impl Into<u8> for PacketType {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReasonCode {
     Success = 0x00,
+    GrantedQoS1 = 0x01,
+    GrantedQoS2 = 0x02,
     DisconnectWithWill = 0x04,
     NoSubscriptionExisted = 0x11,
     UnspecifiedError = 0x80,
@@ -224,6 +226,8 @@ impl TryFrom<u8> for ReasonCode {
     fn try_from(b: u8) -> Result<Self, Self::Error> {
         match b {
             0x00 => Ok(ReasonCode::Success),
+            0x01 => Ok(ReasonCode::GrantedQoS1),
+            0x02 => Ok(ReasonCode::GrantedQoS2),
             0x04 => Ok(ReasonCode::DisconnectWithWill),
             0x11 => Ok(ReasonCode::NoSubscriptionExisted),
             0x80 => Ok(ReasonCode::UnspecifiedError),
@@ -263,6 +267,8 @@ impl Into<u8> for ReasonCode {
     fn into(self) -> u8 {
         match self {
             ReasonCode::Success => 0x00,
+            ReasonCode::GrantedQoS1 => 0x01,
+            ReasonCode::GrantedQoS2 => 0x02,
             ReasonCode::DisconnectWithWill => 0x04,
             ReasonCode::NoSubscriptionExisted => 0x11,
             ReasonCode::UnspecifiedError => 0x80,

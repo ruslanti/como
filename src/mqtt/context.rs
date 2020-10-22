@@ -9,7 +9,7 @@ use tracing::warn;
 
 use crate::mqtt::proto::types::{ControlPacket, Disconnect, ReasonCode, Will};
 use crate::mqtt::session::{Session, SessionEvent};
-use crate::mqtt::topic::Topic;
+use crate::mqtt::topic::TopicManager;
 use crate::settings::Settings;
 
 type SessionSender = Sender<SessionEvent>;
@@ -20,7 +20,7 @@ pub(crate) struct AppContext {
     sessions: HashMap<String, SessionSender>,
     //sessions_expire: DelayQueue<String>,
     pub(crate) config: Arc<Settings>,
-    topic_manager: Arc<RwLock<Topic>>,
+    topic_manager: Arc<RwLock<TopicManager>>,
 }
 
 impl AppContext {
@@ -29,7 +29,7 @@ impl AppContext {
             sessions: HashMap::new(),
             // sessions_expire: DelayQueue::new(),
             config,
-            topic_manager: Arc::new(RwLock::new(Topic::new("".to_string()))),
+            topic_manager: Arc::new(RwLock::new(TopicManager::new())),
         }
     }
 
@@ -66,7 +66,7 @@ impl AppContext {
                 will,
             );
             tokio::spawn(async move {
-                if let Err(err) = session.session().await {
+                if let Err(err) = session.handle().await {
                     warn!(cause = ?err, "session error");
                 }
             });

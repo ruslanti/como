@@ -55,7 +55,7 @@ impl ConnectionHandler {
 
     #[instrument(skip(self, conn_tx, msg), err)]
     async fn connect(&mut self, msg: Connect, conn_tx: Sender<ControlPacket>) -> Result<()> {
-        trace!("{:?}", msg);
+        //trace!("{:?}", msg);
         let (assigned_client_identifier, identifier) = if let Some(id) = msg.client_identifier {
             (None, id)
         } else {
@@ -120,11 +120,7 @@ impl ConnectionHandler {
     }
 
     #[instrument(skip(self, packet, conn_tx), err)]
-    async fn receiving(
-        &mut self,
-        packet: ControlPacket,
-        conn_tx: Sender<ControlPacket>,
-    ) -> Result<()> {
+    async fn recv(&mut self, packet: ControlPacket, conn_tx: Sender<ControlPacket>) -> Result<()> {
         trace!("{:?}", packet);
         match (self.session.clone(), packet) {
             (None, ControlPacket::Connect(connect)) => self.connect(connect, conn_tx).await,
@@ -258,7 +254,7 @@ impl ConnectionHandler {
             match timeout(duration, stream.next()).await {
                 Ok(timeout_res) => {
                     if let Some(res) = timeout_res {
-                        self.receiving(res?, conn_tx.clone()).await?;
+                        self.recv(res?, conn_tx.clone()).await?;
                     } else {
                         trace!("disconnected");
                         break;
@@ -306,7 +302,7 @@ impl ConnectionHandler {
                     res?; // handle error
                     break; // disconnect
                 },
-                res = sending(sink, conn_rx) => {
+                res = send(sink, conn_rx) => {
                     res?; // handle error
                     break; // disconnect
                 },
@@ -321,7 +317,7 @@ impl ConnectionHandler {
 }
 
 #[instrument(skip(sink, reply), err)]
-async fn sending<S>(mut sink: S, mut reply: Receiver<ControlPacket>) -> Result<()>
+async fn send<S>(mut sink: S, mut reply: Receiver<ControlPacket>) -> Result<()>
 where
     S: Sink<ControlPacket> + Unpin,
 {

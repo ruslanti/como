@@ -1,17 +1,13 @@
 use std::io::Read;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use native_tls::Identity;
 use native_tls::TlsAcceptor;
-use tokio::fs::OpenOptions;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::Mutex;
-use tokio::time::sleep;
 use tracing::{debug, Level};
 
 use mqtt::service;
