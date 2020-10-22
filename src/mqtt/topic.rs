@@ -1,14 +1,18 @@
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::ops::Deref;
+use std::str::FromStr;
 use std::time::Instant;
 
+use anyhow::Error;
 use bytes::Bytes;
+use tokio::sync::broadcast::error::RecvError::Lagged;
 use tokio::sync::{broadcast, watch};
 use tracing::{debug, error, instrument, trace, warn};
 
 use crate::mqtt::proto::property::PublishProperties;
 use crate::mqtt::proto::types::{MqttString, QoS};
-use tokio::sync::broadcast::error::RecvError::Lagged;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Message {
@@ -123,6 +127,7 @@ impl Topic {
             let mut s = topic_name.splitn(2, '/');
             match s.next() {
                 Some(prefix) => {
+                    println!("'{}'", prefix);
                     let topic = self.topics.entry(prefix.to_owned()).or_insert_with(|| {
                         let topic = Topic::new(prefix.to_owned());
                         new_topic_handler(
@@ -141,17 +146,17 @@ impl Topic {
         }
     }
 
-    #[instrument(skip(self))]
-    pub(crate) fn subscribe_topic(
-        &self,
+    #[instrument(skip(root))]
+    pub(crate) fn subscribe<'a>(
+        root: &Topic,
         topic_filter: &str,
-    ) -> Vec<(SubscribeChannel, RetainReceiver)> {
+    ) -> Vec<(String, SubscribeChannel, RetainReceiver)> {
         let pattern = Topic::pattern(topic_filter);
-        trace!("find path: {:?} => {:?}", topic_filter, pattern);
+        //trace!("find path: {:?} => {:?}", topic_filter, pattern);
         let mut res = Vec::new();
 
         let mut stack = VecDeque::new();
-        for (node_name, node) in self.topics.iter() {
+        for (node_name, node) in root.topics.iter() {
             stack.push_back((0, node_name, node))
         }
 
@@ -166,6 +171,7 @@ impl Topic {
                             if (level + 1) == max_level {
                                 // FINAL
                                 res.push((
+                                    name.to_owned(),
                                     node.publish_channel.subscribe(),
                                     node.retain_channel.clone(),
                                 ));
@@ -182,6 +188,7 @@ impl Topic {
                             if (level + 1) == max_level {
                                 // FINAL
                                 res.push((
+                                    name.to_owned(),
                                     node.publish_channel.subscribe(),
                                     node.retain_channel.clone(),
                                 ));
@@ -198,6 +205,7 @@ impl Topic {
                         if !name.starts_with("$") {
                             //  println!("FOUND {}", name);
                             res.push((
+                                name.to_owned(),
                                 node.publish_channel.subscribe(),
                                 node.retain_channel.clone(),
                             ));
@@ -211,6 +219,7 @@ impl Topic {
                             if (level + 1) == max_level {
                                 // FINAL
                                 res.push((
+                                    name.to_owned(),
                                     node.publish_channel.subscribe(),
                                     node.retain_channel.clone(),
                                 ));
@@ -303,6 +312,8 @@ impl Topic {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Borrow;
+
     use super::*;
 
     #[test]
@@ -319,7 +330,7 @@ mod tests {
             println!("topic: {:?}", root.publish_topic("ggg", handler));
 
             //root.find("aaa/ddd");
-            println!("subscribe: {:?}", root.subscribe_topic("/aaa/#"));
+            println!("subscribe: {:?}", Topic::subscribe(root.borrow(), "/aaa/#"));
         })
     }
 }

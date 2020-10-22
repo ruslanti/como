@@ -16,8 +16,9 @@ use tracing::{debug, error, field, info, instrument, trace, warn};
 use crate::mqtt::proto::property::{PubResProperties, PublishProperties};
 use crate::mqtt::proto::types::{
     ControlPacket, Disconnect, PacketType, PubResp, Publish, QoS, ReasonCode, Retain, SubAck,
-    Subscribe, SubscribeOptions, UnSubscribe, Will,
+    Subscribe, SubscriptionOptions, UnSubscribe, Will,
 };
+use crate::mqtt::subscription::Subscription;
 use crate::mqtt::topic::{Message, SubscribeChannel, Topic, TopicEvent};
 use crate::settings::Settings;
 
@@ -54,8 +55,8 @@ pub(crate) struct Session {
     client_flows: HashMap<u16, Sender<PublishEvent>>,
     root_topic: Arc<RwLock<Topic>>,
     packet_identifier_seq: Arc<AtomicU16>,
-    subscriptions: HashMap<(String, SubscribeOptions), oneshot::Sender<()>>,
-    topic_filters: HashMap<String, SubscribeOptions>,
+    subscriptions: HashMap<String, oneshot::Sender<()>>,
+    topic_filters: HashMap<String, SubscriptionOptions>,
     will: Option<Will>,
 }
 
@@ -291,7 +292,7 @@ impl Session {
     }
 
     #[instrument(skip(self), fields(identifier = field::display(& self.id)), err)]
-    async fn publish_client(&mut self, option: SubscribeOptions, msg: Message) -> Result<()> {
+    async fn publish_client(&mut self, option: SubscriptionOptions, msg: Message) -> Result<()> {
         let packet_identifier = self.packet_identifier_seq.clone();
         let qos = min(msg.qos, option.qos);
         let packet_identifier = if QoS::AtMostOnce == qos {
@@ -456,61 +457,32 @@ impl Session {
     async fn subscribe(
         &mut self,
         msg: Subscribe,
-        retain_tx: Sender<(String, SubscribeOptions, Message)>,
+        retain_tx: Sender<(String, SubscriptionOptions, Message)>,
     ) -> Result<()> {
-        debug!("subscribe topics: {:?}", msg.topic_filters);
+        debug!("subscribe topic filters: {:?}", msg.topic_filters);
         let root = self.root_topic.read().await;
         let mut reason_codes = Vec::new();
-        for (topic_filter, topic_option) in msg.topic_filters {
+        for (topic_filter, option) in msg.topic_filters {
             reason_codes.push(match std::str::from_utf8(&topic_filter[..]) {
                 Ok(topic_filter) => {
                     self.topic_filters
-                        .insert(topic_filter.to_string(), topic_option.to_owned());
-                    let channels = root.subscribe_topic(topic_filter);
-                    trace!("found {} channels", channels.len());
-                    for (channel, retain_rx) in channels {
-                        //let stream = channel.into_stream();
-                        //    sub.insert((topic_filter.to_owned(), topic_option.to_owned()), channel);
-                        /*self.subscriptions
-                        .insert((topic_filter.to_owned(), topic_option.to_owned()), channel);*/
+                        .insert(topic_filter.to_string(), option.to_owned());
+                    let channels = Topic::subscribe(root.borrow(), topic_filter);
+                    trace!("subscribe returns {} subscriptions", channels.len());
+                    for (topic, channel, retain_rx) in channels {
                         let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
-                        //FIXME insert topic name
-                        self.subscriptions.insert(
-                            (topic_filter.to_owned(), topic_option.to_owned()),
-                            unsubscribe_tx,
+                        let subscription = Subscription::new(
+                            self.id.to_owned(),
+                            option.to_owned(),
+                            retain_tx.clone(),
+                            unsubscribe_rx,
                         );
-                        let stream = channel
-                            .into_stream()
-                            .filter(Result::is_ok)
-                            .map(Result::unwrap);
-                        let mut s = unsubscribe_rx.into_stream();
-                        let tx = retain_tx.to_owned();
-                        let topic_filter = topic_filter.to_owned();
-                        let topic_option = topic_option.to_owned();
+                        self.subscriptions.insert(topic.to_owned(), unsubscribe_tx);
+
                         tokio::spawn(async move {
-                            trace!("subscribe_topic start \
-                            #########################################3 {}", topic_filter);
-                            tokio::pin!(stream);
-                            loop {
-                                tokio::select! {
-                                    Some(TopicEvent::Publish(msg)) = stream.next() => {
-                                        let ret_msg = (topic_filter.to_owned(), topic_option.to_owned(),
-                                        msg);
-                                        if let Err(err) = tx.send(ret_msg).await {
-                                             warn!(cause = ?err, "session error");
-                                             break;
-                                        }
-                                    },
-                                    l = s.next() => {
-                                        trace!("unsubscribe {:?}\
-                                        ###################################### {}", l, 
-                                        topic_filter);
-                                        break
-                                    },
-                                    else => break
-                                }
-                            }
-                            trace!("subscribe_topic end");
+                            subscription
+                                .subscribe(topic.to_owned(), channel.into_stream())
+                                .await
                         });
 
                         /*                        if let Some(retain) = retain_rx.borrow().clone() {
@@ -557,27 +529,11 @@ impl Session {
         for topic_filter in msg.topic_filters {
             reason_codes.push(match std::str::from_utf8(&topic_filter[..]) {
                 Ok(topic_filter) => {
-                    let keys: Vec<(String, SubscribeOptions)> = self
-                        .subscriptions
-                        .keys()
-                        .filter_map(|(k, opt)| {
-                            if k == topic_filter {
-                                Some((k.to_owned(), opt.to_owned()))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    for key in keys {
-                        if let Some(channel) = self.subscriptions.remove(&key) {
-                            debug!(
-                                "unsubscribe topic_filter: {}, channel: {:?}",
-                                topic_filter, channel
-                            );
-                        }
+                    //TODO match subscription filter *
+                    match self.subscriptions.remove(topic_filter) {
+                        Some(_) => ReasonCode::Success,
+                        None => ReasonCode::NoSubscriptionExisted,
                     }
-                    self.topic_filters.remove(topic_filter);
-                    ReasonCode::Success
                 }
                 Err(err) => {
                     debug!(cause = ?err, "un subscribe error: ");

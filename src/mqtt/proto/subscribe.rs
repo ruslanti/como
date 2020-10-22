@@ -9,7 +9,7 @@ use crate::mqtt::proto::property::{
     PropertiesBuilder, Property, SubAckProperties, SubscribeProperties,
 };
 use crate::mqtt::proto::types::{
-    ControlPacket, MqttString, QoS, Retain, Subscribe, SubscribeOptions,
+    ControlPacket, MqttString, QoS, Retain, Subscribe, SubscriptionOptions,
 };
 
 pub fn decode_subscribe(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
@@ -48,7 +48,7 @@ pub fn decode_subscribe_properties(reader: &mut BytesMut) -> Result<SubscribePro
 
 pub fn decode_subscribe_payload(
     reader: &mut BytesMut,
-) -> Result<Vec<(MqttString, SubscribeOptions)>> {
+) -> Result<Vec<(MqttString, SubscriptionOptions)>> {
     let mut topic_filter = vec![];
     while reader.has_remaining() {
         if let Some(topic) = decode_utf8_string(reader)? {
@@ -60,7 +60,7 @@ pub fn decode_subscribe_payload(
             let retain: Retain = ((subscription_option & 0b00110000) >> 4).try_into()?;
             topic_filter.push((
                 topic,
-                SubscribeOptions {
+                SubscriptionOptions {
                     qos,
                     nl,
                     rap,

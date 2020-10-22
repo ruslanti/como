@@ -6,4 +6,5 @@ pub mod proto;
 pub mod service;
 mod session;
 mod shutdown;
+mod subscription;
 pub mod topic;

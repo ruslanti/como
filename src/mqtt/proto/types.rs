@@ -187,6 +187,7 @@ impl Into<u8> for PacketType {
 pub enum ReasonCode {
     Success = 0x00,
     DisconnectWithWill = 0x04,
+    NoSubscriptionExisted = 0x11,
     UnspecifiedError = 0x80,
     MalformedPacket = 0x81,
     ProtocolError = 0x82,
@@ -224,6 +225,7 @@ impl TryFrom<u8> for ReasonCode {
         match b {
             0x00 => Ok(ReasonCode::Success),
             0x04 => Ok(ReasonCode::DisconnectWithWill),
+            0x11 => Ok(ReasonCode::NoSubscriptionExisted),
             0x80 => Ok(ReasonCode::UnspecifiedError),
             0x81 => Ok(ReasonCode::MalformedPacket),
             0x82 => Ok(ReasonCode::ProtocolError),
@@ -262,6 +264,7 @@ impl Into<u8> for ReasonCode {
         match self {
             ReasonCode::Success => 0x00,
             ReasonCode::DisconnectWithWill => 0x04,
+            ReasonCode::NoSubscriptionExisted => 0x11,
             ReasonCode::UnspecifiedError => 0x80,
             ReasonCode::MalformedPacket => 0x81,
             ReasonCode::ProtocolError => 0x82,
@@ -347,7 +350,7 @@ pub struct Disconnect {
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
-pub struct SubscribeOptions {
+pub struct SubscriptionOptions {
     pub qos: QoS,
     pub nl: bool,
     pub rap: bool,
@@ -358,7 +361,7 @@ pub struct SubscribeOptions {
 pub struct Subscribe {
     pub packet_identifier: u16,
     pub properties: SubscribeProperties,
-    pub topic_filters: Vec<(MqttString, SubscribeOptions)>,
+    pub topic_filters: Vec<(MqttString, SubscriptionOptions)>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
