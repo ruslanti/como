@@ -42,14 +42,13 @@ enum Root<'a> {
 struct Topic {
     path: String,
     topic_tx: TopicSender,
-    retain_rx: TopicRetainReceiver,
+    retained: TopicRetainReceiver,
     siblings: HashMap<String, Self>,
 }
 
 #[derive(Debug)]
 pub struct TopicManager {
     topic_tx: NewTopicSender,
-    retain_rx: TopicRetainReceiver,
     topics: HashMap<String, Topic>,
 }
 
@@ -63,25 +62,22 @@ enum MatchState<'a> {
 
 impl TopicManager {
     pub(crate) fn new() -> Self {
-        let (topic_tx, subscribe_channel) = broadcast::channel(1024);
-        let (retain_sender, retain_rx) = watch::channel(None);
+        let (topic_tx, topic_rx) = broadcast::channel(1024);
         tokio::spawn(async move {
-            Self::handle(subscribe_channel, retain_sender).await;
+            Self::topic_manager(topic_rx).await;
         });
         Self {
             topic_tx,
-            retain_rx,
             topics: HashMap::new(),
         }
     }
 
-    #[instrument(skip(topic_rx, retain_sender))]
-    async fn handle(mut topic_rx: NewTopicReceiver, retain_sender: TopicRetainSender) {
+    #[instrument(skip(topic_rx))]
+    async fn topic_manager(mut topic_rx: NewTopicReceiver) {
         trace!("topic manager spawn start");
-        let mut first = true;
         loop {
             match topic_rx.recv().await {
-                Ok((topic, topic_tx, retain_rx)) => trace!("new topic event {:?}", topic),
+                Ok((topic, _, _)) => trace!("new topic event {:?}", topic),
                 Err(Lagged(lag)) => {
                     warn!("lagged: {}", lag);
                 }
@@ -105,12 +101,16 @@ impl TopicManager {
     #[instrument(skip(self, new_topic_fn))]
     pub(crate) fn publish<F>(&mut self, topic_name: &str, new_topic_fn: F) -> Result<TopicSender>
     where
-        F: Fn(TopicSender, TopicRetainReceiver),
+        F: Fn(String, TopicSender, TopicRetainReceiver),
     {
         if let Some(topic_name) = topic_name.strip_prefix('$') {
             let topic = self.topics.entry('$'.to_string()).or_insert_with(|| {
                 let topic = Topic::new("$".to_owned());
-                new_topic_fn(topic.topic_tx.clone(), topic.retain_rx.clone());
+                new_topic_fn(
+                    "$".to_owned(),
+                    topic.topic_tx.clone(),
+                    topic.retained.clone(),
+                );
                 topic
             });
             topic.publish(Root::Dollar, topic_name, new_topic_fn)
@@ -121,7 +121,11 @@ impl TopicManager {
                     let path = Topic::path(Root::None, prefix);
                     let topic = self.topics.entry(prefix.to_owned()).or_insert_with(|| {
                         let topic = Topic::new(path.to_owned());
-                        new_topic_fn(topic.topic_tx.clone(), topic.retain_rx.clone());
+                        new_topic_fn(
+                            path.to_owned(),
+                            topic.topic_tx.clone(),
+                            topic.retained.clone(),
+                        );
                         topic
                     });
                     match s.next() {
@@ -162,7 +166,7 @@ impl TopicManager {
                                 res.push((
                                     node.path.to_owned(),
                                     node.topic_tx.subscribe(),
-                                    node.retain_rx.clone(),
+                                    node.retained.clone(),
                                 ));
                             }
 
@@ -179,7 +183,7 @@ impl TopicManager {
                                 res.push((
                                     node.path.to_owned(),
                                     node.topic_tx.subscribe(),
-                                    node.retain_rx.clone(),
+                                    node.retained.clone(),
                                 ));
                                 // println!("FOUND {}", name)
                             }
@@ -196,7 +200,7 @@ impl TopicManager {
                             res.push((
                                 node.path.to_owned(),
                                 node.topic_tx.subscribe(),
-                                node.retain_rx.clone(),
+                                node.retained.clone(),
                             ));
                             for (node_name, node) in node.siblings.iter() {
                                 stack.push_back((level, node_name, node))
@@ -210,7 +214,7 @@ impl TopicManager {
                                 res.push((
                                     node.path.to_owned(),
                                     node.topic_tx.subscribe(),
-                                    node.retain_rx.clone(),
+                                    node.retained.clone(),
                                 ));
                             }
 
@@ -246,7 +250,12 @@ impl TopicManager {
 
     pub(crate) fn match_filter(topic_name: &str, filter: &str) -> bool {
         let pattern = Self::pattern(filter);
-        trace!("find path: {:?} => {:?}", filter, pattern);
+        trace!(
+            "match filter: {:?} => {:?} to topic_name: {}",
+            filter,
+            pattern,
+            topic_name
+        );
         let mut level = 0;
         let topics = if let Some(topic_name) = topic_name.strip_prefix('$') {
             let mut names = vec![];
@@ -256,14 +265,20 @@ impl TopicManager {
         } else {
             topic_name.split('/').collect()
         };
-        trace!("topics: {:?}", topics);
         for name in topics {
             if let Some(&state) = pattern.get(level) {
                 let max_level = pattern.len();
-                // println!("state {:?} level: {} len: {}", state, level, pattern.len());
+                /*                trace!(
+                                    "state {:?} level: {} max_level: {} len: {}",
+                                    state,
+                                    level,
+                                    max_level,
+                                    pattern.len()
+                                );
+                */
                 match state {
                     MatchState::Topic(pattern) => {
-                        //  println!("pattern {:?} - name {:?}", pattern, name);
+                        //trace!("pattern {:?} - name {:?}", pattern, name);
                         if name == pattern {
                             if (level + 1) == max_level {
                                 return true;
@@ -271,7 +286,7 @@ impl TopicManager {
                         }
                     }
                     MatchState::SingleLevel => {
-                        //  println!("pattern + - level {:?}", level);
+                        // trace!("pattern + - level {:?}", level);
                         if !name.starts_with('$') {
                             if (level + 1) == max_level {
                                 return true;
@@ -281,7 +296,7 @@ impl TopicManager {
                         }
                     }
                     MatchState::MultiLevel => {
-                        //println!("pattern # - level {:?}", level);
+                        // trace!("pattern # - level {:?}", level);
                         return if !name.starts_with('$') { true } else { false };
                     }
                     MatchState::Dollar => {
@@ -301,30 +316,25 @@ impl TopicManager {
 
 impl Topic {
     fn new(name: String) -> Self {
-        let (publish_channel, subscribe_channel) = broadcast::channel(1024);
-        let (retain_sender, retain_channel) = watch::channel(None);
+        let (topic_tx, topic_rx) = broadcast::channel(1024);
+        let (retained_tx, retained_rx) = watch::channel(None);
         debug!("create new \"{}\"", name);
         let path = name.to_owned();
         tokio::spawn(async move {
-            Self::handle(name, subscribe_channel, retain_sender).await;
+            Self::topic(name, topic_rx, retained_tx).await;
         });
         Self {
             path,
-            topic_tx: publish_channel,
-            retain_rx: retain_channel,
+            topic_tx,
+            retained: retained_rx,
             siblings: HashMap::new(),
         }
     }
 
-    #[instrument(skip(self, parent, new_topic_handler))]
-    fn publish<F>(
-        &mut self,
-        parent: Root,
-        topic_name: &str,
-        new_topic_handler: F,
-    ) -> Result<TopicSender>
+    #[instrument(skip(self, parent, new_topic_fn))]
+    fn publish<F>(&mut self, parent: Root, topic_name: &str, new_topic_fn: F) -> Result<TopicSender>
     where
-        F: Fn(TopicSender, TopicRetainReceiver),
+        F: Fn(String, TopicSender, TopicRetainReceiver),
     {
         if topic_name.strip_prefix('$').is_none() {
             let mut s = topic_name.splitn(2, '/');
@@ -333,12 +343,16 @@ impl Topic {
                     let path = Topic::path(parent, prefix);
                     let topic = self.siblings.entry(prefix.to_owned()).or_insert_with(|| {
                         let topic = Topic::new(path.to_owned());
-                        new_topic_handler(topic.topic_tx.clone(), topic.retain_rx.clone());
+                        new_topic_fn(
+                            path.to_owned(),
+                            topic.topic_tx.clone(),
+                            topic.retained.clone(),
+                        );
                         topic
                     });
                     match s.next() {
                         Some(suffix) => {
-                            topic.publish(Root::Name(path.as_str()), suffix, new_topic_handler)
+                            topic.publish(Root::Name(path.as_str()), suffix, new_topic_fn)
                         }
                         None => Ok(topic.topic_tx.clone()),
                     }
@@ -367,20 +381,16 @@ impl Topic {
         }
     }
 
-    #[instrument(skip(subscribe_channel, retain_sender))]
-    async fn handle(
-        topic_name: String,
-        mut subscribe_channel: TopicReceiver,
-        retain_sender: TopicRetainSender,
-    ) {
+    #[instrument(skip(rx, retained))]
+    async fn topic(topic_name: String, mut rx: TopicReceiver, retained: TopicRetainSender) {
         trace!("start");
         let mut first = true;
         loop {
-            match subscribe_channel.recv().await {
+            match rx.recv().await {
                 Ok(msg) => {
                     trace!("{:?}", msg);
                     if msg.retain || first {
-                        if let Err(err) = retain_sender.send(Some(msg)) {
+                        if let Err(err) = retained.send(Some(msg)) {
                             error!(cause = ?err, "topic retain error: ");
                         } else {
                             first = false;
@@ -410,7 +420,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let mut root = TopicManager::new();
-            let handler = |_, _| ();
+            let handler = |name, _, _| println!("new topic: {}", name);
             println!("topic: {:?}", root.publish("aaa/ddd", handler));
             println!("topic: {:?}", root.publish("/aaa/bbb", handler));
             println!("topic: {:?}", root.publish("/aaa/ccc", handler));

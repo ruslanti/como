@@ -322,7 +322,7 @@ where
     S: Sink<ControlPacket> + Unpin,
 {
     while let Some(msg) = reply.next().await {
-        trace!("response {:?}", msg);
+        trace!("{:?}", msg);
         if let Err(_err) = sink.send(msg).await {
             bail!("socket send error");
         }

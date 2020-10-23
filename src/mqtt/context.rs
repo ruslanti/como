@@ -66,7 +66,7 @@ impl AppContext {
                 will,
             );
             tokio::spawn(async move {
-                if let Err(err) = session.handle().await {
+                if let Err(err) = session.session().await {
                     warn!(cause = ?err, "session error");
                 }
             });
