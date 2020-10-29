@@ -4,8 +4,10 @@ use std::sync::Arc;
 use anyhow::Error;
 use futures::TryFutureExt;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{mpsc, RwLock};
-use tracing::warn;
+use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::time::timeout;
+use tokio::time::Duration;
+use tracing::{trace, warn};
 
 use crate::mqtt::proto::types::{ControlPacket, Disconnect, ReasonCode, Will};
 use crate::mqtt::session::{Session, SessionEvent};
@@ -18,7 +20,7 @@ pub(crate) type SessionContext = Option<(String, SessionSender, Option<u32>)>;
 #[derive(Debug)]
 pub(crate) struct AppContext {
     sessions: HashMap<String, SessionSender>,
-    //sessions_expire: DelayQueue<String>,
+    expires: HashMap<String, oneshot::Sender<()>>,
     pub(crate) config: Arc<Settings>,
     topic_manager: Arc<RwLock<TopicManager>>,
 }
@@ -28,18 +30,20 @@ impl AppContext {
         Self {
             sessions: HashMap::new(),
             // sessions_expire: DelayQueue::new(),
+            expires: HashMap::new(),
             config,
             topic_manager: Arc::new(RwLock::new(TopicManager::new())),
         }
     }
 
-    pub async fn connect_session(
+    pub async fn connect(
         &mut self,
         key: &str,
         clean_start: bool,
         conn_tx: Sender<ControlPacket>,
         will: Option<Will>,
     ) -> SessionSender {
+        self.expires.remove(key);
         //TODO close existing connection
         if clean_start {
             if let Some(tx) = self.sessions.remove(key) {
@@ -75,20 +79,16 @@ impl AppContext {
         }
     }
 
-    pub async fn disconnect_session(&mut self, key: &str, _expire: Option<u32>) {
-        /*        if let Some(expire) = expire {
-            self.sessions_expire.insert(key.to_string(), Duration::from_secs(expire as u64));
-        } else {*/
-        self.sessions.remove(key);
-        /*        }*/
-    }
-
-    /*    fn poll_purge(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-            while let Some(res) = ready!(self.sessions_expire.poll_expired(cx)) {
-                let entry = res?;
-                self.sessions.remove(entry.get_ref());
+    pub async fn disconnect(&mut self, key: &str, expire: Option<u32>) {
+        if let Some(expire) = expire {
+            let (tx, rx) = oneshot::channel();
+            self.expires.insert(key.to_owned(), tx);
+            if let Err(_) = timeout(Duration::from_secs(expire as u64), rx).await {
+                self.expires.remove(key);
+                self.sessions.remove(key);
             }
-            Poll::Ready(Ok(()))
+        } else {
+            self.sessions.remove(key);
         }
-    */
+    }
 }

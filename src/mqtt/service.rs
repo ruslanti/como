@@ -84,13 +84,12 @@ impl Service {
 
             let stream = self.accept().await?;
 
-            let context = self.context.lock().await;
             let mut handler = ConnectionHandler::new(
                 stream.peer_addr()?,
                 self.limit_connections.clone(),
                 self.shutdown_complete_tx.clone(),
                 self.context.clone(),
-                context.config.connection,
+                self.config.connection,
             );
 
             let shutdown = Shutdown::new(self.notify_shutdown.subscribe());

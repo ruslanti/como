@@ -209,7 +209,6 @@ impl Session {
             .into_stream();
         tokio::pin!(new_topic_stream);
         let (tx, mut rx) = mpsc::channel(32);
-
         loop {
             tokio::select! {
                 Some(msg) = self.rx.next() => {

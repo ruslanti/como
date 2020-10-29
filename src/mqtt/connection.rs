@@ -109,7 +109,7 @@ impl ConnectionHandler {
         conn_tx.send(ack).await?;
         let mut context = self.context.lock().await;
         let session_tx = context
-            .connect_session(id, msg.clean_start_flag, conn_tx, msg.will)
+            .connect(id, msg.clean_start_flag, conn_tx, msg.will)
             .await;
         self.session = Some((
             id.to_string(),
@@ -197,7 +197,7 @@ impl ConnectionHandler {
                 self.session = None;
                 {
                     let mut context = self.context.lock().await;
-                    context.disconnect_session(&id, expire).await;
+                    context.disconnect(&id, expire).await;
                 }
                 session_tx
                     .send(SessionEvent::Disconnect(disconnect))
@@ -268,7 +268,7 @@ impl ConnectionHandler {
                         Some((id, _session_tx, expire)) => {
                             {
                                 let mut context = self.context.lock().await;
-                                context.disconnect_session(&id, *expire).await;
+                                context.disconnect(&id, *expire).await;
                             }
                             trace!("DISCONNECT {}", id);
                             self.event(SessionEvent::Disconnect(Disconnect {
