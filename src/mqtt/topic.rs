@@ -25,11 +25,11 @@ pub(crate) type NewTopicEvent = (String, TopicSender, TopicRetainReceiver);
 type NewTopicSender = broadcast::Sender<NewTopicEvent>;
 type NewTopicReceiver = broadcast::Receiver<NewTopicEvent>;
 
-type TopicSender = broadcast::Sender<Message>;
+pub(crate) type TopicSender = broadcast::Sender<Message>;
 pub(crate) type TopicReceiver = broadcast::Receiver<Message>;
 
 type TopicRetainEvent = Option<Message>;
-type TopicRetainReceiver = watch::Receiver<TopicRetainEvent>;
+pub(crate) type TopicRetainReceiver = watch::Receiver<TopicRetainEvent>;
 type TopicRetainSender = watch::Sender<TopicRetainEvent>;
 
 enum Root<'a> {

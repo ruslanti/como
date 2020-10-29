@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{bail, Result};
 use tokio::stream::{Stream, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::error::RecvError::Lagged;
@@ -67,7 +67,8 @@ impl Subscription {
                     warn!("subscription '{}' lagged: {}", topic, lag);
                 }
                 Err(err) => {
-                    return Err(anyhow!(err));
+                    bail!(err);
+                    //return Err(anyhow!(err));
                 }
             }
         }

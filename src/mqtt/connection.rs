@@ -14,7 +14,7 @@ use tokio_util::codec::Framed;
 use tracing::{debug, error, field, instrument, trace};
 use uuid::Uuid;
 
-use crate::mqtt::context::{AppContext, SessionContext};
+use crate::mqtt::context::AppContext;
 use crate::mqtt::proto::property::ConnAckProperties;
 use crate::mqtt::proto::types::{
     Auth, ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, QoS, ReasonCode,
@@ -22,6 +22,8 @@ use crate::mqtt::proto::types::{
 use crate::mqtt::session::SessionEvent;
 use crate::mqtt::shutdown::Shutdown;
 use crate::settings::ConnectionSettings;
+
+type SessionContext = Option<(String, Sender<SessionEvent>)>;
 
 #[derive(Debug)]
 pub struct ConnectionHandler {
@@ -106,16 +108,22 @@ impl ConnectionHandler {
             },
         });
 
-        conn_tx.send(ack).await?;
         let mut context = self.context.lock().await;
-        let session_tx = context
-            .connect(id, msg.clean_start_flag, conn_tx, msg.will)
-            .await;
-        self.session = Some((
-            id.to_string(),
-            session_tx,
-            self.config.session_expire_interval,
-        ));
+        let (session_event_tx, connection_context_tx) =
+            context.connect(id, msg.clean_start_flag).await;
+
+        connection_context_tx
+            .send((
+                conn_tx.clone(),
+                msg.properties.session_expire_interval.unwrap_or(0),
+                msg.will,
+            ))
+            .await?;
+
+        self.session = Some((id.to_string(), session_event_tx));
+
+        conn_tx.send(ack).await?;
+
         Ok(())
     }
 
@@ -129,55 +137,55 @@ impl ConnectionHandler {
                 let context = format!("session: None, packet: {:?}", packet,);
                 Err(anyhow!("unacceptable event").context(context))
             }
-            (Some((_, session_tx, _)), ControlPacket::Publish(publish)) => {
+            (Some((_, session_tx)), ControlPacket::Publish(publish)) => {
                 session_tx
                     .send(SessionEvent::Publish(publish))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, session_tx, _)), ControlPacket::PubAck(response)) => {
+            (Some((_, session_tx)), ControlPacket::PubAck(response)) => {
                 session_tx
                     .send(SessionEvent::PubAck(response))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, session_tx, _)), ControlPacket::PubRel(response)) => {
+            (Some((_, session_tx)), ControlPacket::PubRel(response)) => {
                 session_tx
                     .send(SessionEvent::PubRel(response))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, session_tx, _)), ControlPacket::PubRec(response)) => {
+            (Some((_, session_tx)), ControlPacket::PubRec(response)) => {
                 session_tx
                     .send(SessionEvent::PubRec(response))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, session_tx, _)), ControlPacket::PubComp(response)) => {
+            (Some((_, session_tx)), ControlPacket::PubComp(response)) => {
                 session_tx
                     .send(SessionEvent::PubComp(response))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, session_tx, _)), ControlPacket::Subscribe(sub)) => {
+            (Some((_, session_tx)), ControlPacket::Subscribe(sub)) => {
                 session_tx
                     .send(SessionEvent::Subscribe(sub))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, session_tx, _)), ControlPacket::SubAck(sub)) => {
+            (Some((_, session_tx)), ControlPacket::SubAck(sub)) => {
                 session_tx
                     .send(SessionEvent::SubAck(sub))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, session_tx, _)), ControlPacket::UnSubscribe(sub)) => {
+            (Some((_, session_tx)), ControlPacket::UnSubscribe(sub)) => {
                 session_tx
                     .send(SessionEvent::UnSubscribe(sub))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((_, session_tx, _)), ControlPacket::UnSubAck(sub)) => {
+            (Some((_, session_tx)), ControlPacket::UnSubAck(sub)) => {
                 session_tx
                     .send(SessionEvent::UnSubAck(sub))
                     .map_err(Error::msg)
@@ -189,22 +197,22 @@ impl ConnectionHandler {
                     .map_err(Error::msg)
                     .await
             }
-            (Some((id, session_tx, expire)), ControlPacket::Disconnect(disconnect)) => {
+            (Some((id, session_tx)), ControlPacket::Disconnect(disconnect)) => {
                 debug!(
-                    "disconnect reason code: {:?}, reason string:{:?}",
-                    disconnect.reason_code, disconnect.properties.reason_string
+                    "{}: disconnect reason code: {:?}, reason string:{:?}",
+                    id, disconnect.reason_code, disconnect.properties.reason_string
                 );
                 self.session = None;
-                {
+                /*                {
                     let mut context = self.context.lock().await;
                     context.disconnect(&id, expire).await;
-                }
+                }*/
                 session_tx
                     .send(SessionEvent::Disconnect(disconnect))
                     .map_err(Error::msg)
                     .await
             }
-            (Some((id, _, _)), packet) => {
+            (Some((id, _)), packet) => {
                 let context = format!("session: {}, packet: {:?}", id, packet,);
                 Err(anyhow!("unacceptable event").context(context))
             }
@@ -214,7 +222,7 @@ impl ConnectionHandler {
     #[instrument(skip(self), err)]
     async fn event(&self, event: SessionEvent) -> Result<()> {
         match self.session.clone() {
-            Some((_, tx, _)) => tx.send(event).map_err(Error::msg).await,
+            Some((_, tx)) => tx.send(event).map_err(Error::msg).await,
             None => Ok(()),
         }
     }
@@ -237,11 +245,7 @@ impl ConnectionHandler {
         conn_tx.send(disc).await.map_err(Error::msg)
     }
 
-    async fn process_stream<S>(
-        &mut self,
-        mut stream: S,
-        conn_tx: Sender<ControlPacket>,
-    ) -> Result<()>
+    async fn process_stream<S>(&mut self, mut stream: S, tx: Sender<ControlPacket>) -> Result<()>
     where
         S: Stream<Item = Result<ControlPacket, anyhow::Error>> + Unpin,
     {
@@ -254,7 +258,7 @@ impl ConnectionHandler {
             match timeout(duration, stream.next()).await {
                 Ok(timeout_res) => {
                     if let Some(res) = timeout_res {
-                        self.recv(res?, conn_tx.clone()).await?;
+                        self.recv(res?, tx.clone()).await?;
                     } else {
                         trace!("disconnected");
                         break;
@@ -265,19 +269,14 @@ impl ConnectionHandler {
                     // handle timeout
                     match self.session.as_mut() {
                         None => return Err(e.into()),
-                        Some((id, _session_tx, expire)) => {
-                            {
-                                let mut context = self.context.lock().await;
-                                context.disconnect(&id, *expire).await;
-                            }
+                        Some((id, _session_tx)) => {
                             trace!("DISCONNECT {}", id);
                             self.event(SessionEvent::Disconnect(Disconnect {
                                 reason_code: ReasonCode::KeepAliveTimeout,
                                 properties: Default::default(),
                             }))
                             .await?;
-                            self.disconnect(conn_tx, ReasonCode::KeepAliveTimeout)
-                                .await?;
+                            self.disconnect(tx, ReasonCode::KeepAliveTimeout).await?;
                             break;
                         }
                     }

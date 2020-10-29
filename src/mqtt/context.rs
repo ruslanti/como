@@ -4,35 +4,36 @@ use std::sync::Arc;
 use anyhow::Error;
 use futures::TryFutureExt;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{mpsc, oneshot, RwLock};
-use tokio::time::timeout;
-use tokio::time::Duration;
-use tracing::{trace, warn};
+use tokio::sync::{mpsc, RwLock};
+use tracing::{debug, instrument, warn};
 
-use crate::mqtt::proto::types::{ControlPacket, Disconnect, ReasonCode, Will};
-use crate::mqtt::session::{Session, SessionEvent};
+use crate::mqtt::proto::types::{Disconnect, ReasonCode};
+use crate::mqtt::session::{ConnectionContextState, Session, SessionEvent};
 use crate::mqtt::topic::TopicManager;
 use crate::settings::Settings;
 
-type SessionSender = Sender<SessionEvent>;
-pub(crate) type SessionContext = Option<(String, SessionSender, Option<u32>)>;
-
 #[derive(Debug)]
 pub(crate) struct AppContext {
-    sessions: HashMap<String, SessionSender>,
-    expires: HashMap<String, oneshot::Sender<()>>,
+    sessions: HashMap<String, (Sender<SessionEvent>, Sender<ConnectionContextState>)>,
     pub(crate) config: Arc<Settings>,
     topic_manager: Arc<RwLock<TopicManager>>,
+    tx: mpsc::Sender<String>,
 }
 
 impl AppContext {
-    pub fn new(config: Arc<Settings>) -> Self {
+    pub fn new(config: Arc<Settings>, tx: mpsc::Sender<String>) -> Self {
         Self {
             sessions: HashMap::new(),
-            // sessions_expire: DelayQueue::new(),
-            expires: HashMap::new(),
             config,
             topic_manager: Arc::new(RwLock::new(TopicManager::new())),
+            tx,
+        }
+    }
+
+    #[instrument(skip(self))]
+    pub fn clean(&mut self, identifier: String) {
+        if let Some(_) = self.sessions.remove(identifier.as_str()) {
+            debug!("removed");
         }
     }
 
@@ -40,55 +41,45 @@ impl AppContext {
         &mut self,
         key: &str,
         clean_start: bool,
-        conn_tx: Sender<ControlPacket>,
-        will: Option<Will>,
-    ) -> SessionSender {
-        self.expires.remove(key);
+    ) -> (Sender<SessionEvent>, Sender<ConnectionContextState>) {
         //TODO close existing connection
         if clean_start {
-            if let Some(tx) = self.sessions.remove(key) {
+            if let Some((session_event_tx, _)) = self.sessions.remove(key) {
                 let event = SessionEvent::Disconnect(Disconnect {
                     reason_code: ReasonCode::SessionTakenOver,
                     properties: Default::default(),
                 });
-                if let Err(err) = tx.clone().send(event).map_err(Error::msg).await {
+                if let Err(err) = session_event_tx.send(event).map_err(Error::msg).await {
                     warn!(cause = ?err, "session error");
                 }
             }
         }
 
-        if let Some(tx) = self.sessions.get(key) {
-            tx.clone()
+        if let Some((session_event_tx, connection_context_tx)) = self.sessions.get(key) {
+            (session_event_tx.clone(), connection_context_tx.clone())
         } else {
-            let (tx, rx) = mpsc::channel(32);
-            let mut session = Session::new(
-                key,
-                rx,
-                conn_tx,
-                self.config.clone(),
-                self.topic_manager.clone(),
-                will,
-            );
+            let (session_event_tx, session_event_rx) = mpsc::channel(32);
+            let (connection_context_tx, connection_context_rx) = mpsc::channel(3);
+            let mut session = Session::new(key, self.config.clone(), self.topic_manager.clone());
+            let tx = self.tx.clone();
+            let s = key.to_owned();
             tokio::spawn(async move {
-                if let Err(err) = session.session().await {
+                if let Err(err) = session
+                    .session(session_event_rx, connection_context_rx)
+                    .await
+                {
+                    //FIXME handle session end and disconnect connection
                     warn!(cause = ?err, "session error");
+                };
+                if let Err(err) = tx.send(s).await {
+                    debug!(cause = ?err, "session clear error");
                 }
             });
-            self.sessions.insert(key.to_string(), tx.clone());
-            tx
-        }
-    }
-
-    pub async fn disconnect(&mut self, key: &str, expire: Option<u32>) {
-        if let Some(expire) = expire {
-            let (tx, rx) = oneshot::channel();
-            self.expires.insert(key.to_owned(), tx);
-            if let Err(_) = timeout(Duration::from_secs(expire as u64), rx).await {
-                self.expires.remove(key);
-                self.sessions.remove(key);
-            }
-        } else {
-            self.sessions.remove(key);
+            self.sessions.insert(
+                key.to_string(),
+                (session_event_tx.clone(), connection_context_tx.clone()),
+            );
+            (session_event_tx, connection_context_tx)
         }
     }
 }

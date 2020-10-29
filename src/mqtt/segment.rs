@@ -1,8 +1,7 @@
+use anyhow::{anyhow, Result};
 use std::borrow::BorrowMut;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-use anyhow::{anyhow, Result};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 
@@ -80,7 +79,7 @@ impl Segment {
                 // println!("2 position: {:}", position);
                 table.insert(offset as usize, position);
             } else {
-                return Err(anyhow!("wrong read of index file"));
+                bail!("wrong read of index file");
             }
         }
         // println!("2index table: {:?}", table);
@@ -111,9 +110,8 @@ impl Segment {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use bytes::Bytes;
+    use std::time::Instant;
 
     use crate::mqtt::proto::types::QoS;
 

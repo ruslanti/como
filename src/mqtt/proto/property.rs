@@ -185,12 +185,12 @@ pub struct WillProperties {
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ConnectProperties {
-    pub session_expire_interval: u32,
-    pub receive_maximum: u16,
-    pub maximum_packet_size: u32,
-    pub topic_alias_maximum: u16,
-    pub request_response_information: bool,
-    pub request_problem_information: bool,
+    pub session_expire_interval: Option<u32>,
+    pub receive_maximum: Option<u16>,
+    pub maximum_packet_size: Option<u32>,
+    pub topic_alias_maximum: Option<u16>,
+    pub request_response_information: Option<bool>,
+    pub request_problem_information: Option<bool>,
     pub user_properties: Vec<(MqttString, MqttString)>,
     pub authentication_method: Option<MqttString>,
 }
@@ -548,12 +548,12 @@ impl PropertiesBuilder {
 
     pub fn connect(self) -> ConnectProperties {
         ConnectProperties {
-            session_expire_interval: self.session_expire_interval.unwrap_or(0),
-            receive_maximum: self.receive_maximum.unwrap_or(u16::max_value()),
-            maximum_packet_size: self.maximum_packet_size.unwrap_or(u32::max_value()),
-            topic_alias_maximum: self.topic_alias_maximum.unwrap_or(0),
-            request_response_information: self.request_response_information.unwrap_or(false),
-            request_problem_information: self.request_problem_information.unwrap_or(true),
+            session_expire_interval: self.session_expire_interval,
+            receive_maximum: self.receive_maximum,
+            maximum_packet_size: self.maximum_packet_size,
+            topic_alias_maximum: self.topic_alias_maximum,
+            request_response_information: self.request_response_information,
+            request_problem_information: self.request_problem_information,
             user_properties: self.user_properties,
             authentication_method: self.authentication_method,
         }
@@ -642,14 +642,14 @@ mod tests {
         assert_eq!(
             PropertiesBuilder::new().connect(),
             ConnectProperties {
-                session_expire_interval: 0,
-                receive_maximum: 65535,
-                maximum_packet_size: 4294967295,
-                topic_alias_maximum: 0,
-                request_response_information: false,
-                request_problem_information: true,
+                session_expire_interval: None,
+                receive_maximum: None,
+                maximum_packet_size: None,
+                topic_alias_maximum: None,
+                request_response_information: None,
+                request_problem_information: None,
                 user_properties: vec![],
-                authentication_method: None
+                authentication_method: None,
             }
         );
     }
@@ -667,17 +667,17 @@ mod tests {
         assert_eq!(
             builder.connect(),
             ConnectProperties {
-                session_expire_interval: 20,
-                receive_maximum: 1000,
-                maximum_packet_size: 1024,
-                topic_alias_maximum: 1024,
-                request_response_information: true,
-                request_problem_information: true,
+                session_expire_interval: Some(20),
+                receive_maximum: Some(1000),
+                maximum_packet_size: Some(1024),
+                topic_alias_maximum: Some(1024),
+                request_response_information: Some(true),
+                request_problem_information: Some(true),
                 user_properties: vec![
                     (Bytes::from("username"), Bytes::from("admin")),
                     (Bytes::from("password"), Bytes::from("12345"))
                 ],
-                authentication_method: None
+                authentication_method: None,
             }
         );
     }
