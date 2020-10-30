@@ -1,3 +1,4 @@
+use std::cmp::min;
 use std::net::SocketAddr;
 use std::ops::Add;
 use std::sync::Arc;
@@ -84,11 +85,33 @@ impl ConnectionHandler {
         } else {
             self.config.maximum_qos
         };
+
+        let session_expire_interval =
+            if let Some(server_expire) = self.config.session_expire_interval {
+                if let Some(client_expire) = msg.properties.session_expire_interval {
+                    Some(min(server_expire, client_expire))
+                } else {
+                    Some(server_expire)
+                }
+            } else {
+                None
+            };
+
+        let mut context = self.context.lock().await;
+        let (session_event_tx, connection_context_tx, session_present) =
+            context.connect(id, msg.clean_start_flag).await;
+
+        connection_context_tx
+            .send((conn_tx.clone(), msg.properties, msg.will))
+            .await?;
+
+        self.session = Some((id.to_string(), session_event_tx));
+
         let ack = ControlPacket::ConnAck(ConnAck {
-            session_present: false,
+            session_present,
             reason_code: ReasonCode::Success,
             properties: ConnAckProperties {
-                session_expire_interval: self.config.session_expire_interval,
+                session_expire_interval,
                 receive_maximum: self.config.receive_maximum,
                 maximum_qos,
                 retain_available: self.config.retain_available,
@@ -107,21 +130,6 @@ impl ConnectionHandler {
                 authentication_data: None,
             },
         });
-
-        let mut context = self.context.lock().await;
-        let (session_event_tx, connection_context_tx) =
-            context.connect(id, msg.clean_start_flag).await;
-
-        connection_context_tx
-            .send((
-                conn_tx.clone(),
-                msg.properties.session_expire_interval.unwrap_or(0),
-                msg.will,
-            ))
-            .await?;
-
-        self.session = Some((id.to_string(), session_event_tx));
-
         conn_tx.send(ack).await?;
 
         Ok(())
@@ -130,7 +138,7 @@ impl ConnectionHandler {
     #[instrument(skip(self, packet, conn_tx), err)]
     async fn recv(&mut self, packet: ControlPacket, conn_tx: Sender<ControlPacket>) -> Result<()> {
         trace!("{:?}", packet);
-        match (self.session.clone(), packet) {
+        match (self.session.to_owned(), packet) {
             (None, ControlPacket::Connect(connect)) => self.connect(connect, conn_tx).await,
             (None, ControlPacket::Auth(_auth)) => unimplemented!(), //self.process_auth(auth).await,
             (None, packet) => {
@@ -221,7 +229,7 @@ impl ConnectionHandler {
 
     #[instrument(skip(self), err)]
     async fn event(&self, event: SessionEvent) -> Result<()> {
-        match self.session.clone() {
+        match &self.session {
             Some((_, tx)) => tx.send(event).map_err(Error::msg).await,
             None => Ok(()),
         }

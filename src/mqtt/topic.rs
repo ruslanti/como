@@ -21,7 +21,7 @@ pub(crate) struct Message {
     pub payload: Bytes,
 }
 
-pub(crate) type NewTopicEvent = (String, TopicSender, TopicRetainReceiver);
+pub(crate) type NewTopicEvent = (String, TopicSender, Message);
 type NewTopicSender = broadcast::Sender<NewTopicEvent>;
 type NewTopicReceiver = broadcast::Receiver<NewTopicEvent>;
 
@@ -101,16 +101,12 @@ impl TopicManager {
     #[instrument(skip(self, new_topic_fn))]
     pub(crate) fn publish<F>(&mut self, topic_name: &str, new_topic_fn: F) -> Result<TopicSender>
     where
-        F: Fn(String, TopicSender, TopicRetainReceiver),
+        F: Fn(String, TopicSender),
     {
         if let Some(topic_name) = topic_name.strip_prefix('$') {
             let topic = self.topics.entry('$'.to_string()).or_insert_with(|| {
                 let topic = Topic::new("$".to_owned());
-                new_topic_fn(
-                    "$".to_owned(),
-                    topic.topic_tx.clone(),
-                    topic.retained.clone(),
-                );
+                new_topic_fn("$".to_owned(), topic.topic_tx.clone());
                 topic
             });
             topic.publish(Root::Dollar, topic_name, new_topic_fn)
@@ -121,11 +117,7 @@ impl TopicManager {
                     let path = Topic::path(Root::None, prefix);
                     let topic = self.topics.entry(prefix.to_owned()).or_insert_with(|| {
                         let topic = Topic::new(path.to_owned());
-                        new_topic_fn(
-                            path.to_owned(),
-                            topic.topic_tx.clone(),
-                            topic.retained.clone(),
-                        );
+                        new_topic_fn(path.to_owned(), topic.topic_tx.clone());
                         topic
                     });
                     match s.next() {
@@ -334,7 +326,7 @@ impl Topic {
     #[instrument(skip(self, parent, new_topic_fn))]
     fn publish<F>(&mut self, parent: Root, topic_name: &str, new_topic_fn: F) -> Result<TopicSender>
     where
-        F: Fn(String, TopicSender, TopicRetainReceiver),
+        F: Fn(String, TopicSender),
     {
         if topic_name.strip_prefix('$').is_none() {
             let mut s = topic_name.splitn(2, '/');
@@ -343,11 +335,7 @@ impl Topic {
                     let path = Topic::path(parent, prefix);
                     let topic = self.siblings.entry(prefix.to_owned()).or_insert_with(|| {
                         let topic = Topic::new(path.to_owned());
-                        new_topic_fn(
-                            path.to_owned(),
-                            topic.topic_tx.clone(),
-                            topic.retained.clone(),
-                        );
+                        new_topic_fn(path.to_owned(), topic.topic_tx.clone());
                         topic
                     });
                     match s.next() {
@@ -384,20 +372,16 @@ impl Topic {
     #[instrument(skip(rx, retained))]
     async fn topic(topic_name: String, mut rx: TopicReceiver, retained: TopicRetainSender) {
         trace!("start");
-        let mut first = true;
         loop {
             match rx.recv().await {
                 Ok(msg) => {
                     trace!("{:?}", msg);
-                    if msg.retain || first {
+                    if msg.retain && msg.payload.len() > 0 {
                         if let Err(err) = retained.send(Some(msg)) {
                             error!(cause = ?err, "topic retain error: ");
-                        } else {
-                            first = false;
                         }
                     }
                 }
-                //Ok(TopicEvent::NewTopic(topic, _, _)) => trace!("new topic event {:?}", topic),
                 Err(Lagged(lag)) => {
                     warn!("lagged: {}", lag);
                 }
@@ -420,7 +404,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let mut root = TopicManager::new();
-            let handler = |name, _, _| println!("new topic: {}", name);
+            let handler = |name, _| println!("new topic: {}", name);
             println!("topic: {:?}", root.publish("aaa/ddd", handler));
             println!("topic: {:?}", root.publish("/aaa/bbb", handler));
             println!("topic: {:?}", root.publish("/aaa/ccc", handler));

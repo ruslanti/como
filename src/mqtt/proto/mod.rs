@@ -7,7 +7,7 @@ mod connack;
 mod connect;
 mod decoder;
 mod disconnect;
-mod encoder;
+pub(crate) mod encoder;
 mod publish;
 mod pubres;
 mod subscribe;

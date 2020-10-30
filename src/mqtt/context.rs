@@ -37,26 +37,32 @@ impl AppContext {
         }
     }
 
+    #[instrument(skip(self))]
     pub async fn connect(
         &mut self,
         key: &str,
         clean_start: bool,
-    ) -> (Sender<SessionEvent>, Sender<ConnectionContextState>) {
+    ) -> (Sender<SessionEvent>, Sender<ConnectionContextState>, bool) {
         //TODO close existing connection
         if clean_start {
-            if let Some((session_event_tx, _)) = self.sessions.remove(key) {
+            if let Some((session_event_tx, _connection_context_tx)) = self.sessions.remove(key) {
+                debug!("clean start");
                 let event = SessionEvent::Disconnect(Disconnect {
                     reason_code: ReasonCode::SessionTakenOver,
                     properties: Default::default(),
                 });
                 if let Err(err) = session_event_tx.send(event).map_err(Error::msg).await {
                     warn!(cause = ?err, "session error");
-                }
+                };
             }
         }
 
         if let Some((session_event_tx, connection_context_tx)) = self.sessions.get(key) {
-            (session_event_tx.clone(), connection_context_tx.clone())
+            (
+                session_event_tx.clone(),
+                connection_context_tx.clone(),
+                true,
+            )
         } else {
             let (session_event_tx, session_event_rx) = mpsc::channel(32);
             let (connection_context_tx, connection_context_rx) = mpsc::channel(3);
@@ -79,7 +85,7 @@ impl AppContext {
                 key.to_string(),
                 (session_event_tx.clone(), connection_context_tx.clone()),
             );
-            (session_event_tx, connection_context_tx)
+            (session_event_tx, connection_context_tx, false)
         }
     }
 }

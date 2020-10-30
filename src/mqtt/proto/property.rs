@@ -4,9 +4,8 @@ use std::mem::size_of_val;
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 
-use crate::mqtt::proto::encoder::encoded_variable_integer_len;
-use crate::mqtt::proto::types::MqttString;
-use crate::mqtt::proto::types::QoS;
+use crate::mqtt::proto::encoder::EncodedSize;
+use crate::mqtt::proto::types::{MqttString, QoS};
 
 macro_rules! check_and_set {
     ($self:ident, $property:ident, $value: expr) => {
@@ -168,10 +167,6 @@ impl TryFrom<u32> for Property {
     }
 }
 
-pub trait PropertiesLength {
-    fn len(&self) -> usize;
-}
-
 #[derive(Debug, Eq, PartialEq)]
 pub struct WillProperties {
     pub will_delay_interval: u32,
@@ -311,8 +306,8 @@ pub struct AuthProperties {
     pub user_properties: Vec<(MqttString, MqttString)>,
 }
 
-impl PropertiesLength for PublishProperties {
-    fn len(&self) -> usize {
+impl EncodedSize for PublishProperties {
+    fn encoded_size(&self) -> usize {
         let mut len = check_size_of!(self, payload_format_indicator);
         len += check_size_of!(self, message_expire_interval);
         len += check_size_of!(self, topic_alias);
@@ -324,15 +319,15 @@ impl PropertiesLength for PublishProperties {
             .map(|(x, y)| 5 + x.len() + y.len())
             .sum::<usize>();
         if let Some(id) = self.subscription_identifier {
-            len += encoded_variable_integer_len(id as usize);
+            len += (id as usize).encoded_size();
         };
         len += check_size_of_string!(self, content_type);
         len
     }
 }
 
-impl PropertiesLength for ConnAckProperties {
-    fn len(&self) -> usize {
+impl EncodedSize for ConnAckProperties {
+    fn encoded_size(&self) -> usize {
         let mut len = check_size_of!(self, session_expire_interval);
         len += check_size_of!(self, receive_maximum);
         len += check_size_of!(self, maximum_qos);
@@ -350,8 +345,8 @@ impl PropertiesLength for ConnAckProperties {
     }
 }
 
-impl PropertiesLength for PubResProperties {
-    fn len(&self) -> usize {
+impl EncodedSize for PubResProperties {
+    fn encoded_size(&self) -> usize {
         let mut len = check_size_of_string!(self, reason_string);
         len += self
             .user_properties
@@ -362,8 +357,8 @@ impl PropertiesLength for PubResProperties {
     }
 }
 
-impl PropertiesLength for DisconnectProperties {
-    fn len(&self) -> usize {
+impl EncodedSize for DisconnectProperties {
+    fn encoded_size(&self) -> usize {
         let mut len = check_size_of!(self, session_expire_interval);
         len += check_size_of_string!(self, reason_string);
         len += self
@@ -376,8 +371,8 @@ impl PropertiesLength for DisconnectProperties {
     }
 }
 
-impl PropertiesLength for SubAckProperties {
-    fn len(&self) -> usize {
+impl EncodedSize for SubAckProperties {
+    fn encoded_size(&self) -> usize {
         let mut len = check_size_of_string!(self, reason_string);
         len += self
             .user_properties
@@ -722,6 +717,6 @@ mod tests {
         builder = builder.session_expire_interval(20).unwrap();
         builder = builder.user_properties((Bytes::from("username"), Bytes::from("admin")));
         builder = builder.user_properties((Bytes::from("password"), Bytes::from("123456")));
-        assert_eq!(42, builder.connack().len());
+        assert_eq!(42, builder.connack().encoded_size());
     }
 }

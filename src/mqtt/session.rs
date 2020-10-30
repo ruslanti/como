@@ -13,7 +13,8 @@ use tokio::time::timeout;
 use tokio::time::Duration;
 use tracing::{debug, error, field, info, instrument, trace, warn};
 
-use crate::mqtt::proto::property::{PubResProperties, PublishProperties};
+use crate::mqtt::proto::encoder::EncodedSize;
+use crate::mqtt::proto::property::{ConnectProperties, PubResProperties, PublishProperties};
 use crate::mqtt::proto::types::{
     ControlPacket, Disconnect, PacketType, PubResp, Publish, QoS, ReasonCode, SubAck, Subscribe,
     SubscriptionOptions, UnSubscribe, Will,
@@ -22,7 +23,7 @@ use crate::mqtt::subscription::{SessionSender, Subscription};
 use crate::mqtt::topic::{Message, TopicManager};
 use crate::settings::Settings;
 
-pub(crate) type ConnectionContextState = (Sender<ControlPacket>, u32, Option<Will>);
+pub(crate) type ConnectionContextState = (Sender<ControlPacket>, ConnectProperties, Option<Will>);
 type ConnectionContext = Option<ConnectionContextState>;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -66,8 +67,17 @@ async fn publish_topic(root: Arc<RwLock<TopicManager>>, msg: Publish) -> Result<
     let topic = std::str::from_utf8(&msg.topic_name[..])?;
 
     let new_topic_channel = topic_manager.new_topic_channel();
-    let channel = topic_manager.publish(topic, |name, channel, retained| {
-        let new_topic = (name, channel, retained);
+    let channel = topic_manager.publish(topic, |name, channel| {
+        let message = Message {
+            ts: Instant::now(),
+            retain: msg.retain,
+            qos: msg.qos,
+            topic_name: msg.topic_name.clone(),
+            properties: msg.properties.clone(),
+            payload: msg.payload.clone(),
+        };
+
+        let new_topic = (name, channel, message);
         new_topic_channel
             .send(new_topic)
             .map_err(|e| anyhow!("{:?}", e))
@@ -90,12 +100,12 @@ async fn publish_topic(root: Arc<RwLock<TopicManager>>, msg: Publish) -> Result<
         .map(|size| trace!("publish topic channel send {} message", size))
 }
 
-#[instrument(skip(rx, tx), err)]
+#[instrument(skip(rx, connection_reply_tx), err)]
 async fn exactly_once_client(
     session: String,
     packet_identifier: u16,
     mut rx: Receiver<PublishEvent>,
-    tx: Sender<ControlPacket>,
+    connection_reply_tx: Sender<ControlPacket>,
 ) -> Result<()> {
     if let Some(event) = rx.recv().await {
         if let PublishEvent::PubRec(_msg) = event {
@@ -105,7 +115,7 @@ async fn exactly_once_client(
                 reason_code: ReasonCode::Success,
                 properties: Default::default(),
             });
-            tx.send(rel).await?;
+            connection_reply_tx.send(rel).await?;
 
             match rx.recv().await {
                 Some(PublishEvent::PubComp(comp)) => {
@@ -122,13 +132,13 @@ async fn exactly_once_client(
     Ok(())
 }
 
-#[instrument(skip(rx, tx, root), err)]
+#[instrument(skip(rx, connection_reply_tx, root), err)]
 async fn exactly_once_server(
     session: String,
     packet_identifier: u16,
     root: Arc<RwLock<TopicManager>>,
     mut rx: Receiver<PublishEvent>,
-    tx: Sender<ControlPacket>,
+    connection_reply_tx: Sender<ControlPacket>,
 ) -> Result<()> {
     if let Some(event) = rx.recv().await {
         if let PublishEvent::Publish(msg) = event {
@@ -139,7 +149,7 @@ async fn exactly_once_server(
                 reason_code: ReasonCode::Success,
                 properties: Default::default(),
             });
-            tx.send(rec).await?;
+            connection_reply_tx.send(rec).await?;
 
             match rx.recv().await {
                 Some(PublishEvent::PubRel(rel)) => {
@@ -151,7 +161,7 @@ async fn exactly_once_server(
                         reason_code: ReasonCode::Success,
                         properties: Default::default(),
                     });
-                    tx.send(comp).await?;
+                    connection_reply_tx.send(comp).await?;
                     ()
                 }
                 Some(event) => bail!("{} unknown event received: {:?}", session, event),
@@ -203,16 +213,20 @@ impl Session {
         let (subscription_event_tx, mut subscription_event_rx) = mpsc::channel(32);
 
         loop {
+            debug!("##############################################");
             tokio::select! {
                 res = timeout(self.expire_interval, connection_context_rx.next()), if self.connection.is_none()  => {
                     match res {
-                        Ok(Some((connection_reply_tx, ex, will))) => {
+                        Ok(Some((connection_reply_tx, prop, will))) => {
                             debug!("new connection context");
-                            self.expire_interval = Duration::from_secs(ex as u64);
-                            self.connection = Some((connection_reply_tx, ex, will));
+                            if let Some(ex) = prop.session_expire_interval {
+                                self.expire_interval = Duration::from_secs(ex as u64);
+                            }
+                            self.connection = Some((connection_reply_tx, prop, will));
                         },
                         Ok(None) => {
-                            bail!("connection context closed");
+                            bail!("connection context closed. expire {}", self.expire_interval
+                            .as_secs());
                         }
                         Err(e) => {
                             debug!("session expired: {}", e);
@@ -221,7 +235,7 @@ impl Session {
                     }
                 }
                 Some(msg) = session_event_rx.next(), if self.connection.is_some() => {
-                    trace!("command: {:?}", msg);
+                    trace!("session event: {:?}", msg);
                     match msg {
                         SessionEvent::Publish(p) => self.publish(p).await?,
                         SessionEvent::PubAck(p) => self.puback(p).await?,
@@ -262,17 +276,8 @@ impl Session {
                                    subscription.subscribe(topic_name, stream, unsubscribe_rx).await
                                 });
 
-                                if let Some(retained) = retained.borrow().clone() {
-                                    if retained.retain || retained.ts > self.created {
-                                        let ret_msg = (filter, option, retained);
-                                        let tx = subscription_event_tx.to_owned();
-                                        tokio::spawn(async move {
-                                            if let Err(err) = tx.send(ret_msg).await {
-                                                warn!(cause = ?err, "could not process retained message");
-                                            }
-                                        });
-                                    }
-                                }
+                                let ret_msg = (filter, option, retained.clone());
+                                subscription_event_tx.send(ret_msg).await.map_err(Error::msg)?;
                             }
                         },
                         Err(Lagged(lag)) => {
@@ -284,7 +289,7 @@ impl Session {
                     }
                 }
                 Some((topic_filter, option, message)) = subscription_event_rx.next(), if self.connection.is_some() => {
-                    trace!("publish topic: {}, message: {:?}", topic_filter, message);
+                    trace!("subscription publish topic: {}, message: {:?}", topic_filter, message);
                     self.publish_client(option, message).await?
                 },
                 else => break,
@@ -305,7 +310,7 @@ impl Session {
     #[instrument(skip(self), fields(identifier = field::display(& self.id)), err)]
     async fn publish_client(&mut self, option: SubscriptionOptions, msg: Message) -> Result<()> {
         match &self.connection {
-            Some((connection_reply_tx, _, _)) => {
+            Some((connection_reply_tx, properties, _)) => {
                 let packet_identifier = self.packet_identifier_seq.clone();
                 let qos = min(msg.qos, option.qos);
                 let packet_identifier = if QoS::AtMostOnce == qos {
@@ -328,6 +333,14 @@ impl Session {
                     properties: msg.properties,
                     payload: msg.payload,
                 });
+
+                if let Some(maximum_packet_size) = properties.maximum_packet_size {
+                    if publish.encoded_size() > maximum_packet_size as usize {
+                        warn!("exceed maximum_packet_size: {:?}", publish);
+                        return Ok(());
+                    }
+                }
+
                 connection_reply_tx
                     .send(publish)
                     .await
@@ -337,11 +350,12 @@ impl Session {
                     let (tx, rx) = mpsc::channel(1);
                     let packet_identifier = packet_identifier.unwrap();
                     self.client_flows.insert(packet_identifier, tx.clone());
-                    let resp_tx = connection_reply_tx.clone();
+                    let connection_reply_tx = connection_reply_tx.clone();
                     let session = self.id.clone();
                     tokio::spawn(async move {
                         if let Err(err) =
-                            exactly_once_client(session, packet_identifier, rx, resp_tx).await
+                            exactly_once_client(session, packet_identifier, rx, connection_reply_tx)
+                                .await
                         {
                             error!(cause = ?err, "QoS 2 protocol error: {}", err);
                         }
@@ -392,14 +406,14 @@ impl Session {
                                     let session = self.id.clone();
                                     let (tx, rx) = mpsc::channel(1);
                                     let root = self.topic_manager.clone();
-                                    let resp_tx = connection_reply_tx.clone();
+                                    let connection_reply_tx = connection_reply_tx.clone();
                                     tokio::spawn(async move {
                                         if let Err(err) = exactly_once_server(
                                             session,
                                             packet_identifier,
                                             root,
                                             rx,
-                                            resp_tx,
+                                            connection_reply_tx,
                                         )
                                         .await
                                         {
