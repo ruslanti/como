@@ -8,7 +8,7 @@ use crate::mqtt::proto::property::{ConnectProperties, PropertiesBuilder, Propert
 use crate::mqtt::proto::types::{Connect, ControlPacket, QoS, Will};
 use crate::mqtt::proto::will::decode_will_properties;
 
-const MQTT: &'static str = "MQTT";
+const MQTT: &str = "MQTT";
 const VERSION: u8 = 5;
 
 pub fn decode_connect(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {

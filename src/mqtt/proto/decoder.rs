@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 
-use anyhow::{anyhow, Context, ensure, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use bytes::{Buf, BytesMut};
 use tokio_util::codec::Decoder;
 use tracing::{instrument, trace};
@@ -80,9 +80,12 @@ pub fn decode_variable_integer(reader: &mut BytesMut) -> Result<u32> {
     let mut value = 0;
     loop {
         ensure!(reader.remaining() > 0, anyhow!("end of stream"));
-        let encoded_byte: u8 = reader.get_u8().into();
+        let encoded_byte: u8 = reader.get_u8();
         value += (encoded_byte & 0x7F) as u32 * multiplier;
-        ensure!(multiplier <= (0x80 * 0x80 * 0x80), anyhow!("malformed variable integer: {}", value));
+        ensure!(
+            multiplier <= (0x80 * 0x80 * 0x80),
+            anyhow!("malformed variable integer: {}", value)
+        );
         multiplier *= 0x80;
         if (encoded_byte & 0x80) == 0 {
             break;

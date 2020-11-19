@@ -415,7 +415,7 @@ pub struct PropertiesBuilder {
 
 impl PropertiesBuilder {
     pub fn new() -> Self {
-        return PropertiesBuilder {
+        PropertiesBuilder {
             session_expire_interval: None,
             assigned_client_identifier: None,
             receive_maximum: None,
@@ -443,7 +443,7 @@ impl PropertiesBuilder {
             reason_string: None,
             retain_available: None,
             shared_subscription_available: None,
-        };
+        }
     }
 
     pub fn session_expire_interval(mut self, value: u32) -> Result<Self> {

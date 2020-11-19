@@ -98,14 +98,23 @@ impl ConnectionHandler {
             };
 
         let mut context = self.context.lock().await;
-        let (session_event_tx, connection_context_tx, session_present) =
-            context.connect(id, msg.clean_start_flag).await;
+        let (session_event_tx, connection_context_tx, session_present) = context.connect(id).await;
 
         connection_context_tx
-            .send((conn_tx.clone(), msg.properties, msg.will))
+            .send((
+                conn_tx.clone(),
+                msg.properties,
+                msg.will,
+                msg.clean_start_flag,
+            ))
             .await?;
 
         self.session = Some((id.to_string(), session_event_tx));
+        let session_present = if msg.clean_start_flag {
+            false
+        } else {
+            session_present
+        };
 
         let ack = ControlPacket::ConnAck(ConnAck {
             session_present,

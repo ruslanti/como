@@ -85,7 +85,7 @@ impl Encoder<Publish> for MQTTCodec {
 
 impl RemainingLength for Publish {
     fn remaining_length(&self) -> usize {
-        let packet_identifier_len = if let Some(_) = self.packet_identifier {
+        let packet_identifier_len = if self.packet_identifier.is_some() {
             2
         } else {
             0
@@ -213,7 +213,7 @@ impl Encoder<SubAck> for MQTTCodec {
 
         writer.put_u8(PacketType::SUBACK.into()); // packet type
         encode_variable_integer(writer, remaining_length)?; // remaining length
-        writer.put_u16(msg.packet_identifier.into());
+        writer.put_u16(msg.packet_identifier);
         encode_variable_integer(writer, properties_length)?; // properties length
         encode_suback_properties(writer, msg.properties)?;
         for reason_code in msg.reason_codes.into_iter() {
@@ -297,10 +297,10 @@ pub fn encode_variable_integer(writer: &mut BytesMut, v: usize) -> Result<()> {
     let mut value = v;
     loop {
         let mut encoded_byte = (value % 0x80) as u8;
-        value = value / 0x80;
+        value /= 0x80;
         // if there are more data to encode, set the top bit of this byte
         if value > 0 {
-            encoded_byte = encoded_byte | 0x80;
+            encoded_byte |= 0x80;
         }
         ensure!(writer.capacity() > 0, anyhow!("end of stream"));
         writer.put_u8(encoded_byte);

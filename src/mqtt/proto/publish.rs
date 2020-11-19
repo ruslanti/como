@@ -94,7 +94,7 @@ pub fn encode_publish_properties(
     );
     encode_property_u16!(writer, TopicAlias, properties.topic_alias);
     encode_property_string!(writer, ResponseTopic, properties.response_topic);
-    if let Some(_) = properties.correlation_data {
+    if properties.correlation_data.is_some() {
         unimplemented!()
     }
     encode_property_user_properties!(writer, UserProperty, properties.user_properties);

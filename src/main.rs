@@ -16,13 +16,35 @@ use mqtt::service;
 use crate::mqtt::context::AppContext;
 use crate::settings::Settings;
 
+/*use std::thread;
+use std::time::Duration;
+use tracing_subscriber::prelude::*;
+ */
 mod mqtt;
 mod settings;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let settings = Arc::new(Settings::new()?);
+    /*    let (tracer, _uninstall) = opentelemetry_jaeger::new_pipeline()
+            .with_service_name("report_example")
+            .install()
+            .unwrap();
+        let opentelemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+        tracing_subscriber::registry()
+            .with(opentelemetry)
+            .try_init()?;
 
+        let root = span!(tracing::Level::INFO, "app_start", work_units = 2);
+        let _enter = root.enter();
+
+        //let work_result = expensive_work();
+
+        span!(tracing::Level::INFO, "faster_work")
+            .in_scope(|| thread::sleep(Duration::from_millis(10)));
+
+        warn!("About to exit!");
+    */
+    let settings = Arc::new(Settings::new()?);
     // a builder for `FmtSubscriber`.
     let (non_blocking, _guard) = if let Some(file) = settings.log.file.clone() {
         tracing_appender::non_blocking(tracing_appender::rolling::daily("logs", file))

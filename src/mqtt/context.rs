@@ -1,13 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Error;
-use futures::TryFutureExt;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, instrument, warn};
 
-use crate::mqtt::proto::types::{Disconnect, ReasonCode};
 use crate::mqtt::session::{ConnectionContextState, Session, SessionEvent};
 use crate::mqtt::topic::TopicManager;
 use crate::settings::Settings;
@@ -32,7 +29,7 @@ impl AppContext {
 
     #[instrument(skip(self))]
     pub fn clean(&mut self, identifier: String) {
-        if let Some(_) = self.sessions.remove(identifier.as_str()) {
+        if self.sessions.remove(identifier.as_str()).is_some() {
             debug!("removed");
         }
     }
@@ -41,22 +38,7 @@ impl AppContext {
     pub async fn connect(
         &mut self,
         key: &str,
-        clean_start: bool,
     ) -> (Sender<SessionEvent>, Sender<ConnectionContextState>, bool) {
-        //TODO close existing connection
-        if clean_start {
-            if let Some((session_event_tx, _connection_context_tx)) = self.sessions.remove(key) {
-                debug!("clean start");
-                let event = SessionEvent::Disconnect(Disconnect {
-                    reason_code: ReasonCode::SessionTakenOver,
-                    properties: Default::default(),
-                });
-                if let Err(err) = session_event_tx.send(event).map_err(Error::msg).await {
-                    warn!(cause = ?err, "session error");
-                };
-            }
-        }
-
         if let Some((session_event_tx, connection_context_tx)) = self.sessions.get(key) {
             (
                 session_event_tx.clone(),

@@ -47,9 +47,7 @@ fn decode_disconnect_properties(reader: &mut BytesMut) -> Result<DisconnectPrope
             Property::ServerReference => {
                 builder = builder.server_reference(decode_utf8_string(reader)?)?;
             }
-            _ => {
-                bail!("unknown connect property: {:x}", id)
-            }
+            _ => bail!("unknown connect property: {:x}", id),
         }
     }
     Ok(builder.disconnect())

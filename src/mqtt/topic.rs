@@ -169,7 +169,7 @@ impl TopicManager {
                     }
                     MatchState::SingleLevel => {
                         //  println!("pattern + - level {:?}", level);
-                        if !name.starts_with("$") {
+                        if !name.starts_with('$') {
                             if (level + 1) == max_level {
                                 // FINAL
                                 res.push((
@@ -187,7 +187,7 @@ impl TopicManager {
                     }
                     MatchState::MultiLevel => {
                         //println!("pattern # - level {:?}", level);
-                        if !name.starts_with("$") {
+                        if !name.starts_with('$') {
                             //  println!("FOUND {}", name);
                             res.push((
                                 node.path.to_owned(),
@@ -248,7 +248,6 @@ impl TopicManager {
             pattern,
             topic_name
         );
-        let mut level = 0;
         let topics = if let Some(topic_name) = topic_name.strip_prefix('$') {
             let mut names = vec![];
             names.push("$");
@@ -257,7 +256,7 @@ impl TopicManager {
         } else {
             topic_name.split('/').collect()
         };
-        for name in topics {
+        for (level, name) in topics.into_iter().enumerate() {
             if let Some(&state) = pattern.get(level) {
                 let max_level = pattern.len();
                 /*                trace!(
@@ -271,10 +270,8 @@ impl TopicManager {
                 match state {
                     MatchState::Topic(pattern) => {
                         //trace!("pattern {:?} - name {:?}", pattern, name);
-                        if name == pattern {
-                            if (level + 1) == max_level {
-                                return true;
-                            }
+                        if name == pattern && (level + 1) == max_level {
+                            return true;
                         }
                     }
                     MatchState::SingleLevel => {
@@ -289,18 +286,15 @@ impl TopicManager {
                     }
                     MatchState::MultiLevel => {
                         // trace!("pattern # - level {:?}", level);
-                        return if !name.starts_with('$') { true } else { false };
+                        return !name.starts_with('$');
                     }
                     MatchState::Dollar => {
-                        if name == "$" {
-                            if (level + 1) == max_level {
-                                return true;
-                            }
+                        if name == "$" && (level + 1) == max_level {
+                            return true;
                         }
                     }
                 }
             };
-            level = level + 1;
         }
         false
     }
@@ -376,7 +370,7 @@ impl Topic {
             match rx.recv().await {
                 Ok(msg) => {
                     trace!("{:?}", msg);
-                    if msg.retain && msg.payload.len() > 0 {
+                    if msg.retain && !msg.payload.is_empty() {
                         if let Err(err) = retained.send(Some(msg)) {
                             error!(cause = ?err, "topic retain error: ");
                         }

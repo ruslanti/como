@@ -23,7 +23,8 @@ use crate::mqtt::subscription::{SessionSender, Subscription};
 use crate::mqtt::topic::{Message, TopicManager};
 use crate::settings::Settings;
 
-pub(crate) type ConnectionContextState = (Sender<ControlPacket>, ConnectProperties, Option<Will>);
+pub(crate) type ConnectionContextState =
+    (Sender<ControlPacket>, ConnectProperties, Option<Will>, bool);
 type ConnectionContext = Option<ConnectionContextState>;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -120,7 +121,6 @@ async fn exactly_once_client(
             match rx.recv().await {
                 Some(PublishEvent::PubComp(comp)) => {
                     trace!("{:?}", comp);
-                    ()
                 }
                 Some(event) => bail!("{} unknown event received: {:?}", session, event),
                 None => bail!("{} channel closed", session),
@@ -162,7 +162,6 @@ async fn exactly_once_server(
                         properties: Default::default(),
                     });
                     connection_reply_tx.send(comp).await?;
-                    ()
                 }
                 Some(event) => bail!("{} unknown event received: {:?}", session, event),
                 None => bail!("{} channel closed", session),
@@ -182,7 +181,7 @@ impl Session {
         Self {
             id: id.to_owned(),
             created: Instant::now(),
-            expire_interval: Duration::from_millis(100),
+            expire_interval: Duration::from_millis(1),
             connection: None,
             config,
             server_flows: HashMap::new(),
@@ -191,6 +190,12 @@ impl Session {
             packet_identifier_seq: Arc::new(AtomicU16::new(1)),
             topic_filters: HashMap::new(),
         }
+    }
+
+    fn clear(&mut self) {
+        self.server_flows.clear();
+        self.client_flows.clear();
+        self.topic_filters.clear();
     }
 
     #[instrument(skip(self, session_event_rx, connection_context_rx), fields(identifier = field::display(& self.id)),
@@ -213,16 +218,16 @@ impl Session {
         let (subscription_event_tx, mut subscription_event_rx) = mpsc::channel(32);
 
         loop {
-            debug!("##############################################");
             tokio::select! {
                 res = timeout(self.expire_interval, connection_context_rx.next()), if self.connection.is_none()  => {
                     match res {
-                        Ok(Some((connection_reply_tx, prop, will))) => {
+                        Ok(Some((connection_reply_tx, prop, will, clean_start))) => {
                             debug!("new connection context");
                             if let Some(ex) = prop.session_expire_interval {
                                 self.expire_interval = Duration::from_secs(ex as u64);
                             }
-                            self.connection = Some((connection_reply_tx, prop, will));
+                            self.clear();
+                            self.connection = Some((connection_reply_tx, prop, will, clean_start));
                         },
                         Ok(None) => {
                             bail!("connection context closed. expire {}", self.expire_interval
@@ -310,7 +315,7 @@ impl Session {
     #[instrument(skip(self), fields(identifier = field::display(& self.id)), err)]
     async fn publish_client(&mut self, option: SubscriptionOptions, msg: Message) -> Result<()> {
         match &self.connection {
-            Some((connection_reply_tx, properties, _)) => {
+            Some((connection_reply_tx, properties, _, _)) => {
                 let packet_identifier = self.packet_identifier_seq.clone();
                 let qos = min(msg.qos, option.qos);
                 let packet_identifier = if QoS::AtMostOnce == qos {
@@ -349,7 +354,7 @@ impl Session {
                 if QoS::ExactlyOnce == qos {
                     let (tx, rx) = mpsc::channel(1);
                     let packet_identifier = packet_identifier.unwrap();
-                    self.client_flows.insert(packet_identifier, tx.clone());
+                    self.client_flows.insert(packet_identifier, tx);
                     let connection_reply_tx = connection_reply_tx.clone();
                     let session = self.id.clone();
                     tokio::spawn(async move {
@@ -370,7 +375,7 @@ impl Session {
     #[instrument(skip(self, msg), err)]
     async fn publish(&mut self, msg: Publish) -> Result<()> {
         match &self.connection {
-            Some((connection_reply_tx, _, _)) => {
+            Some((connection_reply_tx, _, _, _)) => {
                 match msg.qos {
                     QoS::AtMostOnce => publish_topic(self.topic_manager.clone(), msg).await?,
                     QoS::AtLeastOnce => {
@@ -399,36 +404,34 @@ impl Session {
                                     properties: Default::default(),
                                 });
                                 connection_reply_tx.send(disconnect).await?;
+                            } else if self.server_flows.len()
+                                < self.config.connection.receive_maximum.unwrap() as usize
+                            {
+                                let session = self.id.clone();
+                                let (tx, rx) = mpsc::channel(1);
+                                let root = self.topic_manager.clone();
+                                let connection_reply_tx = connection_reply_tx.clone();
+                                tokio::spawn(async move {
+                                    if let Err(err) = exactly_once_server(
+                                        session,
+                                        packet_identifier,
+                                        root,
+                                        rx,
+                                        connection_reply_tx,
+                                    )
+                                    .await
+                                    {
+                                        error!(cause = ?err, "QoS 2 protocol error: {}", err);
+                                    }
+                                });
+                                self.server_flows.insert(packet_identifier, tx.clone());
+                                tx.send(PublishEvent::Publish(msg)).await?
                             } else {
-                                if self.server_flows.len()
-                                    < self.config.connection.receive_maximum.unwrap() as usize
-                                {
-                                    let session = self.id.clone();
-                                    let (tx, rx) = mpsc::channel(1);
-                                    let root = self.topic_manager.clone();
-                                    let connection_reply_tx = connection_reply_tx.clone();
-                                    tokio::spawn(async move {
-                                        if let Err(err) = exactly_once_server(
-                                            session,
-                                            packet_identifier,
-                                            root,
-                                            rx,
-                                            connection_reply_tx,
-                                        )
-                                        .await
-                                        {
-                                            error!(cause = ?err, "QoS 2 protocol error: {}", err);
-                                        }
-                                    });
-                                    self.server_flows.insert(packet_identifier, tx.clone());
-                                    tx.send(PublishEvent::Publish(msg)).await?
-                                } else {
-                                    let disconnect = ControlPacket::Disconnect(Disconnect {
-                                        reason_code: ReasonCode::ReceiveMaximumExceeded,
-                                        properties: Default::default(),
-                                    });
-                                    connection_reply_tx.send(disconnect).await?;
-                                }
+                                let disconnect = ControlPacket::Disconnect(Disconnect {
+                                    reason_code: ReasonCode::ReceiveMaximumExceeded,
+                                    properties: Default::default(),
+                                });
+                                connection_reply_tx.send(disconnect).await?;
                             }
                         } else {
                             bail!("undefined packet_identifier");
@@ -495,7 +498,7 @@ impl Session {
     #[instrument(skip(self, msg, tx), err)]
     async fn subscribe(&mut self, msg: Subscribe, tx: SessionSender) -> Result<()> {
         match &self.connection {
-            Some((connection_reply_tx, _, _)) => {
+            Some((connection_reply_tx, _, _, _)) => {
                 debug!("subscribe topic filters: {:?}", msg.topic_filters);
                 let root = self.topic_manager.read().await;
                 let mut reason_codes = Vec::new();
@@ -567,7 +570,7 @@ impl Session {
     #[instrument(skip(self, msg), err)]
     async fn unsubscribe(&mut self, msg: UnSubscribe) -> Result<()> {
         match &self.connection {
-            Some((connection_reply_tx, _, _)) => {
+            Some((connection_reply_tx, _, _, _)) => {
                 debug!("topic filters: {:?}", msg.topic_filters);
                 let mut reason_codes = Vec::new();
                 for topic_filter in msg.topic_filters {
@@ -622,7 +625,7 @@ impl Session {
     #[instrument(skip(self, msg))]
     async fn disconnect(&self, msg: Disconnect) -> Result<()> {
         match &self.connection {
-            Some((_, _session_expire_interval, will)) => {
+            Some((_, _session_expire_interval, will, _)) => {
                 if msg.reason_code != ReasonCode::Success {
                     // publish will
                     if let Some(will) = will {
