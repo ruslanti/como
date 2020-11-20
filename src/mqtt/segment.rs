@@ -1,23 +1,50 @@
-use anyhow::{anyhow, Result};
 use std::borrow::BorrowMut;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{anyhow, Result};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 
+use crate::mqtt::partition::Record;
 use crate::mqtt::topic::Message;
 
 pub(crate) struct Segment {
     segment: usize,
     offset: u32,
     position: u32,
-    index_table: Vec<u32>,
+    /*    index_table: Vec<u32>,
     index: BufWriter<File>,
-    log: BufWriter<File>,
+    log: BufWriter<File>,*/
 }
 
 impl Segment {
-    pub(crate) async fn new(partition: impl AsRef<Path>, segment: usize) -> Result<Self> {
+    pub fn new(start: usize) -> Self {
+        Segment {
+            segment: start,
+            offset: 0,
+            position: 0,
+            /*            index_table: vec![],
+            index: (),
+            log: (),*/
+        }
+    }
+
+    pub fn is_full(&self) -> bool {
+        true
+    }
+
+    pub async fn store(&mut self, record: Record) -> Result<usize> {
+        unimplemented!()
+    }
+
+    pub async fn load(&self, index: usize) -> Result<Record> {
+        unimplemented!()
+    }
+}
+
+impl Segment {
+    /*pub(crate) async fn new(partition: impl AsRef<Path>, segment: usize) -> Result<Self> {
         let mut path = partition.as_ref().to_owned();
         path.push(format!("{:020}", segment));
         Ok(Segment {
@@ -105,12 +132,12 @@ impl Segment {
         self.offset = self.offset + 1;
         self.position = size as u32;
         Ok(size)
-    }
+    }*/
 }
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
+    /*use bytes::Bytes;
     use std::time::Instant;
 
     use crate::mqtt::proto::types::QoS;
@@ -169,5 +196,5 @@ mod tests {
                 .unwrap();
             ()
         })
-    }
+    }*/
 }
