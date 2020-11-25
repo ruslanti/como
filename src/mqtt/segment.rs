@@ -1,200 +1,150 @@
-use std::borrow::BorrowMut;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Error, Result};
+use bytes::{Bytes, BytesMut};
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom};
+use tracing::{info, trace};
 
-use crate::mqtt::partition::Record;
-use crate::mqtt::topic::Message;
+use crate::mqtt::index::IndexEntry;
 
 pub(crate) struct Segment {
-    segment: usize,
+    path: PathBuf,
+    inner: Option<Inner>,
+}
+
+struct Inner {
     offset: u32,
     position: u32,
-    /*    index_table: Vec<u32>,
-    index: BufWriter<File>,
-    log: BufWriter<File>,*/
+    buf: BufWriter<File>,
 }
 
 impl Segment {
-    pub fn new(start: usize) -> Self {
-        Segment {
-            segment: start,
-            offset: 0,
-            position: 0,
-            /*            index_table: vec![],
-            index: (),
-            log: (),*/
+    pub fn new(path: impl AsRef<Path>, segment: u64) -> Self {
+        let path = path.as_ref().join(format!("{:020}.log", segment));
+        Segment { path, inner: None }
+    }
+
+    pub async fn append(&mut self, payload: &[u8]) -> Result<IndexEntry> {
+        let inner = self
+            .inner
+            .get_or_insert(Inner::open(self.path.as_path()).await?);
+        inner.append(payload).await
+    }
+
+    async fn read(&mut self, pos: u32) -> Result<(u32, Bytes)> {
+        let inner = self
+            .inner
+            .get_or_insert(Inner::open(self.path.as_path()).await?);
+        inner.read(pos).await
+    }
+
+    async fn flush(&mut self) -> Result<()> {
+        if let Some(inner) = self.inner.as_mut() {
+            inner.flush().await
+        } else {
+            Ok(())
         }
-    }
-
-    pub fn is_full(&self) -> bool {
-        true
-    }
-
-    pub async fn store(&mut self, record: Record) -> Result<usize> {
-        unimplemented!()
-    }
-
-    pub async fn load(&self, index: usize) -> Result<Record> {
-        unimplemented!()
     }
 }
 
-impl Segment {
-    /*pub(crate) async fn new(partition: impl AsRef<Path>, segment: usize) -> Result<Self> {
-        let mut path = partition.as_ref().to_owned();
-        path.push(format!("{:020}", segment));
-        Ok(Segment {
-            segment,
+impl Inner {
+    async fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .await?;
+        let metadata = file.metadata().await?;
+
+        let buf = BufWriter::new(file);
+
+        Ok(Inner {
             offset: 0,
-            position: 0,
-            index_table: vec![],
-            index: BufWriter::new(
-                OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(path.with_extension("index"))
-                    .await?,
-            ),
-            log: BufWriter::new(
-                OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(path.with_extension("log"))
-                    .await?,
-            ),
+            position: metadata.len() as u32,
+            buf,
         })
     }
 
-    pub(crate) async fn open(partition: impl AsRef<Path>, segment: usize) -> Result<Self> {
-        let mut path = partition.as_ref().to_owned();
-        path.push(format!("{:020}", segment));
-        let index_file = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(path.with_extension("index"))
-            .await?;
-        let index_len = index_file.metadata().await?.len();
-        let mut index = BufWriter::new(index_file);
-        let index_table = Segment::load_index_table(index.borrow_mut(), index_len).await?;
-        let log_file = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(path.with_extension("log"))
-            .await?;
-        let position = log_file.metadata().await?.len() as u32;
-        Ok(Segment {
-            segment,
-            offset: index_table.len() as u32,
-            position,
-            index_table,
-            index,
-            log: BufWriter::new(log_file),
-        })
+    fn set_offset(&mut self, offset: u32) {
+        self.offset = offset;
     }
 
-    async fn load_index_table(file: &mut BufWriter<File>, len: u64) -> Result<Vec<u32>> {
-        let mut table = Vec::with_capacity((len / 8) as usize);
-        //println!("1index table: {:?} metadata: {:?}", table, file);
-        while let Ok(offset) = file.read_u32().await {
-            //  println!("2 offset: {:}", offset);
-            if let Ok(position) = file.read_u32().await {
-                // println!("2 position: {:}", position);
-                table.insert(offset as usize, position);
-            } else {
-                bail!("wrong read of index file");
-            }
-        }
-        // println!("2index table: {:?}", table);
-        Ok(table)
+    fn size(&self) -> u32 {
+        self.position
     }
 
-    async fn push(&mut self, msg: Message) -> Result<usize> {
-        let size = 16;
-        self.index.write_u32(self.offset).await?;
-        self.index.write_u32(self.position).await?;
-        self.log.write_u32(self.offset).await?;
-        self.log.write_u32(self.position).await?;
-        self.log
-            .write_u32(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as u32)
+    async fn append(&mut self, payload: &[u8]) -> Result<IndexEntry> {
+        self.buf
+            .get_mut()
+            .seek(SeekFrom::Start(self.position as u64))
             .await?;
-        self.log.write_u8(msg.retain as u8).await?;
-        self.log.write_u8(msg.qos.into()).await?;
-        //self.log.write_u16(msg.topic_name.len() as u16).await?;
-        self.log.write_all(msg.topic_name.as_ref()).await?;
-        self.log.write_all(msg.payload.as_ref()).await?;
-        self.index.flush().await?;
-        self.log.flush().await?;
-        self.offset = self.offset + 1;
-        self.position = size as u32;
-        Ok(size)
-    }*/
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as u32;
+        let ret = IndexEntry {
+            offset: self.offset,
+            position: self.position,
+            timestamp,
+        };
+        self.buf.write_u32(self.offset).await?;
+        self.buf.write_u32(self.position).await?;
+        self.buf.write_u32(timestamp).await?;
+        self.buf.write_u32(payload.len() as u32).await?;
+        self.buf.write_all(payload).await?;
+
+        self.offset += 1;
+        self.position += 16 + payload.len() as u32;
+        trace!("append: {:?}", ret);
+        Ok(ret)
+    }
+
+    async fn read(&mut self, pos: u32) -> Result<(u32, Bytes)> {
+        self.buf.get_mut().seek(SeekFrom::Start(pos as u64)).await?;
+        let _ = self.buf.read_u64().await?;
+        let timestamp = self.buf.read_u32().await?;
+        let size = self.buf.read_u32().await?;
+        let mut payload = BytesMut::with_capacity(size as usize);
+        self.buf.read_exact(payload.as_mut()).await?;
+        Ok((timestamp, Bytes::from(payload)))
+    }
+
+    async fn flush(&mut self) -> Result<()> {
+        self.buf.flush().await.map_err(Error::msg)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    /*use bytes::Bytes;
-    use std::time::Instant;
-
-    use crate::mqtt::proto::types::QoS;
+    use tracing::Level;
 
     use super::*;
 
-    //#[test]
-    fn test_new() {
-        let mut rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut segment = Segment::new("/tmp/topic", 323).await.unwrap();
-            let _w = segment
-                .push(Message {
-                    ts: Instant::now(),
-                    retain: false,
-                    qos: QoS::AtMostOnce,
-                    topic_name: Bytes::from("1234567890"),
-                    properties: Default::default(),
-                    payload: Bytes::from("Default::default()"),
-                })
-                .await
-                .unwrap();
-            let _w = segment
-                .push(Message {
-                    ts: Instant::now(),
-                    retain: false,
-                    qos: QoS::AtMostOnce,
-                    topic_name: Bytes::from("11111"),
-                    properties: Default::default(),
-                    payload: Bytes::from("Default::default()"),
-                })
-                .await
-                .unwrap();
-            ()
-        })
-    }
+    #[tokio::test]
+    async fn test_segment() {
+        let (non_blocking, _) = tracing_appender::non_blocking(std::io::stdout());
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(Level::TRACE)
+            //.with_ansi(false)
+            .with_writer(non_blocking)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no global subscriber has been set");
+        info!("This will _not_ be logged to stdout");
 
-    #[test]
-    fn test_open() {
-        let mut rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let mut segment = Segment::open("/tmp/topic", 323).await.unwrap();
-            println!("index table len: {}", segment.index_table.len());
-            println!("index table: {:?}", segment.index_table);
-            println!("offset: {}, position: {}", segment.offset, segment.position);
-            segment
-                .push(Message {
-                    ts: Instant::now(),
-                    retain: false,
-                    qos: QoS::AtMostOnce,
-                    topic_name: Bytes::from("topic3"),
-                    properties: Default::default(),
-                    payload: Bytes::from("data3"),
-                })
-                .await
-                .unwrap();
-            ()
-        })
-    }*/
+        let mut segment = Segment::new("/tmp/", 1234);
+        for i in 0..100 {
+            let ret = segment.append(b"0123456789").await.unwrap();
+            assert_eq!(i, ret.offset);
+            assert_eq!((26 * i), ret.position);
+            assert_ne!(0, ret.timestamp);
+        }
+
+        let ret = segment.append(b"0123456789").await.unwrap();
+        assert_eq!(1, ret.offset);
+        assert_eq!(26, ret.position);
+        assert_ne!(0, ret.timestamp);
+
+        segment.flush().await;
+    }
 }
