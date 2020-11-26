@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use memmap::Mmap;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::BufWriter;
 
@@ -14,7 +15,7 @@ pub(crate) struct IndexEntry {
 pub(crate) struct Index {
     offset: u32,
     position: u32,
-    buf: BufWriter<File>,
+    buf: Mmap,
 }
 
 impl Index {
@@ -22,13 +23,14 @@ impl Index {
         let name = path.as_ref().join(format!("{:020}.idx", segment));
 
         let file = OpenOptions::new()
+            .read(true)
             .append(true)
             .create(true)
             .open(name)
             .await?;
         let metadata = file.metadata().await?;
 
-        let buf = BufWriter::new(file);
+        let buf = unsafe { Mmap::map(&file.into_std().await)? };
 
         Ok(Index {
             offset: 0,
@@ -41,5 +43,7 @@ impl Index {
         0
     }
 
-    pub async fn append(&mut self, entry: IndexEntry) {}
+    pub async fn append(&mut self, entry: IndexEntry) {
+        let g = self.buf[0];
+    }
 }
