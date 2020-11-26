@@ -42,7 +42,7 @@ impl Log {
                 .await;
             base_offsets.sort();
             for base in base_offsets {
-                let index = Index::new(path.as_path(), base).await?;
+                let index = Index::new(path.as_path(), base);
                 let segment = Segment::new(path.as_path(), base);
                 segments.push(SegmentEntry {
                     base,
@@ -61,11 +61,12 @@ impl Log {
     }
 
     async fn append(&mut self, payload: &[u8]) -> Result<u32> {
-        let entry = self.segments.last_mut().expect("missing data segment");
-        let index = entry.segment.append(payload).await?;
-        let offset = index.offset;
-        entry.index.append(index).await;
-        Ok(offset)
+        /*        let entry = self.segments.last_mut().expect("missing data segment");
+                let index = entry.segment.append(payload).await?;
+                let offset = index.offset as u32;
+        */
+        /*        entry.index.append(index).await;*/
+        Ok(1)
     }
 
     async fn read(&self, pos: u32) -> Result<()> {
