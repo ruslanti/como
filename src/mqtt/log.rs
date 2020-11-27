@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Error, Result};
+use bytes::Bytes;
 use futures::TryFutureExt;
 use tokio::fs;
 use tokio::stream::StreamExt;
@@ -53,6 +55,16 @@ impl Log {
         } else {
             fs::create_dir(path.as_path()).map_err(Error::msg).await?;
         }
+        if segments.is_empty() {
+            let base = 0;
+            let index = Index::new(path.as_path(), base);
+            let segment = Segment::new(path.as_path(), base);
+            segments.push(SegmentEntry {
+                base,
+                index,
+                segment,
+            })
+        }
         Ok(Log {
             path,
             segment_size,
@@ -60,23 +72,31 @@ impl Log {
         })
     }
 
-    async fn append(&mut self, payload: &[u8]) -> Result<u32> {
-        /*        let entry = self.segments.last_mut().expect("missing data segment");
-                let index = entry.segment.append(payload).await?;
-                let offset = index.offset as u32;
-        */
-        /*        entry.index.append(index).await;*/
-        Ok(1)
+    async fn append(&mut self, payload: &[u8]) -> Result<usize> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+        let entry = self.segments.last_mut().expect("missing data segment");
+        let offset = entry.segment.append(timestamp, payload).await?;
+        Ok(entry.index.append(timestamp, offset).await?)
     }
 
-    async fn read(&self, pos: u32) -> Result<()> {
-        //ensure!(self.start < pos, "invalid segment position");
-        /*        let index: usize = pos - self.start;
-        let segment = self
-            .segments
-            .get(index / self.segment_size)
-            .context("unknown segment")?;*/
-        Ok(())
-        // segment.read().await.read(index % self.segment_size).await
+    async fn read(&mut self, offset: u32) -> Result<(u32, Bytes)> {
+        let entry = self.segments.last_mut().expect("missing data segment");
+        let index = entry.index.read(offset).await?;
+        entry.segment.read(index.offset).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_log() {
+        tracing_subscriber::fmt::init();
+        let mut log = Log::new("/tmp", "test_log", 10).await.unwrap();
+        let r = log.append(b"TTTTTTTTTTTTTTTTTTTTTT").await.unwrap();
     }
 }

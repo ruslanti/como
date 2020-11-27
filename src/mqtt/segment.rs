@@ -1,14 +1,13 @@
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Error, Result};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom};
 use tracing::trace;
 
-const HEADER_SIZE: usize = 8;
+const HEADER_SIZE: u32 = 8;
 
 pub(crate) struct Segment {
     path: PathBuf,
@@ -17,7 +16,7 @@ pub(crate) struct Segment {
 
 #[derive(Debug)]
 struct Inner {
-    last_offset: usize,
+    last_offset: u32,
     writer: BufWriter<File>,
 }
 
@@ -34,7 +33,7 @@ impl Segment {
         Ok(())
     }
 
-    pub async fn append(&mut self, timestamp: u32, payload: &[u8]) -> Result<usize> {
+    pub async fn append(&mut self, timestamp: u32, payload: &[u8]) -> Result<u32> {
         self.init().await?;
         if let Some(inner) = self.inner.as_mut() {
             inner.append(timestamp, payload).await
@@ -43,16 +42,16 @@ impl Segment {
         }
     }
 
-    async fn read(&mut self, offset: usize, size: usize) -> Result<(u32, Bytes)> {
+    pub async fn read(&mut self, offset: u32) -> Result<(u32, Bytes)> {
         self.init().await?;
         if let Some(inner) = self.inner.as_mut() {
-            inner.read(offset, size).await
+            inner.read(offset).await
         } else {
             Err(anyhow!("not initialized segment"))
         }
     }
 
-    fn size(&mut self) -> usize {
+    fn size(&mut self) -> u32 {
         if let Some(inner) = self.inner.as_mut() {
             inner.size()
         } else {
@@ -87,20 +86,20 @@ impl Inner {
         let buf = BufWriter::new(file);
 
         Ok(Inner {
-            last_offset: metadata.len() as usize,
+            last_offset: metadata.len() as u32,
             writer: buf,
         })
     }
 
-    fn last_offset(&mut self, offset: usize) {
+    fn last_offset(&mut self, offset: u32) {
         self.last_offset = offset;
     }
 
-    fn size(&self) -> usize {
+    fn size(&self) -> u32 {
         self.last_offset
     }
 
-    async fn append(&mut self, timestamp: u32, payload: &[u8]) -> Result<usize> {
+    async fn append(&mut self, timestamp: u32, payload: &[u8]) -> Result<u32> {
         self.writer
             .get_mut()
             .seek(SeekFrom::Start(self.last_offset as u64))
@@ -116,21 +115,21 @@ impl Inner {
         buf.put(payload);
         self.writer.write_all(buf.as_ref()).await?;
         let position = self.last_offset;
-        self.last_offset += HEADER_SIZE + payload.len();
+        self.last_offset += HEADER_SIZE + payload.len() as u32;
         Ok(position)
     }
 
-    async fn read(&mut self, offset: usize, size: usize) -> Result<(u32, Bytes)> {
-        trace!("read: {} size: {}", offset, size);
+    async fn read(&mut self, offset: u32) -> Result<(u32, Bytes)> {
+        trace!("read: {}", offset);
         self.writer
             .get_mut()
             .seek(SeekFrom::Start(offset as u64))
             .await?;
+        let timestamp = self.writer.read_u32().await?;
+        let size = self.writer.read_u32().await?;
         let mut buf = BytesMut::with_capacity(size as usize);
         buf.resize(size as usize, 0);
         self.writer.read_exact(buf.as_mut()).await?;
-        let timestamp = buf.get_u32();
-        buf.advance(4);
         Ok((timestamp, Bytes::from(buf)))
     }
 
@@ -141,18 +140,20 @@ impl Inner {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use rand::Rng;
 
     use super::*;
 
-    const PAYLOAD_SIZE: usize = 100;
-    const RECORDS: usize = 100;
+    const PAYLOAD_SIZE: u32 = 100;
+    const RECORDS: u32 = 100;
     const TEST100: &'static [u8; 7] = b"TEST100";
     const TEST101: &'static [u8; 8] = b"TEST1001";
 
     #[tokio::test]
     async fn test_segment() {
-        tracing_subscriber::fmt::init();
+        //tracing_subscriber::fmt::init();
 
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -163,7 +164,7 @@ mod tests {
 
         let mut segment = Segment::new("/tmp/", s);
         let mut position = 0;
-        for i in 0..RECORDS {
+        for _i in 0..RECORDS {
             let ret = segment
                 .append(timestamp, vec![8; PAYLOAD_SIZE as usize].as_slice())
                 .await
@@ -174,12 +175,9 @@ mod tests {
         assert_eq!(position, segment.size());
 
         segment.flush().await.unwrap();
-        for i in (0..RECORDS).rev() {
+        for i in (0u32..RECORDS).rev() {
             let (t, b) = segment
-                .read(
-                    HEADER_SIZE * i + PAYLOAD_SIZE * i,
-                    HEADER_SIZE + PAYLOAD_SIZE,
-                )
+                .read(HEADER_SIZE * i + PAYLOAD_SIZE * i)
                 .await
                 .unwrap();
             assert_eq!(timestamp, t);
@@ -190,23 +188,20 @@ mod tests {
         let ret = segment.append(timestamp, TEST100).await.unwrap();
         assert_eq!(HEADER_SIZE * 100 + PAYLOAD_SIZE * 100, ret);
         let ret = segment.append(timestamp, TEST101).await.unwrap();
-        assert_eq!(HEADER_SIZE * 101 + PAYLOAD_SIZE * 100 + TEST100.len(), ret);
+        assert_eq!(
+            HEADER_SIZE * 101 + PAYLOAD_SIZE * 100 + TEST100.len() as u32,
+            ret
+        );
 
         segment.flush().await.unwrap();
         let (t, b) = segment
-            .read(
-                HEADER_SIZE * 100 + PAYLOAD_SIZE * 100,
-                HEADER_SIZE + TEST100.len(),
-            )
+            .read(HEADER_SIZE * 100 + PAYLOAD_SIZE * 100)
             .await
             .unwrap();
         assert_eq!(timestamp, t);
         assert_eq!(TEST100, b.as_ref());
         let (t, b) = segment
-            .read(
-                HEADER_SIZE * 101 + PAYLOAD_SIZE * 100 + TEST100.len(),
-                HEADER_SIZE + TEST101.len(),
-            )
+            .read(HEADER_SIZE * 101 + PAYLOAD_SIZE * 100 + TEST100.len() as u32)
             .await
             .unwrap();
         assert_eq!(timestamp, t);

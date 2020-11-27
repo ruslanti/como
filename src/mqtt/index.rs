@@ -1,17 +1,14 @@
-use std::borrow::{Borrow, BorrowMut};
+use std::borrow::Borrow;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Error, Result};
 use serde::de::Visitor;
 use serde::ser::SerializeStruct;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tracing::trace;
-
-const INDEX_ENTRY_SIZE: usize = 8;
 
 #[derive(Debug)]
 pub(crate) struct IndexEntry {
@@ -84,16 +81,16 @@ impl Index {
         Ok(())
     }
 
-    pub async fn append(&mut self, entry: IndexEntry) -> Result<usize> {
+    pub async fn append(&mut self, timestamp: u32, offset: u32) -> Result<usize> {
         self.init().await?;
         if let Some(inner) = self.inner.as_mut() {
-            inner.append(entry).await
+            inner.append(IndexEntry { timestamp, offset }).await
         } else {
             Err(anyhow!("not initialized segment index"))
         }
     }
 
-    async fn read(&mut self, index: usize) -> Result<&IndexEntry> {
+    pub async fn read(&mut self, index: u32) -> Result<&IndexEntry> {
         self.init().await?;
         if let Some(inner) = self.inner.as_mut() {
             inner.read(index).await
@@ -156,10 +153,10 @@ impl Inner {
         Ok(self.indexes.len() - 1)
     }
 
-    async fn read(&mut self, offset: usize) -> Result<&IndexEntry> {
+    async fn read(&mut self, offset: u32) -> Result<&IndexEntry> {
         trace!("read: {}", offset);
         self.indexes
-            .get(offset)
+            .get(offset as usize)
             .ok_or(anyhow!("missing index offset: {}", offset))
     }
 
