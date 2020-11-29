@@ -1,22 +1,22 @@
 use std::borrow::Borrow;
-use std::fmt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Error, Result};
-use serde::de::Visitor;
-use serde::ser::SerializeStruct;
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use anyhow::{anyhow, Result};
+use bytes::{Buf, BufMut, BytesMut};
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncWriteExt, BufWriter};
-use tracing::trace;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom};
+use tracing::{error, trace};
 
-#[derive(Debug)]
+const ENTRY_SIZE: usize = 8;
+
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct IndexEntry {
     pub timestamp: u32,
     pub offset: u32,
 }
 
 pub(crate) struct Index {
+    base: usize,
     path: PathBuf,
     inner: Option<Inner>,
 }
@@ -26,52 +26,14 @@ struct Inner {
     writer: BufWriter<File>,
     indexes: Vec<IndexEntry>,
 }
-
-struct IndexEntryVisitor;
-
-impl<'de> Visitor<'de> for IndexEntryVisitor {
-    type Value = IndexEntry;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("an integer between 0 and 2")
-    }
-
-    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(IndexEntry {
-            timestamp: (value >> 32) as u32,
-            offset: (value & 0x00000000FFFFFFFF) as u32,
-        })
-    }
-}
-
-impl<'de> Deserialize<'de> for IndexEntry {
-    fn deserialize<D>(deserializer: D) -> Result<Self, <D as Deserializer<'de>>::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_u64(IndexEntryVisitor)
-    }
-}
-
-impl Serialize for IndexEntry {
-    fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error>
-    where
-        S: Serializer,
-    {
-        let mut index = serializer.serialize_struct("Index", 2)?;
-        index.serialize_field("timestamp", &self.timestamp)?;
-        index.serialize_field("offset", &self.offset)?;
-        index.end()
-    }
-}
-
 impl Index {
-    pub fn new(path: impl AsRef<Path>, segment: u64) -> Self {
-        let path = path.as_ref().join(format!("{:020}.idx", segment));
-        Index { path, inner: None }
+    pub fn new(path: impl AsRef<Path>, base: usize) -> Self {
+        let path = path.as_ref().join(format!("{:020}.idx", base));
+        Index {
+            base,
+            path,
+            inner: None,
+        }
     }
 
     async fn init(&mut self) -> Result<()> {
@@ -84,7 +46,7 @@ impl Index {
     pub async fn append(&mut self, timestamp: u32, offset: u32) -> Result<usize> {
         self.init().await?;
         if let Some(inner) = self.inner.as_mut() {
-            inner.append(IndexEntry { timestamp, offset }).await
+            Ok(self.base + inner.append(IndexEntry { timestamp, offset }).await?)
         } else {
             Err(anyhow!("not initialized segment index"))
         }
@@ -99,7 +61,7 @@ impl Index {
         }
     }
 
-    fn size(&mut self) -> usize {
+    pub fn size(&mut self) -> usize {
         if let Some(inner) = self.inner.as_mut() {
             inner.size()
         } else {
@@ -107,16 +69,22 @@ impl Index {
         }
     }
 
-    async fn flush(&mut self) -> Result<()> {
+    pub async fn flush(&mut self) {
         if let Some(inner) = self.inner.as_mut() {
             inner.flush().await
-        } else {
-            Ok(())
         }
     }
 
     fn close(&mut self) {
         self.inner = None;
+    }
+
+    pub async fn last(&mut self) -> Option<IndexEntry> {
+        if let Some(inner) = self.inner.as_mut() {
+            inner.indexes.last().copied()
+        } else {
+            Inner::read_last(self.path.as_path()).await.ok()
+        }
     }
 }
 
@@ -127,19 +95,50 @@ impl Inner {
             .create(true)
             .open(path.as_ref())
             .await?;
+        let metadata = file.metadata().await?;
         trace!("segment index open: {:?}", file);
 
         let writer = BufWriter::new(file);
 
-        let indexes = Inner::load(path).await?;
+        let indexes = if metadata.len() > 0 {
+            Inner::load(path).await?
+        } else {
+            vec![]
+        };
         Ok(Inner { writer, indexes })
     }
 
-    async fn load(
-        path: impl AsRef<Path>,
-    ) -> ::std::result::Result<Vec<IndexEntry>, Box<bincode::ErrorKind>> {
-        let file = OpenOptions::new().read(true).open(path).await?;
-        bincode::deserialize_from(file.into_std().await)
+    async fn read_last(path: impl AsRef<Path>) -> Result<IndexEntry> {
+        let mut file = OpenOptions::new().read(true).open(path.as_ref()).await?;
+        file.seek(SeekFrom::End(-1 * (ENTRY_SIZE as i64))).await?;
+        let mut buf = BytesMut::with_capacity(ENTRY_SIZE);
+        buf.resize(ENTRY_SIZE, 0);
+        file.read_exact(buf.as_mut()).await?;
+        Ok(IndexEntry {
+            timestamp: buf.get_u32(),
+            offset: buf.get_u32(),
+        })
+    }
+
+    async fn load(path: impl AsRef<Path>) -> Result<Vec<IndexEntry>> {
+        let mut file = OpenOptions::new().read(true).open(path).await?;
+        let size = file.metadata().await?.len() as usize;
+        let mut buf = BytesMut::with_capacity(size);
+        buf.resize(size, 0);
+        file.read_exact(buf.as_mut()).await?;
+
+        let indexes = buf
+            .chunks(ENTRY_SIZE)
+            .into_iter()
+            .map(|mut entry| {
+                let timestamp = entry.get_u32();
+                let offset = entry.get_u32();
+                //trace!("load {}:{}", offset, timestamp);
+                IndexEntry { timestamp, offset }
+            })
+            .collect();
+
+        Ok(indexes)
     }
 
     fn size(&self) -> usize {
@@ -147,8 +146,12 @@ impl Inner {
     }
 
     async fn append(&mut self, entry: IndexEntry) -> Result<usize> {
-        let buf = bincode::serialize(entry.borrow())?;
-        self.writer.write_all(buf.as_ref()).await?;
+        trace!("append: {:?}", entry);
+        let mut buf = BytesMut::with_capacity(ENTRY_SIZE);
+        buf.put_u32(entry.timestamp);
+        buf.put_u32(entry.offset);
+        //trace!("append:{} -  {:?}", buf.len(), buf);
+        self.writer.write_all(buf.borrow()).await?;
         self.indexes.push(entry);
         Ok(self.indexes.len() - 1)
     }
@@ -160,7 +163,9 @@ impl Inner {
             .ok_or(anyhow!("missing index offset: {}", offset))
     }
 
-    async fn flush(&mut self) -> Result<()> {
-        self.writer.flush().await.map_err(Error::msg)
+    async fn flush(&mut self) {
+        if let Err(err) = self.writer.flush().await {
+            error!(cause = ?err, "flush error");
+        }
     }
 }

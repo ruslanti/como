@@ -50,7 +50,7 @@ pub(crate) async fn run(
     tokio::select! {
         res = service.listen() => {
             if let Err(err) = res {
-                error!(cause = %err, "failed to accept");
+                error!(cause = ?err, "failed to accept");
             }
         }
         _ = shutdown => {

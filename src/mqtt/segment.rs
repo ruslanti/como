@@ -1,15 +1,16 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Error, Result};
+use anyhow::{anyhow, Result};
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter, SeekFrom};
-use tracing::trace;
+use tracing::{error, trace};
 
 const HEADER_SIZE: u32 = 8;
 
 pub(crate) struct Segment {
+    base: usize,
     path: PathBuf,
     inner: Option<Inner>,
 }
@@ -21,9 +22,13 @@ struct Inner {
 }
 
 impl Segment {
-    pub fn new(path: impl AsRef<Path>, segment: u64) -> Self {
+    pub fn new(path: impl AsRef<Path>, segment: usize) -> Self {
         let path = path.as_ref().join(format!("{:020}.log", segment));
-        Segment { path, inner: None }
+        Segment {
+            base: 0,
+            path,
+            inner: None,
+        }
     }
 
     async fn init(&mut self) -> Result<()> {
@@ -51,7 +56,7 @@ impl Segment {
         }
     }
 
-    fn size(&mut self) -> u32 {
+    pub fn size(&mut self) -> u32 {
         if let Some(inner) = self.inner.as_mut() {
             inner.size()
         } else {
@@ -59,11 +64,9 @@ impl Segment {
         }
     }
 
-    async fn flush(&mut self) -> Result<()> {
+    pub async fn flush(&mut self) {
         if let Some(inner) = self.inner.as_mut() {
             inner.flush().await
-        } else {
-            Ok(())
         }
     }
 
@@ -133,8 +136,10 @@ impl Inner {
         Ok((timestamp, Bytes::from(buf)))
     }
 
-    async fn flush(&mut self) -> Result<()> {
-        self.writer.flush().await.map_err(Error::msg)
+    async fn flush(&mut self) {
+        if let Err(err) = self.writer.flush().await {
+            error!(cause = ?err, "flush error");
+        }
     }
 }
 
@@ -174,7 +179,7 @@ mod tests {
         }
         assert_eq!(position, segment.size());
 
-        segment.flush().await.unwrap();
+        segment.flush().await;
         for i in (0u32..RECORDS).rev() {
             let (t, b) = segment
                 .read(HEADER_SIZE * i + PAYLOAD_SIZE * i)
@@ -193,7 +198,7 @@ mod tests {
             ret
         );
 
-        segment.flush().await.unwrap();
+        segment.flush().await;
         let (t, b) = segment
             .read(HEADER_SIZE * 100 + PAYLOAD_SIZE * 100)
             .await
