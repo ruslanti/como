@@ -85,7 +85,6 @@ impl Inner {
             .await?;
         let metadata = file.metadata().await?;
         trace!("segment log open: {:?}", file);
-
         let buf = BufWriter::new(file);
 
         Ok(Inner {

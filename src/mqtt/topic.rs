@@ -346,20 +346,20 @@ impl Topic {
         }
     }
 
-    fn path(parent: Root, prefix: &str) -> String {
+    fn path(parent: Root, name: &str) -> String {
         match parent {
             Root::Name(parent) => {
                 let mut path = parent.to_string();
                 path.push('/');
-                path.push_str(prefix);
+                path.push_str(name);
                 path
             }
             Root::Dollar => {
                 let mut path = "$".to_string();
-                path.push_str(prefix);
+                path.push_str(name);
                 path
             }
-            Root::None => prefix.to_string(),
+            Root::None => name.to_string(),
         }
     }
 
