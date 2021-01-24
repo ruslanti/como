@@ -1,8 +1,8 @@
 use std::borrow::Borrow;
 use std::collections::{HashMap, VecDeque};
 
-use anyhow::{anyhow, bail, Error, Result};
-use tracing::{debug, error, info, instrument, trace, warn};
+use anyhow::{anyhow, Result};
+use tracing::{debug, instrument};
 
 use crate::mep::subscription::Subscription;
 use crate::mep::topic::{Publisher, Topic};

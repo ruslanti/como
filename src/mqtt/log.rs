@@ -1,14 +1,12 @@
+use anyhow::{anyhow, Error, Result};
+use bytes::Bytes;
 use std::borrow::Borrow;
 use std::cmp::Ordering::Greater;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-use anyhow::{anyhow, Error, Result};
-use bytes::Bytes;
-use futures::TryFutureExt;
 use tokio::fs;
-use tokio::stream::StreamExt;
+use tokio_stream::StreamExt;
 use tracing::{debug, trace};
 
 use crate::mqtt::index::Index;

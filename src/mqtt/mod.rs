@@ -1,11 +1,6 @@
 pub mod connection;
 pub mod context;
-//mod partition;
 pub mod proto;
-//mod segment;
-mod index;
-mod log;
-mod segment;
 pub mod service;
 mod session;
 mod shutdown;

@@ -5,8 +5,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Error, Result};
-use tokio::stream::StreamExt;
-use tokio::sync::broadcast::error::RecvError::Lagged;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::timeout;
@@ -208,18 +206,19 @@ impl Session {
         trace!("start");
 
         // subscribe to root topic for new topic creation
-        let new_topic_stream = self
+        /*        let new_topic_stream = self
             .topic_manager
             .read()
             .await
             .subscribe_channel()
             .into_stream();
-        tokio::pin!(new_topic_stream);
+        tokio::pin!(new_topic_stream);*/
         let (subscription_event_tx, mut subscription_event_rx) = mpsc::channel(32);
 
         loop {
             tokio::select! {
-                res = timeout(self.expire_interval, connection_context_rx.next()), if self.connection.is_none()  => {
+                res = timeout(self.expire_interval, connection_context_rx.recv()), if self
+                .connection.is_none()  => {
                     match res {
                         Ok(Some((connection_reply_tx, prop, will, clean_start))) => {
                             debug!("new connection context");
@@ -239,7 +238,7 @@ impl Session {
                         }
                     }
                 }
-                Some(msg) = session_event_rx.next(), if self.connection.is_some() => {
+                Some(msg) = session_event_rx.recv(), if self.connection.is_some() => {
                     trace!("session event: {:?}", msg);
                     match msg {
                         SessionEvent::Publish(p) => self.publish(p).await?,
@@ -260,7 +259,7 @@ impl Session {
                         }
                     }
                 },
-                Some(event) = new_topic_stream.next() => {
+                /*Some(event) = new_topic_stream.next() => {
                     match event {
                         Ok((topic, topic_tx, retained)) => {
                             trace!("new topic event {:?}", topic);
@@ -292,8 +291,9 @@ impl Session {
                             warn!(cause = ?err, "new topic event error: ");
                         }
                     }
-                }
-                Some((topic_filter, option, message)) = subscription_event_rx.next(), if self.connection.is_some() => {
+                }*/
+                Some((topic_filter, option, message)) = subscription_event_rx.recv(), if self
+                .connection.is_some() => {
                     trace!("subscription publish topic: {}, message: {:?}", topic_filter, message);
                     self.publish_client(option, message).await?
                 },
@@ -517,11 +517,11 @@ impl Session {
                                     Subscription::new(self.id.to_owned(), option.to_owned(), tx.clone());
                                 subscriptions.push(unsubscribe_tx);
 
-                                tokio::spawn(async move {
+                                /*                                tokio::spawn(async move {
                                     subscription
-                                        .subscribe(topic.to_owned(), channel.into_stream(), unsubscribe_rx)
+                                        .subscribe(topic.to_owned(), channel, unsubscribe_rx)
                                         .await
-                                });
+                                });*/
 
                                 if let Some(retained) = retained_msg.borrow().clone() {
                                     if retained.retain || retained.ts > self.created {

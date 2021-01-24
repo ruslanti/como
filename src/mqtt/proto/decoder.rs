@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 
 use anyhow::{anyhow, ensure, Context, Result};
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::Decoder;
 use tracing::{instrument, trace};
 
@@ -50,32 +50,35 @@ impl Decoder for MQTTCodec {
                     return Ok(None);
                 }
                 self.part = PacketPart::FixedHeader;
-                let mut packet = reader.split_to(remaining);
+                let mut packet = reader.split_to(remaining).freeze();
                 match packet_type {
-                    PacketType::CONNECT => decode_connect(&mut packet),
-                    PacketType::CONNACK => decode_connack(&mut packet),
+                    PacketType::CONNECT => decode_connect(packet),
+                    PacketType::CONNACK => decode_connack(packet),
                     PacketType::PUBLISH { dup, qos, retain } => {
-                        decode_publish(dup, qos, retain, &mut packet)
+                        decode_publish(dup, qos, retain, packet)
                     }
-                    PacketType::PUBACK => decode_puback(&mut packet),
-                    PacketType::PUBREC => decode_pubrec(&mut packet),
-                    PacketType::PUBREL => decode_pubrel(&mut packet),
-                    PacketType::PUBCOMP => decode_pubcomp(&mut packet),
-                    PacketType::SUBSCRIBE => decode_subscribe(&mut packet),
+                    PacketType::PUBACK => decode_puback(packet),
+                    PacketType::PUBREC => decode_pubrec(packet),
+                    PacketType::PUBREL => decode_pubrel(packet),
+                    PacketType::PUBCOMP => decode_pubcomp(packet),
+                    PacketType::SUBSCRIBE => decode_subscribe(packet),
                     PacketType::SUBACK => unimplemented!(),
-                    PacketType::UNSUBSCRIBE => decode_unsubscribe(&mut packet),
+                    PacketType::UNSUBSCRIBE => decode_unsubscribe(packet),
                     PacketType::UNSUBACK => unimplemented!(),
                     PacketType::PINGREQ => Ok(Some(ControlPacket::PingReq)),
                     PacketType::PINGRESP => Ok(Some(ControlPacket::PingResp)),
-                    PacketType::DISCONNECT => decode_disconnect(&mut packet),
-                    PacketType::AUTH => decode_auth(&mut packet),
+                    PacketType::DISCONNECT => decode_disconnect(packet),
+                    PacketType::AUTH => decode_auth(packet),
                 }
             }
         }
     }
 }
 
-pub fn decode_variable_integer(reader: &mut BytesMut) -> Result<u32> {
+pub fn decode_variable_integer<T>(reader: &mut T) -> Result<u32>
+where
+    T: Buf,
+{
     let mut multiplier = 1;
     let mut value = 0;
     loop {
@@ -94,12 +97,12 @@ pub fn decode_variable_integer(reader: &mut BytesMut) -> Result<u32> {
     Ok(value)
 }
 
-pub fn decode_utf8_string(reader: &mut BytesMut) -> Result<Option<MqttString>> {
+pub fn decode_utf8_string(reader: &mut Bytes) -> Result<Option<MqttString>> {
     if reader.remaining() >= 2 {
         let len = reader.get_u16() as usize;
         if reader.remaining() >= len {
             if len > 0 {
-                Ok(Some(reader.split_to(len).to_bytes()))
+                Ok(Some(reader.split_to(len)))
             } else {
                 Ok(None)
             }

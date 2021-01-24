@@ -3,7 +3,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
 use native_tls::Identity;
 use native_tls::TlsAcceptor;
 use tokio::net::TcpListener;
@@ -64,7 +63,7 @@ async fn main() -> Result<()> {
     let context = Arc::new(Mutex::new(AppContext::new(settings.clone(), context_tx)));
     let context_cleaner = context.clone();
     tokio::spawn(async move {
-        while let Some(s) = context_rx.next().await {
+        while let Some(s) = context_rx.recv().await {
             let mut context = context_cleaner.lock().await;
             context.clean(s);
         }

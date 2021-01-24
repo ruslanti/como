@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 
 use anyhow::{anyhow, bail, ensure, Result};
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::mqtt::proto::property::{ConnectProperties, PropertiesBuilder, Property};
@@ -11,8 +11,8 @@ use crate::mqtt::proto::will::decode_will_properties;
 const MQTT: &str = "MQTT";
 const VERSION: u8 = 5;
 
-pub fn decode_connect(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
-    if Some(Bytes::from(MQTT)) != decode_utf8_string(reader)? {
+pub fn decode_connect(mut reader: Bytes) -> Result<Option<ControlPacket>> {
+    if Some(Bytes::from(MQTT)) != decode_utf8_string(&mut reader)? {
         bail!("wrong protocol name");
     }
     end_of_stream!(reader.remaining() < 4, "connect version");
@@ -30,16 +30,16 @@ pub fn decode_connect(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
 
     let keep_alive = reader.get_u16();
 
-    let properties_length = decode_variable_integer(reader)? as usize;
-    let properties = decode_connect_properties(&mut reader.split_to(properties_length))?;
+    let properties_length = decode_variable_integer(&mut reader)? as usize;
+    let properties = decode_connect_properties(reader.split_to(properties_length))?;
 
-    let client_identifier = decode_utf8_string(reader)?;
+    let client_identifier = decode_utf8_string(&mut reader)?;
 
     let will = if will_flag {
-        let will_properties_length = decode_variable_integer(reader)? as usize;
-        let properties = decode_will_properties(&mut reader.split_to(will_properties_length))?;
-        let topic = decode_utf8_string(reader)?.unwrap();
-        let payload = reader.split().to_bytes();
+        let will_properties_length = decode_variable_integer(&mut reader)? as usize;
+        let properties = decode_will_properties(reader.split_to(will_properties_length))?;
+        let topic = decode_utf8_string(&mut reader)?.unwrap();
+        let payload = reader;
         Some(Will {
             qos: will_qos_flag,
             retain: will_retain_flag,
@@ -51,33 +51,35 @@ pub fn decode_connect(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
         None
     };
 
-    let username = if username_flag {
-        decode_utf8_string(reader)?
-    } else {
-        None
-    };
+    /*
+        TODO: get username and password
+        let username = if username_flag {
+            decode_utf8_string(&mut reader)?
+        } else {
+            None
+        };
 
-    let password = if password_flag {
-        decode_utf8_string(reader)?
-    } else {
-        None
-    };
-
+        let password = if password_flag {
+            decode_utf8_string(&mut reader)?
+        } else {
+            None
+        };
+    */
     Ok(Some(ControlPacket::Connect(Connect {
         clean_start_flag,
         keep_alive,
         properties,
         client_identifier,
-        username,
-        password,
+        username: None,
+        password: None,
         will,
     })))
 }
 
-fn decode_connect_properties(reader: &mut BytesMut) -> Result<ConnectProperties> {
+fn decode_connect_properties(mut reader: Bytes) -> Result<ConnectProperties> {
     let mut builder = PropertiesBuilder::new();
     while reader.has_remaining() {
-        let id = decode_variable_integer(reader)?;
+        let id = decode_variable_integer(&mut reader)?;
         match id.try_into()? {
             Property::SessionExpireInterval => {
                 end_of_stream!(reader.remaining() < 4, "session expire interval");
@@ -104,13 +106,16 @@ fn decode_connect_properties(reader: &mut BytesMut) -> Result<ConnectProperties>
                 builder = builder.request_problem_information(reader.get_u8())?;
             }
             Property::UserProperty => {
-                let user_property = (decode_utf8_string(reader)?, decode_utf8_string(reader)?);
+                let user_property = (
+                    decode_utf8_string(&mut reader)?,
+                    decode_utf8_string(&mut reader)?,
+                );
                 if let (Some(key), Some(value)) = user_property {
                     builder = builder.user_properties((key, value));
                 }
             }
             Property::AuthenticationMethod => {
-                if let Some(authentication_method) = decode_utf8_string(reader)? {
+                if let Some(authentication_method) = decode_utf8_string(&mut reader)? {
                     builder = builder.authentication_method(authentication_method)?
                 } else {
                     bail!("missing authentication method");

@@ -1,15 +1,12 @@
 use std::borrow::Borrow;
 use std::collections::HashMap;
 
-use anyhow::{anyhow, bail, Error, Result};
-use futures::task::{Context, Poll};
-use futures::{Future, StreamExt};
+use anyhow::{anyhow, Error, Result};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{info, instrument, trace, warn};
 
-use crate::mep::subscription::Subscription;
 use crate::mep::topic::TopicCommand::{Get, Push};
 use crate::mep::Root;
 

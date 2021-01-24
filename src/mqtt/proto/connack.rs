@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 
 use anyhow::{anyhow, bail, ensure, Result};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
@@ -9,13 +9,13 @@ use crate::mqtt::proto::encoder::encode_utf8_string;
 use crate::mqtt::proto::property::*;
 use crate::mqtt::proto::types::{ConnAck, ControlPacket, MQTTCodec};
 
-pub fn decode_connack(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
+pub fn decode_connack(mut reader: Bytes) -> Result<Option<ControlPacket>> {
     end_of_stream!(reader.remaining() < 3, "connack flags");
     let flags = reader.get_u8();
     let session_present = (flags & 0b00000001) != 0;
     let reason_code = reader.get_u8().try_into()?;
-    let properties_length = decode_variable_integer(reader)? as usize;
-    let properties = decode_connack_properties(&mut reader.split_to(properties_length))?;
+    let properties_length = decode_variable_integer(&mut reader)? as usize;
+    let properties = decode_connack_properties(reader.split_to(properties_length))?;
     Ok(Some(ControlPacket::ConnAck(ConnAck {
         session_present,
         reason_code,
@@ -23,10 +23,10 @@ pub fn decode_connack(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
     })))
 }
 
-pub fn decode_connack_properties(reader: &mut BytesMut) -> Result<ConnAckProperties> {
+pub fn decode_connack_properties(mut reader: Bytes) -> Result<ConnAckProperties> {
     let mut builder = PropertiesBuilder::new();
     while reader.has_remaining() {
-        let id = decode_variable_integer(reader)?;
+        let id = decode_variable_integer(&mut reader)?;
         match id.try_into()? {
             Property::SessionExpireInterval => {
                 end_of_stream!(reader.remaining() < 4, "session expire interval");
@@ -54,10 +54,13 @@ pub fn decode_connack_properties(reader: &mut BytesMut) -> Result<ConnAckPropert
                 builder = builder.topic_alias_maximum(reader.get_u16())?;
             }
             Property::ReasonString => {
-                builder = builder.response_topic(decode_utf8_string(reader)?)?;
+                builder = builder.response_topic(decode_utf8_string(&mut reader)?)?;
             }
             Property::UserProperty => {
-                let user_property = (decode_utf8_string(reader)?, decode_utf8_string(reader)?);
+                let user_property = (
+                    decode_utf8_string(&mut reader)?,
+                    decode_utf8_string(&mut reader)?,
+                );
                 if let (Some(key), Some(value)) = user_property {
                     builder = builder.user_properties((key, value));
                 }

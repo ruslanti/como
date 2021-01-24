@@ -337,7 +337,7 @@ async fn send<S>(mut sink: S, mut reply: Receiver<ControlPacket>) -> Result<()>
 where
     S: Sink<ControlPacket> + Unpin,
 {
-    while let Some(msg) = reply.next().await {
+    while let Some(msg) = reply.recv().await {
         trace!("{:?}", msg);
         if let Err(_err) = sink.send(msg).await {
             bail!("socket send error");

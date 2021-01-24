@@ -1,5 +1,4 @@
 use anyhow::{bail, Result};
-use tokio::stream::{Stream, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::error::RecvError::Lagged;
 use tokio::sync::{mpsc, oneshot};
@@ -7,6 +6,7 @@ use tracing::{debug, field, instrument, trace, warn};
 
 use crate::mqtt::proto::types::SubscriptionOptions;
 use crate::mqtt::topic::Message;
+use futures::{Stream, StreamExt};
 
 pub(crate) type SessionSender = mpsc::Sender<(String, SubscriptionOptions, Message)>;
 

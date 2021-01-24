@@ -80,7 +80,7 @@ impl Service {
     async fn listen(&mut self) -> Result<()> {
         info!("accepting inbound connections");
         loop {
-            self.limit_connections.acquire().await.forget();
+            self.limit_connections.acquire().await?.forget();
 
             let stream = self.accept().await?;
 

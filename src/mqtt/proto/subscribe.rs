@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 
 use anyhow::{anyhow, bail, ensure, Result};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::mqtt::proto::encoder::encode_utf8_string;
@@ -12,11 +12,11 @@ use crate::mqtt::proto::types::{
     ControlPacket, MqttString, QoS, Retain, Subscribe, SubscriptionOptions,
 };
 
-pub fn decode_subscribe(reader: &mut BytesMut) -> Result<Option<ControlPacket>> {
+pub fn decode_subscribe(mut reader: Bytes) -> Result<Option<ControlPacket>> {
     end_of_stream!(reader.remaining() < 2, "subscribe packet identifier");
     let packet_identifier = reader.get_u16();
-    let properties_length = decode_variable_integer(reader)? as usize;
-    let properties = decode_subscribe_properties(&mut reader.split_to(properties_length))?;
+    let properties_length = decode_variable_integer(&mut reader)? as usize;
+    let properties = decode_subscribe_properties(reader.split_to(properties_length))?;
     let topic_filter = decode_subscribe_payload(reader)?;
     Ok(Some(ControlPacket::Subscribe(Subscribe {
         packet_identifier,
@@ -25,17 +25,20 @@ pub fn decode_subscribe(reader: &mut BytesMut) -> Result<Option<ControlPacket>> 
     })))
 }
 
-pub fn decode_subscribe_properties(reader: &mut BytesMut) -> Result<SubscribeProperties> {
+pub fn decode_subscribe_properties(mut reader: Bytes) -> Result<SubscribeProperties> {
     let mut builder = PropertiesBuilder::new();
     while reader.has_remaining() {
-        let id = decode_variable_integer(reader)?;
+        let id = decode_variable_integer(&mut reader)?;
         match id.try_into()? {
             Property::SubscriptionIdentifier => {
                 end_of_stream!(reader.remaining() < 4, "subscription identifier");
-                builder = builder.subscription_identifier(decode_variable_integer(reader)?)?;
+                builder = builder.subscription_identifier(decode_variable_integer(&mut reader)?)?;
             }
             Property::UserProperty => {
-                let user_property = (decode_utf8_string(reader)?, decode_utf8_string(reader)?);
+                let user_property = (
+                    decode_utf8_string(&mut reader)?,
+                    decode_utf8_string(&mut reader)?,
+                );
                 if let (Some(key), Some(value)) = user_property {
                     builder = builder.user_properties((key, value));
                 }
@@ -47,11 +50,11 @@ pub fn decode_subscribe_properties(reader: &mut BytesMut) -> Result<SubscribePro
 }
 
 pub fn decode_subscribe_payload(
-    reader: &mut BytesMut,
+    mut reader: Bytes,
 ) -> Result<Vec<(MqttString, SubscriptionOptions)>> {
     let mut topic_filter = vec![];
     while reader.has_remaining() {
-        if let Some(topic) = decode_utf8_string(reader)? {
+        if let Some(topic) = decode_utf8_string(&mut reader)? {
             end_of_stream!(reader.remaining() < 1, "subscription option");
             let subscription_option = reader.get_u8();
             let qos: QoS = (subscription_option & 0b00000011).try_into()?;
