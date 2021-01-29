@@ -1,6 +1,6 @@
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
-
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, instrument, warn};
@@ -19,12 +19,17 @@ pub(crate) struct AppContext {
 
 impl AppContext {
     pub fn new(config: Arc<Settings>, tx: mpsc::Sender<String>) -> Self {
+        let path = config.topic.path.to_owned();
         Self {
             sessions: HashMap::new(),
             config,
-            topic_manager: Arc::new(RwLock::new(TopicManager::new())),
+            topic_manager: Arc::new(RwLock::new(TopicManager::new(path))),
             tx,
         }
+    }
+
+    pub async fn load(&mut self) -> Result<()> {
+        self.topic_manager.write().await.load().await
     }
 
     #[instrument(skip(self))]

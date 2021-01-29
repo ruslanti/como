@@ -61,6 +61,8 @@ async fn main() -> Result<()> {
 
     let (context_tx, mut context_rx) = mpsc::channel(32);
     let context = Arc::new(Mutex::new(AppContext::new(settings.clone(), context_tx)));
+    context.lock().await.load().await?;
+
     let context_cleaner = context.clone();
     tokio::spawn(async move {
         while let Some(s) = context_rx.recv().await {
