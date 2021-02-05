@@ -1,14 +1,14 @@
 use anyhow::{bail, Result};
+use futures::{Stream, StreamExt};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::error::RecvError::Lagged;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, field, instrument, trace, warn};
 
 use crate::mqtt::proto::types::SubscriptionOptions;
-use crate::mqtt::topic::Message;
-use futures::{Stream, StreamExt};
+use crate::mqtt::topic::TopicMessage;
 
-pub(crate) type SessionSender = mpsc::Sender<(String, SubscriptionOptions, Message)>;
+pub(crate) type SessionSender = mpsc::Sender<(String, SubscriptionOptions, TopicMessage)>;
 
 #[derive(Debug)]
 pub(crate) struct Subscription {
@@ -37,7 +37,7 @@ impl Subscription {
         stream: S,
         unsubscribe_rx: oneshot::Receiver<()>,
     ) where
-        S: Stream<Item = Result<Message, RecvError>>,
+        S: Stream<Item = Result<TopicMessage, RecvError>>,
     {
         tokio::pin!(stream);
         trace!("start");
@@ -54,7 +54,7 @@ impl Subscription {
 
     async fn subscription_stream<S>(&self, topic: String, mut stream: S) -> Result<()>
     where
-        S: Stream<Item = Result<Message, RecvError>> + Unpin,
+        S: Stream<Item = Result<TopicMessage, RecvError>> + Unpin,
     {
         while let Some(event) = stream.next().await {
             match event {

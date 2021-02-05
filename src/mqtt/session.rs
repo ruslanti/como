@@ -18,7 +18,7 @@ use crate::mqtt::proto::types::{
     SubscriptionOptions, UnSubscribe, Will,
 };
 use crate::mqtt::subscription::{SessionSender, Subscription};
-use crate::mqtt::topic::{Message, TopicManager};
+use crate::mqtt::topic::{TopicManager, TopicMessage};
 use crate::settings::Settings;
 
 pub(crate) type ConnectionContextState =
@@ -65,38 +65,15 @@ async fn publish_topic(root: Arc<RwLock<TopicManager>>, msg: Publish) -> Result<
     let mut topic_manager = root.write().await;
     let topic = std::str::from_utf8(&msg.topic_name[..])?;
 
-    let new_topic_channel = topic_manager.new_topic_channel();
-    let channel = topic_manager.publish(topic, |name, channel| {
-        let message = Message {
-            ts: Instant::now(),
-            retain: msg.retain,
-            qos: msg.qos,
-            topic_name: msg.topic_name.clone(),
-            properties: msg.properties.clone(),
-            payload: msg.payload.clone(),
-        };
-
-        let new_topic = (name, channel, message);
-        new_topic_channel
-            .send(new_topic)
-            .map_err(|e| anyhow!("{:?}", e))
-            .map(|size| trace!("publish new topic channel send {} message", size))
-            .unwrap()
-    })?;
-
-    let message = Message {
+    let message = TopicMessage {
         ts: Instant::now(),
         retain: msg.retain,
         qos: msg.qos,
-        topic_name: msg.topic_name,
         properties: msg.properties,
         payload: msg.payload,
     };
 
-    channel
-        .send(message)
-        .map_err(|e| anyhow!("{:?}", e))
-        .map(|size| trace!("publish topic channel send {} message", size))
+    topic_manager.publish(topic, message).await
 }
 
 #[instrument(skip(rx, connection_reply_tx), err)]
@@ -313,7 +290,11 @@ impl Session {
     }
 
     #[instrument(skip(self), fields(identifier = field::display(& self.id)), err)]
-    async fn publish_client(&mut self, option: SubscriptionOptions, msg: Message) -> Result<()> {
+    async fn publish_client(
+        &mut self,
+        option: SubscriptionOptions,
+        msg: TopicMessage,
+    ) -> Result<()> {
         match &self.connection {
             Some((connection_reply_tx, properties, _, _)) => {
                 let packet_identifier = self.packet_identifier_seq.clone();
@@ -333,7 +314,7 @@ impl Session {
                     dup: false,
                     qos,
                     retain: msg.retain,
-                    topic_name: msg.topic_name,
+                    topic_name: Default::default(),
                     packet_identifier,
                     properties: msg.properties,
                     payload: msg.payload,

@@ -1,43 +1,40 @@
-use std::collections::VecDeque;
-use std::collections::{BTreeMap, HashMap};
+use std::borrow::{Borrow, BorrowMut};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::fmt;
+use std::fmt::Debug;
+use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
+use futures::TryFutureExt;
+use persy::{Config, Persy, PersyId, ValueMode};
+use tokio::io::AsyncBufReadExt;
 use tokio::sync::broadcast::error::RecvError::Lagged;
 use tokio::sync::{broadcast, watch};
+use tokio_stream::StreamExt;
 use tracing::{debug, error, instrument, trace, warn};
 
 use crate::mqtt::proto::property::PublishProperties;
-use crate::mqtt::proto::types::{MqttString, QoS};
-use crate::settings::TopicSettings;
-use persy::{Config, Persy, PersyId, ValueMode};
-use std::borrow::{Borrow, BorrowMut};
-use std::fmt;
-use std::fmt::Debug;
-use std::path::{Component, Components, Path, PathBuf};
-use std::rc::Rc;
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader, BufWriter};
+use crate::mqtt::proto::types::QoS;
 
 #[derive(Debug, Clone)]
-pub(crate) struct Message {
+pub(crate) struct TopicMessage {
     pub ts: Instant,
     pub retain: bool,
     pub qos: QoS,
-    pub topic_name: MqttString,
     pub properties: PublishProperties,
     pub payload: Bytes,
 }
 
-pub(crate) type NewTopicEvent = (String, TopicSender, Message);
+pub(crate) type NewTopicEvent = (String, TopicSender, TopicMessage);
 type NewTopicSender = broadcast::Sender<NewTopicEvent>;
 type NewTopicReceiver = broadcast::Receiver<NewTopicEvent>;
 
-pub(crate) type TopicSender = broadcast::Sender<Message>;
-pub(crate) type TopicReceiver = broadcast::Receiver<Message>;
+pub(crate) type TopicSender = broadcast::Sender<TopicMessage>;
+pub(crate) type TopicReceiver = broadcast::Receiver<TopicMessage>;
 
-type TopicRetainEvent = Option<Message>;
+type TopicRetainEvent = Option<TopicMessage>;
 pub(crate) type TopicRetainReceiver = watch::Receiver<TopicRetainEvent>;
 type TopicRetainSender = watch::Sender<TopicRetainEvent>;
 
@@ -55,15 +52,19 @@ struct Topic {
 }
 
 struct Node {
+    topic: Topic,
     siblings: BTreeMap<String, Self>,
 }
 
+type NodesCollection = BTreeMap<String, Node>;
+
 pub struct TopicManager {
     path: PathBuf,
-    metadata: Option<File>,
     topic_tx: NewTopicSender,
-    topics: HashMap<String, Topic>,
-    nodes: BTreeMap<RootType, Node>,
+    topics: HashMap<String, TopicSender>,
+    root_nodes: NodesCollection,
+    dollar_nodes: NodesCollection,
+    nodes: NodesCollection,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -75,18 +76,27 @@ enum MatchState<'a> {
 }
 
 impl Node {
-    fn add(&mut self, mut components: Components) -> Result<()> {
+    async fn get(
+        &mut self,
+        path: impl AsRef<Path>,
+        topic_name: impl AsRef<Path>,
+    ) -> Result<&Topic> {
+        let mut components = topic_name.as_ref().components();
         if let Some(component) = components.next() {
             if let Component::Normal(name) = component {
                 let name = name.to_str().ok_or(anyhow!("invalid os str"))?;
                 if name.strip_prefix('$').is_none() {
-                    let node = self
-                        .siblings
-                        .entry(name.to_owned())
-                        .or_insert_with(|| Self {
+                    let path = path.as_ref().to_path_buf().join(name);
+                    let node = if self.siblings.contains_key(name) {
+                        self.siblings.get_mut(name).unwrap()
+                    } else {
+                        let topic = Topic::load(path.join(name)).await?;
+                        self.siblings.entry(name.to_owned()).or_insert(Node {
+                            topic,
                             siblings: Default::default(),
-                        });
-                    node.add(components)
+                        })
+                    };
+                    node.get(path, components.as_path().to_path_buf()).await
                 } else {
                     Err(anyhow!("Invalid leading $ character: {}", name))
                 }
@@ -94,7 +104,7 @@ impl Node {
                 Err(anyhow!("invalid os str"))
             }
         } else {
-            Ok(())
+            Ok(self.topic.borrow())
         }
     }
 }
@@ -109,67 +119,117 @@ impl TopicManager {
 
         Self {
             path: path.as_ref().to_owned(),
-            metadata: None,
             topic_tx,
             topics: Default::default(),
+
+            root_nodes: Default::default(),
+            dollar_nodes: Default::default(),
             nodes: Default::default(),
         }
     }
 
     pub(crate) async fn load(&mut self) -> Result<()> {
-        let mut metadata = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(self.path.join("topics.db"))
-            .await?;
-        // read topic metadata file
-        let buf = BufReader::new(metadata.borrow_mut());
-        let mut lines = buf.lines();
-        while let Some(line) = lines.next_line().await? {
-            let err = Err(anyhow!("invalid topic meta entry: {}", line));
-            let mut splits = line.split_ascii_whitespace();
-            let (name, log) = match splits.next() {
-                Some(topic) => match splits.next() {
-                    Some(log) => (topic.to_owned(), self.path.join(log)),
-                    None => return err,
-                },
-                None => return err,
-            };
-            let topic = Topic::new(log);
-            self.add_node(name.as_str(), topic.borrow());
-            if let Some(dup) = self.topics.insert(name, topic) {
-                return Err(anyhow!("duplicate topic: {:?}", dup));
-            }
-        }
+        TopicManager::load_inner(self.path.join("01"), self.root_nodes.borrow_mut()).await?;
+        TopicManager::load_inner(self.path.join("02"), self.dollar_nodes.borrow_mut()).await?;
+        TopicManager::load_inner(self.path.join("03"), self.nodes.borrow_mut()).await?;
+        /*
+                let mut metadata = OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(self.path.join("topics.db"))
+                    .await?;
+                // read topic metadata file
+                let buf = BufReader::new(metadata.borrow_mut());
+                let mut lines = buf.lines();
+                while let Some(line) = lines.next_line().await? {
+                    let err = Err(anyhow!("invalid topic meta entry: {}", line));
+                    let mut splits = line.split_ascii_whitespace();
+                    let (topic_name, log) = match splits.next() {
+                        Some(topic_name) => match splits.next() {
+                            Some(log) => (topic_name, self.path.join(log)),
+                            None => return err,
+                        },
+                        None => return err,
+                    };
+                    let topic = Topic::new(log);
+                    self.get(topic_name, topic.borrow())?;
+                    if let Some(_) = self.topics.insert(topic_name.to_owned(), topic) {
+                        return Err(anyhow!("duplicate topic: {:?}", topic_name));
+                    }
+                }
 
-        self.metadata = Some(metadata);
-
+        */
         Ok(())
     }
 
-    fn add_node(&mut self, topic_name: impl AsRef<Path>, topic: &Topic) -> Result<()> {
+    async fn load_inner(path: impl AsRef<Path>, nodes: &NodesCollection) -> Result<()> {
+        if let Ok(mut entries) = tokio::fs::read_dir(path.as_ref()).await {
+            while let Some(entry) = entries.next_entry().await? {
+                if let Ok(file_type) = entry.file_type().await {
+                    if file_type.is_dir() {
+                        debug!(
+                            "topic {:?}",
+                            entry
+                                .file_name()
+                                .to_str()
+                                .ok_or(anyhow!("invalid os str"))?
+                        );
+                    }
+                } else {
+                    warn!("Couldn't get file type for {:?}", entry.path());
+                }
+            }
+        } else {
+            trace!("create dir: {:?}", path.as_ref());
+            tokio::fs::create_dir(path).map_err(Error::msg).await?;
+        }
+        Ok(())
+    }
+
+    async fn get(&mut self, topic_name: impl AsRef<Path>) -> Result<&Topic> {
         let mut components = topic_name.as_ref().components();
         if let Some(component) = components.next() {
-            let node_type = match component {
-                Component::RootDir => RootType::None,
+            let (nodes, path, name) = match component {
+                Component::RootDir => {
+                    if let Some(component) = components.next() {
+                        match component {
+                            Component::Normal(name) => {
+                                let name = name.to_str().ok_or(anyhow!("invalid os str"))?;
+                                if name.strip_prefix('$').is_none() {
+                                    (self.root_nodes.borrow_mut(), self.path.join("01"), name)
+                                } else {
+                                    return Err(anyhow!("Invalid leading $ character: {}", name));
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        return Err(anyhow!("empty root topic name"));
+                    }
+                }
                 Component::Normal(name) => {
                     let name = name.to_str().ok_or(anyhow!("invalid os str"))?;
                     if let Some(name) = name.strip_prefix('$') {
-                        RootType::Dollar(name.to_owned())
+                        (self.dollar_nodes.borrow_mut(), self.path.join("02"), name)
                     } else {
-                        RootType::Name(name.to_owned())
+                        (self.nodes.borrow_mut(), self.path.join("03"), name)
                     }
                 }
-                _ => {
-                    unreachable!()
-                }
+                _ => unreachable!(),
             };
-            let node = self.nodes.entry(node_type).or_insert_with(|| Node {
-                siblings: Default::default(),
-            });
-            node.add(components)
+
+            let node = if nodes.contains_key(name) {
+                nodes.get_mut(name).unwrap()
+            } else {
+                let topic = Topic::load(path.join(name)).await?;
+                nodes.entry(name.to_owned()).or_insert(Node {
+                    topic,
+                    siblings: Default::default(),
+                })
+            };
+            node.get(path, components.as_path().to_path_buf()).await
         } else {
-            Ok(())
+            Err(anyhow!("empty topic name"))
         }
     }
 
@@ -199,19 +259,19 @@ impl TopicManager {
         self.topic_tx.clone()
     }
 
-    #[instrument(skip(self, topic_name, new_topic_fn))]
-    pub(crate) fn publish<F>(
-        &mut self,
-        topic_name: impl AsRef<Path>,
-        new_topic_fn: F,
-    ) -> Result<TopicSender>
-    where
-        F: Fn(String, TopicSender),
-    {
-        println!("TOPIC NAME {}", topic_name.as_ref().display());
-        println!("TOPIC COMPONENTS {:?}", topic_name.as_ref().components());
-        let topic = Topic::new(topic_name);
-        Ok(topic.topic_tx.clone())
+    #[instrument(skip(self))]
+    pub(crate) async fn publish(&mut self, topic_name: &str, msg: TopicMessage) -> Result<()> {
+        let tx = if let Some(topic_tx) = self.topics.get(topic_name) {
+            topic_tx.clone()
+        } else {
+            let topic = self.get(topic_name).await?;
+            let topic_tx = topic.topic_tx.clone();
+            self.topics.insert(topic_name.to_owned(), topic_tx.clone());
+            topic_tx
+        };
+        tx.send(msg)
+            .map_err(|e| anyhow!("{:?}", e))
+            .map(|size| trace!("publish topic channel send {} message", size))
 
         /*if let Some(topic_name) = topic_name.strip_prefix('$') {
             let topic = self.topics.entry('$'.to_string()).or_insert_with(|| {
@@ -252,9 +312,10 @@ impl TopicManager {
     ) -> Vec<(PathBuf, TopicReceiver, TopicRetainReceiver)> {
         let pattern = Self::pattern(topic_filter);
         let mut res = Vec::new();
+        let path = PathBuf::new();
 
         let mut stack = VecDeque::new();
-        for (node_name, node) in self.topics.iter() {
+        for (node_name, node) in self.nodes.iter() {
             stack.push_back((0, node_name, node))
         }
 
@@ -268,64 +329,59 @@ impl TopicManager {
                         if name == pattern {
                             if (level + 1) == max_level {
                                 // FINAL
-                                res.push((
-                                    node.path.to_owned(),
-                                    node.topic_tx.subscribe(),
-                                    node.retained.clone(),
-                                ));
+                                /*                                res.push((
+                                                                    node.path.to_owned(),
+                                                                    node.topic_tx.subscribe(),
+                                                                    node.retained.clone(),
+                                                                ));
+                                */
                             }
 
                             for (node_name, node) in node.siblings.iter() {
-                                stack.push_back((level + 1, node_name, node))
+                                /*stack.push_back((level + 1, RootType::Name(node_name).borrow(), node))*/
                             }
                         }
                     }
                     MatchState::SingleLevel => {
                         //  println!("pattern + - level {:?}", level);
-                        if !name.starts_with('$') {
-                            if (level + 1) == max_level {
-                                // FINAL
-                                res.push((
-                                    node.path.to_owned(),
-                                    node.topic_tx.subscribe(),
-                                    node.retained.clone(),
-                                ));
-                                // println!("FOUND {}", name)
-                            }
+                        if (level + 1) == max_level {
+                            // FINAL
+                            /*                            res.push((
+                                node.path.to_owned(),
+                                node.topic_tx.subscribe(),
+                                node.retained.clone(),
+                            ));*/
+                            // println!("FOUND {}", name)
+                        }
 
-                            for (node_name, node) in node.siblings.iter() {
-                                stack.push_back((level + 1, node_name, node))
-                            }
+                        for (node_name, node) in node.siblings.iter() {
+                            /*stack.push_back((level + 1, RootType::Name(node_name), node))*/
                         }
                     }
                     MatchState::MultiLevel => {
                         //println!("pattern # - level {:?}", level);
-                        if !name.starts_with('$') {
-                            //  println!("FOUND {}", name);
-                            res.push((
-                                node.path.to_owned(),
-                                node.topic_tx.subscribe(),
-                                node.retained.clone(),
-                            ));
-                            for (node_name, node) in node.siblings.iter() {
-                                stack.push_back((level, node_name, node))
-                            }
+                        //  println!("FOUND {}", name);
+                        /*                        res.push((
+                            node.path.to_owned(),
+                            node.topic_tx.subscribe(),
+                            node.retained.clone(),
+                        ));*/
+                        for (node_name, node) in node.siblings.iter() {
+                            /*stack.push_back((level, RootType::Name(node_name), node))*/
                         }
                     }
                     MatchState::Dollar => {
-                        if name == "$" {
-                            if (level + 1) == max_level {
-                                // FINAL
-                                res.push((
-                                    node.path.to_owned(),
-                                    node.topic_tx.subscribe(),
-                                    node.retained.clone(),
-                                ));
-                            }
+                        if (level + 1) == max_level {
+                            // FINAL
+                            /*                            res.push((
+                                node.path.to_owned(),
+                                node.topic_tx.subscribe(),
+                                node.retained.clone(),
+                            ));*/
+                        }
 
-                            for (node_name, node) in node.siblings.iter() {
-                                stack.push_back((level + 1, node_name, node))
-                            }
+                        for (node_name, node) in node.siblings.iter() {
+                            /*stack.push_back((level + 1, RootType::Name(node_name), node))*/
                         }
                     }
                 }
@@ -414,11 +470,12 @@ impl TopicManager {
 }
 
 impl Topic {
-    fn new(path: impl AsRef<Path>) -> Self {
+    async fn load(path: impl AsRef<Path>) -> Result<Self> {
         let (topic_tx, topic_rx) = broadcast::channel(1024);
         let (retained_tx, retained_rx) = watch::channel(None);
-        debug!("create new \"{:?}\"", path.as_ref());
-        let log_path = path.as_ref().with_extension("db");
+        debug!("create new {:?}", path.as_ref());
+        tokio::fs::create_dir(path.as_ref()).await?;
+        let log_path = path.as_ref().join("data").with_extension("db");
         let log = Persy::open_or_create_with(log_path.as_path(), Config::new(), |log| {
             // this closure is only called on database creation
             let mut tx = log.begin()?;
@@ -435,16 +492,14 @@ impl Topic {
         tokio::spawn(async move {
             Self::topic(log_path, topic_rx, retained_tx).await;
         });
-        Self {
-            path: path.as_ref().to_owned(),
+        Ok(Self {
             topic_tx,
             retained: retained_rx,
-            siblings: HashMap::new(),
             log,
-        }
+        })
     }
 
-    #[instrument(skip(self, parent, new_topic_fn))]
+    /* #[instrument(skip(self, parent, new_topic_fn))]
     fn publish<F>(
         &mut self,
         parent: RootType,
@@ -474,7 +529,7 @@ impl Topic {
         } else {
             Err(anyhow!("Invalid leading $ character"))
         }
-    }
+    }*/
 
     fn path(parent: RootType, name: &str) -> String {
         match parent {
@@ -524,15 +579,16 @@ impl Topic {
 
 impl fmt::Debug for TopicManager {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.root.display())
-    }
-}
-
-impl fmt::Debug for Topic {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.path.display())
     }
 }
+
+/*impl fmt::Debug for Topic {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+*/
 
 #[cfg(test)]
 mod tests {
@@ -542,16 +598,16 @@ mod tests {
     async fn test_topic() {
         let mut root = TopicManager::new("./data");
         let handler = |name, _| println!("new topic: {}", name);
-        println!("topic: {:?}", root.publish("aaa", handler));
-        println!("topic: {:?}", root.publish("$aaa", handler));
-        println!("topic: {:?}", root.publish("/aaa", handler));
+        println!("topic: {:?}", root.publish("aaa"));
+        println!("topic: {:?}", root.publish("$aaa"));
+        println!("topic: {:?}", root.publish("/aaa"));
 
-        println!("topic: {:?}", root.publish("aaa/ddd", handler));
-        println!("topic: {:?}", root.publish("/aaa/bbb", handler));
-        println!("topic: {:?}", root.publish("/aaa/ccc", handler));
-        println!("topic: {:?}", root.publish("/aaa/ccc/", handler));
-        println!("topic: {:?}", root.publish("/aaa/bbb/ccc", handler));
-        println!("topic: {:?}", root.publish("ggg", handler));
+        println!("topic: {:?}", root.publish("aaa/ddd"));
+        println!("topic: {:?}", root.publish("/aaa/bbb"));
+        println!("topic: {:?}", root.publish("/aaa/ccc"));
+        println!("topic: {:?}", root.publish("/aaa/ccc/"));
+        println!("topic: {:?}", root.publish("/aaa/bbb/ccc"));
+        println!("topic: {:?}", root.publish("ggg"));
 
         //root.find("aaa/ddd");
         println!("subscribe: {:?}", root.subscribe("/aaa/#"));
