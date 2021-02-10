@@ -312,7 +312,7 @@ pub struct Will {
     pub payload: Bytes,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct Connect {
     pub clean_start_flag: bool,
     pub keep_alive: u16,
@@ -390,7 +390,7 @@ pub struct Auth {
     pub properties: AuthProperties,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub enum ControlPacket {
     Connect(Connect),
     ConnAck(ConnAck),
@@ -435,6 +435,50 @@ impl fmt::Debug for PacketPart {
                 .field("packet_type", &packet_type)
                 .finish(),
         }
+    }
+}
+
+impl fmt::Debug for ControlPacket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ControlPacket::Connect(m) => write!(f, "{:?}", m),
+            ControlPacket::ConnAck(m) => write!(f, "{:?}", m),
+            ControlPacket::Publish(m) => write!(f, "{:?}", m),
+            ControlPacket::PubAck(m) => write!(f, "{:?}", m),
+            ControlPacket::PubRec(m) => write!(f, "{:?}", m),
+            ControlPacket::PubRel(m) => write!(f, "{:?}", m),
+            ControlPacket::PubComp(m) => write!(f, "{:?}", m),
+            ControlPacket::Subscribe(m) => write!(f, "{:?}", m),
+            ControlPacket::SubAck(m) => write!(f, "{:?}", m),
+            ControlPacket::UnSubscribe(m) => write!(f, "{:?}", m),
+            ControlPacket::UnSubAck(m) => write!(f, "{:?}", m),
+            ControlPacket::PingReq => write!(f, "PINGREQ"),
+            ControlPacket::PingResp => write!(f, "PINGRESP"),
+            ControlPacket::Disconnect(m) => write!(f, "{:?}", m),
+            ControlPacket::Auth(m) => write!(f, "{:?}", m),
+        }
+    }
+}
+
+macro_rules! debug_field {
+    ($self:ident, $writer:ident, $property:ident) => {
+        if let Some(value) = &$self.$property {
+            let _ = $writer.field(stringify!($property), value);
+        }
+    };
+}
+
+impl fmt::Debug for Connect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("CONNECT");
+        debug_struct.field("clean_start", &self.clean_start_flag);
+        debug_struct.field("keep_alive", &self.keep_alive);
+        debug_field!(self, debug_struct, client_identifier);
+        if let Some(client_identifier) = &self.client_identifier {
+            debug_struct.field("client_identifier", client_identifier);
+        };
+        debug_struct.field("properties", &self.properties);
+        debug_struct.finish()
     }
 }
 

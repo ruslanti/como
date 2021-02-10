@@ -46,7 +46,6 @@ enum RootType {
 }
 
 struct Topic {
-    log: Persy,
     topic_tx: TopicSender,
     retained: TopicRetainReceiver,
 }
@@ -76,11 +75,7 @@ enum MatchState<'a> {
 }
 
 impl Node {
-    async fn get(
-        &mut self,
-        path: impl AsRef<Path>,
-        topic_name: impl AsRef<Path>,
-    ) -> Result<&Topic> {
+    fn get(&mut self, path: impl AsRef<Path>, topic_name: impl AsRef<Path>) -> Result<&Topic> {
         let mut components = topic_name.as_ref().components();
         if let Some(component) = components.next() {
             if let Component::Normal(name) = component {
@@ -90,13 +85,13 @@ impl Node {
                     let node = if self.siblings.contains_key(name) {
                         self.siblings.get_mut(name).unwrap()
                     } else {
-                        let topic = Topic::load(path.join(name)).await?;
+                        let topic = Topic::load(path.join(name))?;
                         self.siblings.entry(name.to_owned()).or_insert(Node {
                             topic,
                             siblings: Default::default(),
                         })
                     };
-                    node.get(path, components.as_path().to_path_buf()).await
+                    node.get(path, components.as_path().to_path_buf())
                 } else {
                     Err(anyhow!("Invalid leading $ character: {}", name))
                 }
@@ -221,13 +216,13 @@ impl TopicManager {
             let node = if nodes.contains_key(name) {
                 nodes.get_mut(name).unwrap()
             } else {
-                let topic = Topic::load(path.join(name)).await?;
+                let topic = Topic::load(path.join(name))?;
                 nodes.entry(name.to_owned()).or_insert(Node {
                     topic,
                     siblings: Default::default(),
                 })
             };
-            node.get(path, components.as_path().to_path_buf()).await
+            node.get(path, components.as_path().to_path_buf())
         } else {
             Err(anyhow!("empty topic name"))
         }
@@ -470,32 +465,16 @@ impl TopicManager {
 }
 
 impl Topic {
-    async fn load(path: impl AsRef<Path>) -> Result<Self> {
+    #[instrument]
+    fn load(path: impl AsRef<Path> + Debug + Send + Sync + 'static) -> Result<Self> {
         let (topic_tx, topic_rx) = broadcast::channel(1024);
         let (retained_tx, retained_rx) = watch::channel(None);
-        debug!("create new {:?}", path.as_ref());
-        tokio::fs::create_dir(path.as_ref()).await?;
-        let log_path = path.as_ref().join("data").with_extension("db");
-        let log = Persy::open_or_create_with(log_path.as_path(), Config::new(), |log| {
-            // this closure is only called on database creation
-            let mut tx = log.begin()?;
-            tx.create_segment("segment")?;
-            tx.create_index::<u64, PersyId>("index", ValueMode::EXCLUSIVE)?;
-            tx.create_index::<u64, PersyId>("timestamp", ValueMode::CLUSTER)?;
-            let prepared = tx.prepare()?;
-            prepared.commit()?;
-            debug!("Segment and Index successfully created");
-            Ok(())
-        })
-        .unwrap();
-
         tokio::spawn(async move {
-            Self::topic(log_path, topic_rx, retained_tx).await;
+            Self::topic(path, topic_rx, retained_tx).await;
         });
         Ok(Self {
             topic_tx,
             retained: retained_rx,
-            log,
         })
     }
 
@@ -549,11 +528,28 @@ impl Topic {
     }
 
     #[instrument(skip(rx, retained))]
-    async fn topic<P>(path: P, mut rx: TopicReceiver, retained: TopicRetainSender)
-    where
-        P: AsRef<Path> + Debug + Send,
-    {
+    async fn topic(
+        path: impl AsRef<Path> + Debug,
+        mut rx: TopicReceiver,
+        retained: TopicRetainSender,
+    ) {
         trace!("start");
+        debug!("create new {:?}", path.as_ref());
+        tokio::fs::create_dir(path.as_ref()).await.unwrap();
+        let log_path = path.as_ref().join("data").with_extension("db");
+        let log = Persy::open_or_create_with(log_path.as_path(), Config::new(), |log| {
+            // this closure is only called on database creation
+            let mut tx = log.begin()?;
+            tx.create_segment("segment")?;
+            tx.create_index::<u64, PersyId>("index", ValueMode::EXCLUSIVE)?;
+            tx.create_index::<u64, PersyId>("timestamp", ValueMode::CLUSTER)?;
+            let prepared = tx.prepare()?;
+            prepared.commit()?;
+            debug!("Segment and Index successfully created");
+            Ok(())
+        })
+        .unwrap();
+
         loop {
             match rx.recv().await {
                 Ok(msg) => {
