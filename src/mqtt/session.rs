@@ -289,7 +289,7 @@ impl Session {
             .collect()
     }
 
-    #[instrument(skip(self), fields(identifier = field::display(& self.id)), err)]
+    #[instrument(skip(self, msg), fields(identifier = field::display(& self.id)), err)]
     async fn publish_client(
         &mut self,
         option: SubscriptionOptions,

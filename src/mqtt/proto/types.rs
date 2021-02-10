@@ -323,14 +323,14 @@ pub struct Connect {
     pub will: Option<Will>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct ConnAck {
     pub session_present: bool,
     pub reason_code: ReasonCode,
     pub properties: ConnAckProperties,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct Publish {
     pub dup: bool,
     pub qos: QoS,
@@ -349,7 +349,7 @@ pub struct PubResp {
     pub properties: PubResProperties,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct Disconnect {
     pub reason_code: ReasonCode,
     pub properties: DisconnectProperties,
@@ -474,10 +474,36 @@ impl fmt::Debug for Connect {
         debug_struct.field("clean_start", &self.clean_start_flag);
         debug_struct.field("keep_alive", &self.keep_alive);
         debug_field!(self, debug_struct, client_identifier);
-        if let Some(client_identifier) = &self.client_identifier {
-            debug_struct.field("client_identifier", client_identifier);
-        };
-        debug_struct.field("properties", &self.properties);
+        //debug_struct.field("properties", &self.properties);
+        debug_struct.finish()
+    }
+}
+
+impl fmt::Debug for ConnAck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("CONNACK");
+        debug_struct.field("session_present", &self.session_present);
+        debug_struct.field("reason_code", &self.reason_code);
+        debug_struct.finish()
+    }
+}
+
+impl fmt::Debug for Publish {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("PUBLISH");
+        debug_struct.field("dup", &self.dup);
+        debug_struct.field("qos", &self.qos);
+        debug_struct.field("retain", &self.retain);
+        debug_field!(self, debug_struct, packet_identifier);
+        debug_struct.field("topic_name", &self.topic_name);
+        debug_struct.finish()
+    }
+}
+
+impl fmt::Debug for Disconnect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("DISCONNECT");
+        debug_struct.field("reason_code", &self.reason_code);
         debug_struct.finish()
     }
 }

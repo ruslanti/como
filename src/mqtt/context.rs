@@ -40,12 +40,12 @@ impl AppContext {
         }
     }
 
-    #[instrument(skip(self))]
+    //#[instrument(skip(self))]
     pub async fn connect(
         &mut self,
-        key: &str,
+        identifier: &str,
     ) -> (Sender<SessionEvent>, Sender<ConnectionContextState>, bool) {
-        if let Some((session_event_tx, connection_context_tx)) = self.sessions.get(key) {
+        if let Some((session_event_tx, connection_context_tx)) = self.sessions.get(identifier) {
             (
                 session_event_tx.clone(),
                 connection_context_tx.clone(),
@@ -54,9 +54,10 @@ impl AppContext {
         } else {
             let (session_event_tx, session_event_rx) = mpsc::channel(32);
             let (connection_context_tx, connection_context_rx) = mpsc::channel(3);
-            let mut session = Session::new(key, self.config.clone(), self.topic_manager.clone());
+            let mut session =
+                Session::new(identifier, self.config.clone(), self.topic_manager.clone());
             let tx = self.tx.clone();
-            let s = key.to_owned();
+            let s = identifier.to_owned();
             tokio::spawn(async move {
                 if let Err(err) = session
                     .session(session_event_rx, connection_context_rx)
@@ -70,7 +71,7 @@ impl AppContext {
                 }
             });
             self.sessions.insert(
-                key.to_string(),
+                identifier.to_string(),
                 (session_event_tx.clone(), connection_context_tx.clone()),
             );
             (session_event_tx, connection_context_tx, false)

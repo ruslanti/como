@@ -9,10 +9,8 @@ use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
 use futures::TryFutureExt;
 use persy::{Config, Persy, PersyId, ValueMode};
-use tokio::io::AsyncBufReadExt;
 use tokio::sync::broadcast::error::RecvError::Lagged;
 use tokio::sync::{broadcast, watch};
-use tokio_stream::StreamExt;
 use tracing::{debug, error, instrument, trace, warn};
 
 use crate::mqtt::proto::property::PublishProperties;
@@ -75,13 +73,20 @@ enum MatchState<'a> {
 }
 
 impl Node {
-    fn get(&mut self, path: impl AsRef<Path>, topic_name: impl AsRef<Path>) -> Result<&Topic> {
+    #[instrument(skip(self))]
+    fn get(
+        &mut self,
+        path: impl AsRef<Path> + Debug,
+        topic_name: impl AsRef<Path> + Debug,
+    ) -> Result<&Topic> {
+        trace!("get");
         let mut components = topic_name.as_ref().components();
         if let Some(component) = components.next() {
+            trace!("component: {:?}", component);
             if let Component::Normal(name) = component {
                 let name = name.to_str().ok_or(anyhow!("invalid os str"))?;
                 if name.strip_prefix('$').is_none() {
-                    let path = path.as_ref().to_path_buf().join(name);
+                    let path = path.as_ref().to_path_buf();
                     let node = if self.siblings.contains_key(name) {
                         self.siblings.get_mut(name).unwrap()
                     } else {
@@ -91,6 +96,7 @@ impl Node {
                             siblings: Default::default(),
                         })
                     };
+                    trace!("path: {:?}, name: {:?}", path, name);
                     node.get(path, components.as_path().to_path_buf())
                 } else {
                     Err(anyhow!("Invalid leading $ character: {}", name))
@@ -181,9 +187,11 @@ impl TopicManager {
         Ok(())
     }
 
-    async fn get(&mut self, topic_name: impl AsRef<Path>) -> Result<&Topic> {
+    #[instrument(skip(self))]
+    async fn get(&mut self, topic_name: impl AsRef<Path> + Debug) -> Result<&Topic> {
         let mut components = topic_name.as_ref().components();
         if let Some(component) = components.next() {
+            trace!("component: {:?}", component);
             let (nodes, path, name) = match component {
                 Component::RootDir => {
                     if let Some(component) = components.next() {
@@ -213,6 +221,8 @@ impl TopicManager {
                 _ => unreachable!(),
             };
 
+            trace!("path: {:?}, name: {:?}", path, name);
+
             let node = if nodes.contains_key(name) {
                 nodes.get_mut(name).unwrap()
             } else {
@@ -222,7 +232,7 @@ impl TopicManager {
                     siblings: Default::default(),
                 })
             };
-            node.get(path, components.as_path().to_path_buf())
+            node.get(path.join(name), components.as_path().to_path_buf())
         } else {
             Err(anyhow!("empty topic name"))
         }
@@ -254,7 +264,7 @@ impl TopicManager {
         self.topic_tx.clone()
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, msg))]
     pub(crate) async fn publish(&mut self, topic_name: &str, msg: TopicMessage) -> Result<()> {
         let tx = if let Some(topic_tx) = self.topics.get(topic_name) {
             topic_tx.clone()
@@ -467,10 +477,13 @@ impl TopicManager {
 impl Topic {
     #[instrument]
     fn load(path: impl AsRef<Path> + Debug + Send + Sync + 'static) -> Result<Self> {
+        trace!("load");
         let (topic_tx, topic_rx) = broadcast::channel(1024);
         let (retained_tx, retained_rx) = watch::channel(None);
         tokio::spawn(async move {
-            Self::topic(path, topic_rx, retained_tx).await;
+            if let Err(err) = Self::topic(path, topic_rx, retained_tx).await {
+                warn!(cause = ?err, "topic error");
+            }
         });
         Ok(Self {
             topic_tx,
@@ -532,10 +545,16 @@ impl Topic {
         path: impl AsRef<Path> + Debug,
         mut rx: TopicReceiver,
         retained: TopicRetainSender,
-    ) {
+    ) -> Result<()> {
         trace!("start");
-        debug!("create new {:?}", path.as_ref());
-        tokio::fs::create_dir(path.as_ref()).await.unwrap();
+
+        if let Err(e) = tokio::fs::read_dir(path.as_ref()).await {
+            debug!("create dir");
+            tokio::fs::create_dir(path.as_ref())
+                .await
+                .map_err(Error::msg)?;
+        }
+
         let log_path = path.as_ref().join("data").with_extension("db");
         let log = Persy::open_or_create_with(log_path.as_path(), Config::new(), |log| {
             // this closure is only called on database creation
@@ -553,7 +572,7 @@ impl Topic {
         loop {
             match rx.recv().await {
                 Ok(msg) => {
-                    trace!("{:?}", msg);
+                    // trace!("{:?}", msg);
                     if msg.retain && !msg.payload.is_empty() {
                         if let Err(err) = retained.send(Some(msg)) {
                             error!(cause = ?err, "topic retain error: ");
@@ -570,6 +589,7 @@ impl Topic {
             }
         }
         trace!("stop");
+        Ok(())
     }
 }
 

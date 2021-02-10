@@ -56,7 +56,7 @@ impl ConnectionHandler {
         }
     }
 
-    #[instrument(skip(self, conn_tx, msg), err)]
+    //#[instrument(skip(self, conn_tx, msg), err)]
     async fn connect(&mut self, msg: Connect, conn_tx: Sender<ControlPacket>) -> Result<()> {
         //trace!("{:?}", msg);
         let (assigned_client_identifier, identifier) = if let Some(id) = msg.client_identifier {
@@ -67,7 +67,7 @@ impl ConnectionHandler {
         };
 
         let id = std::str::from_utf8(&identifier[..])?;
-        debug!("client identifier: {}", id);
+        //debug!("client identifier: {}", id);
 
         let client_keep_alive = if msg.keep_alive != 0 {
             Some(msg.keep_alive)
@@ -144,10 +144,10 @@ impl ConnectionHandler {
         Ok(())
     }
 
-    #[instrument(skip(self, packet, conn_tx), err)]
-    async fn recv(&mut self, packet: ControlPacket, conn_tx: Sender<ControlPacket>) -> Result<()> {
-        trace!("{:?}", packet);
-        match (self.session.to_owned(), packet) {
+    #[instrument(skip(self, conn_tx), err)]
+    async fn recv(&mut self, msg: ControlPacket, conn_tx: Sender<ControlPacket>) -> Result<()> {
+        //trace!("{:?}", packet);
+        match (self.session.to_owned(), msg) {
             (None, ControlPacket::Connect(connect)) => self.connect(connect, conn_tx).await,
             (None, ControlPacket::Auth(_auth)) => unimplemented!(), //self.process_auth(auth).await,
             (None, packet) => {
