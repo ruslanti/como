@@ -131,7 +131,7 @@ impl Mep {
         }
         res
     }
-
+    /*
     fn pattern(topic_filter: &str) -> Vec<MatchState> {
         let mut pattern = Vec::new();
         let topic_filter = if let Some(topic_filter) = topic_filter.strip_prefix('$') {
@@ -149,5 +149,5 @@ impl Mep {
             }
         }
         pattern
-    }
+    }*/
 }

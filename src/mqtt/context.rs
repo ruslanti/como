@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, instrument, warn};
@@ -29,9 +28,9 @@ impl AppContext {
         }
     }
 
-    pub async fn load(&mut self) -> Result<()> {
+    /*    pub async fn load(&mut self) -> Result<()> {
         self.topic_manager.load().await
-    }
+    }*/
 
     #[instrument(skip(self))]
     pub fn clean(&mut self, identifier: String) {

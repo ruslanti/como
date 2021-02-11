@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, bail, Error, Result};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio::time::Duration;
 use tracing::{debug, error, field, info, instrument, trace, warn};
@@ -116,6 +116,7 @@ async fn exactly_once_server(
 ) -> Result<()> {
     if let Some(event) = rx.recv().await {
         if let PublishEvent::Publish(msg) = event {
+            //TODO handler error
             publish_topic(root, msg).await?;
             let rec = ControlPacket::PubRec(PubResp {
                 packet_type: PacketType::PUBREC,
@@ -357,9 +358,11 @@ impl Session {
         match &self.connection {
             Some((connection_reply_tx, _, _, _)) => {
                 match msg.qos {
+                    //TODO handler error
                     QoS::AtMostOnce => publish_topic(self.topic_manager.clone(), msg).await?,
                     QoS::AtLeastOnce => {
                         if let Some(packet_identifier) = msg.packet_identifier {
+                            //TODO handler error
                             publish_topic(self.topic_manager.clone(), msg).await?;
                             let ack = ControlPacket::PubAck(PubResp {
                                 packet_type: PacketType::PUBACK,
@@ -488,12 +491,15 @@ impl Session {
                                 .topic_filters
                                 .entry((topic_filter.to_owned(), option.to_owned()))
                                 .or_insert(vec![]);
-                            let channels = self.topic_manager.subscribe(topic_filter);
+                            let channels = self.topic_manager.subscribe(topic_filter).await;
                             trace!("subscribe returns {} subscriptions", channels.len());
-                            for (topic, channel, retained_msg) in channels {
+                            for (topic, channel) in channels {
                                 let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
-                                let subscription =
-                                    Subscription::new(self.id.to_owned(), option.to_owned(), tx.clone());
+                                let subscription = Subscription::new(
+                                    self.id.to_owned(),
+                                    option.to_owned(),
+                                    tx.clone(),
+                                );
                                 subscriptions.push(unsubscribe_tx);
 
                                 /*                                tokio::spawn(async move {
@@ -502,7 +508,7 @@ impl Session {
                                         .await
                                 });*/
 
-                                if let Some(retained) = retained_msg.borrow().clone() {
+                                /*if let Some(retained) = retained_msg.borrow().clone() {
                                     if retained.retain || retained.ts > self.created {
                                         let ret_msg =
                                             (topic_filter.to_owned(), option.to_owned(), retained);
@@ -513,7 +519,7 @@ impl Session {
                                             }
                                         });
                                     }
-                                }
+                                }*/
                             }
                             match option.qos {
                                 QoS::AtMostOnce => ReasonCode::Success,
