@@ -18,7 +18,7 @@ use crate::mqtt::proto::types::{
     SubscriptionOptions, UnSubscribe, Will,
 };
 use crate::mqtt::subscription::{SessionSender, Subscription};
-use crate::mqtt::topic::{TopicManager, TopicMessage};
+use crate::mqtt::topic::{TopicMessage, Topics};
 use crate::settings::Settings;
 
 pub(crate) type ConnectionContextState =
@@ -56,13 +56,12 @@ pub(crate) struct Session {
     config: Arc<Settings>,
     server_flows: HashMap<u16, Sender<PublishEvent>>,
     client_flows: HashMap<u16, Sender<PublishEvent>>,
-    topic_manager: Arc<RwLock<TopicManager>>,
+    topic_manager: Arc<Topics>,
     packet_identifier_seq: Arc<AtomicU16>,
     topic_filters: HashMap<(String, SubscriptionOptions), Vec<oneshot::Sender<()>>>,
 }
 
-async fn publish_topic(root: Arc<RwLock<TopicManager>>, msg: Publish) -> Result<()> {
-    let mut topic_manager = root.write().await;
+async fn publish_topic(root: Arc<Topics>, msg: Publish) -> Result<()> {
     let topic = std::str::from_utf8(&msg.topic_name[..])?;
 
     let message = TopicMessage {
@@ -73,7 +72,7 @@ async fn publish_topic(root: Arc<RwLock<TopicManager>>, msg: Publish) -> Result<
         payload: msg.payload,
     };
 
-    topic_manager.publish(topic, message).await
+    root.publish(topic, message).await
 }
 
 #[instrument(skip(rx, connection_reply_tx), err)]
@@ -111,7 +110,7 @@ async fn exactly_once_client(
 async fn exactly_once_server(
     session: String,
     packet_identifier: u16,
-    root: Arc<RwLock<TopicManager>>,
+    root: Arc<Topics>,
     mut rx: Receiver<PublishEvent>,
     connection_reply_tx: Sender<ControlPacket>,
 ) -> Result<()> {
@@ -151,7 +150,7 @@ async fn exactly_once_server(
 impl Session {
     #[instrument(skip(id, config, topic_manager),
     fields(identifier = field::display(& id)))]
-    pub fn new(id: &str, config: Arc<Settings>, topic_manager: Arc<RwLock<TopicManager>>) -> Self {
+    pub fn new(id: &str, config: Arc<Settings>, topic_manager: Arc<Topics>) -> Self {
         info!("new session");
         Self {
             id: id.to_owned(),
@@ -284,7 +283,7 @@ impl Session {
     fn filtered(&self, topic: &str) -> Vec<(String, SubscriptionOptions)> {
         self.topic_filters
             .keys()
-            .filter(|(filter, _)| TopicManager::match_filter(topic, filter.as_str()))
+            .filter(|(filter, _)| Topics::match_filter(topic, filter.as_str()))
             .map(|(f, o)| (f.to_owned(), o.to_owned()))
             .collect()
     }
@@ -481,7 +480,6 @@ impl Session {
         match &self.connection {
             Some((connection_reply_tx, _, _, _)) => {
                 debug!("subscribe topic filters: {:?}", msg.topic_filters);
-                let root = self.topic_manager.read().await;
                 let mut reason_codes = Vec::new();
                 for (topic_filter, option) in msg.topic_filters {
                     reason_codes.push(match std::str::from_utf8(&topic_filter[..]) {
@@ -490,7 +488,7 @@ impl Session {
                                 .topic_filters
                                 .entry((topic_filter.to_owned(), option.to_owned()))
                                 .or_insert(vec![]);
-                            let channels = root.subscribe(topic_filter);
+                            let channels = self.topic_manager.subscribe(topic_filter);
                             trace!("subscribe returns {} subscriptions", channels.len());
                             for (topic, channel, retained_msg) in channels {
                                 let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();

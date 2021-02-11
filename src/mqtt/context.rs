@@ -2,19 +2,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, instrument, warn};
 
 use crate::mqtt::session::{ConnectionContextState, Session, SessionEvent};
-use crate::mqtt::topic::TopicManager;
+use crate::mqtt::topic::Topics;
 use crate::settings::Settings;
 
 #[derive(Debug)]
 pub(crate) struct AppContext {
     sessions: HashMap<String, (Sender<SessionEvent>, Sender<ConnectionContextState>)>,
     pub(crate) config: Arc<Settings>,
-    topic_manager: Arc<RwLock<TopicManager>>,
+    topic_manager: Arc<Topics>,
     tx: mpsc::Sender<String>,
 }
 
@@ -24,13 +24,13 @@ impl AppContext {
         Self {
             sessions: HashMap::new(),
             config,
-            topic_manager: Arc::new(RwLock::new(TopicManager::new(path))),
+            topic_manager: Arc::new(Topics::new(path)),
             tx,
         }
     }
 
     pub async fn load(&mut self) -> Result<()> {
-        self.topic_manager.write().await.load().await
+        self.topic_manager.load().await
     }
 
     #[instrument(skip(self))]

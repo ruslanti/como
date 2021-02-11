@@ -1,8 +1,7 @@
-use std::borrow::{Borrow, BorrowMut};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fmt::Debug;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{anyhow, Error, Result};
@@ -10,11 +9,12 @@ use bytes::Bytes;
 use futures::TryFutureExt;
 use persy::{Config, Persy, PersyId, ValueMode};
 use tokio::sync::broadcast::error::RecvError::Lagged;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, watch, RwLock};
 use tracing::{debug, error, instrument, trace, warn};
 
 use crate::mqtt::proto::property::PublishProperties;
 use crate::mqtt::proto::types::QoS;
+use crate::mqtt::topic_path::TopicPath;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TopicMessage {
@@ -25,43 +25,34 @@ pub(crate) struct TopicMessage {
     pub payload: Bytes,
 }
 
-pub(crate) type NewTopicEvent = (String, TopicSender, TopicMessage);
+pub(crate) type NewTopicEvent = (String, TopicMessage);
 type NewTopicSender = broadcast::Sender<NewTopicEvent>;
 type NewTopicReceiver = broadcast::Receiver<NewTopicEvent>;
 
-pub(crate) type TopicSender = broadcast::Sender<TopicMessage>;
-pub(crate) type TopicReceiver = broadcast::Receiver<TopicMessage>;
+type TopicSender = watch::Sender<Option<TopicMessage>>;
+type TopicReceiver = watch::Receiver<Option<TopicMessage>>;
 
 type TopicRetainEvent = Option<TopicMessage>;
 pub(crate) type TopicRetainReceiver = watch::Receiver<TopicRetainEvent>;
 type TopicRetainSender = watch::Sender<TopicRetainEvent>;
 
-#[derive(Debug, Clone, Eq, Ord, PartialOrd, PartialEq)]
+/*#[derive(Debug, Clone, Eq, Ord, PartialOrd, PartialEq)]
 enum RootType {
     None,
     Dollar(String),
     Name(String),
-}
+}*/
 
-struct Topic {
-    topic_tx: TopicSender,
-    retained: TopicRetainReceiver,
-}
+/*struct Topic {
+    sender: TopicSender,
+    receiver: TopicReceiver,
+}*/
 
-struct Node {
-    topic: Topic,
-    siblings: BTreeMap<String, Self>,
-}
-
-type NodesCollection = BTreeMap<String, Node>;
-
-pub struct TopicManager {
+pub struct Topics {
     path: PathBuf,
-    topic_tx: NewTopicSender,
-    topics: HashMap<String, TopicSender>,
-    root_nodes: NodesCollection,
-    dollar_nodes: NodesCollection,
-    nodes: NodesCollection,
+    //topic_tx: NewTopicSender,
+    topics: RwLock<HashMap<String, TopicSender>>,
+    nodes: RwLock<TopicPath<TopicReceiver>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -72,178 +63,31 @@ enum MatchState<'a> {
     Dollar,
 }
 
-impl Node {
-    #[instrument(skip(self))]
-    fn get(
-        &mut self,
-        path: impl AsRef<Path> + Debug,
-        topic_name: impl AsRef<Path> + Debug,
-    ) -> Result<&Topic> {
-        trace!("get");
-        let mut components = topic_name.as_ref().components();
-        if let Some(component) = components.next() {
-            trace!("component: {:?}", component);
-            if let Component::Normal(name) = component {
-                let name = name.to_str().ok_or(anyhow!("invalid os str"))?;
-                if name.strip_prefix('$').is_none() {
-                    let path = path.as_ref().to_path_buf();
-                    let node = if self.siblings.contains_key(name) {
-                        self.siblings.get_mut(name).unwrap()
-                    } else {
-                        let topic = Topic::load(path.join(name))?;
-                        self.siblings.entry(name.to_owned()).or_insert(Node {
-                            topic,
-                            siblings: Default::default(),
-                        })
-                    };
-                    trace!("path: {:?}, name: {:?}", path, name);
-                    node.get(path, components.as_path().to_path_buf())
-                } else {
-                    Err(anyhow!("Invalid leading $ character: {}", name))
-                }
-            } else {
-                Err(anyhow!("invalid os str"))
-            }
-        } else {
-            Ok(self.topic.borrow())
-        }
-    }
-}
-
-impl TopicManager {
+impl Topics {
     pub(crate) fn new(path: impl AsRef<Path>) -> Self {
         let (topic_tx, topic_rx) = broadcast::channel(1024);
 
         tokio::spawn(async move {
-            Self::topic_manager(topic_rx).await;
+            Self::topics(topic_rx).await;
         });
 
         Self {
             path: path.as_ref().to_owned(),
-            topic_tx,
-            topics: Default::default(),
-
-            root_nodes: Default::default(),
-            dollar_nodes: Default::default(),
-            nodes: Default::default(),
+            topics: RwLock::new(HashMap::new()),
+            nodes: RwLock::new(TopicPath::new()),
         }
     }
 
-    pub(crate) async fn load(&mut self) -> Result<()> {
-        TopicManager::load_inner(self.path.join("01"), self.root_nodes.borrow_mut()).await?;
-        TopicManager::load_inner(self.path.join("02"), self.dollar_nodes.borrow_mut()).await?;
-        TopicManager::load_inner(self.path.join("03"), self.nodes.borrow_mut()).await?;
-        /*
-                let mut metadata = OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open(self.path.join("topics.db"))
-                    .await?;
-                // read topic metadata file
-                let buf = BufReader::new(metadata.borrow_mut());
-                let mut lines = buf.lines();
-                while let Some(line) = lines.next_line().await? {
-                    let err = Err(anyhow!("invalid topic meta entry: {}", line));
-                    let mut splits = line.split_ascii_whitespace();
-                    let (topic_name, log) = match splits.next() {
-                        Some(topic_name) => match splits.next() {
-                            Some(log) => (topic_name, self.path.join(log)),
-                            None => return err,
-                        },
-                        None => return err,
-                    };
-                    let topic = Topic::new(log);
-                    self.get(topic_name, topic.borrow())?;
-                    if let Some(_) = self.topics.insert(topic_name.to_owned(), topic) {
-                        return Err(anyhow!("duplicate topic: {:?}", topic_name));
-                    }
-                }
-
-        */
+    pub(crate) async fn load(&self) -> Result<()> {
         Ok(())
-    }
-
-    async fn load_inner(path: impl AsRef<Path>, nodes: &NodesCollection) -> Result<()> {
-        if let Ok(mut entries) = tokio::fs::read_dir(path.as_ref()).await {
-            while let Some(entry) = entries.next_entry().await? {
-                if let Ok(file_type) = entry.file_type().await {
-                    if file_type.is_dir() {
-                        debug!(
-                            "topic {:?}",
-                            entry
-                                .file_name()
-                                .to_str()
-                                .ok_or(anyhow!("invalid os str"))?
-                        );
-                    }
-                } else {
-                    warn!("Couldn't get file type for {:?}", entry.path());
-                }
-            }
-        } else {
-            trace!("create dir: {:?}", path.as_ref());
-            tokio::fs::create_dir(path).map_err(Error::msg).await?;
-        }
-        Ok(())
-    }
-
-    #[instrument(skip(self))]
-    async fn get(&mut self, topic_name: impl AsRef<Path> + Debug) -> Result<&Topic> {
-        let mut components = topic_name.as_ref().components();
-        if let Some(component) = components.next() {
-            trace!("component: {:?}", component);
-            let (nodes, path, name) = match component {
-                Component::RootDir => {
-                    if let Some(component) = components.next() {
-                        match component {
-                            Component::Normal(name) => {
-                                let name = name.to_str().ok_or(anyhow!("invalid os str"))?;
-                                if name.strip_prefix('$').is_none() {
-                                    (self.root_nodes.borrow_mut(), self.path.join("01"), name)
-                                } else {
-                                    return Err(anyhow!("Invalid leading $ character: {}", name));
-                                }
-                            }
-                            _ => unreachable!(),
-                        }
-                    } else {
-                        return Err(anyhow!("empty root topic name"));
-                    }
-                }
-                Component::Normal(name) => {
-                    let name = name.to_str().ok_or(anyhow!("invalid os str"))?;
-                    if let Some(name) = name.strip_prefix('$') {
-                        (self.dollar_nodes.borrow_mut(), self.path.join("02"), name)
-                    } else {
-                        (self.nodes.borrow_mut(), self.path.join("03"), name)
-                    }
-                }
-                _ => unreachable!(),
-            };
-
-            trace!("path: {:?}, name: {:?}", path, name);
-
-            let node = if nodes.contains_key(name) {
-                nodes.get_mut(name).unwrap()
-            } else {
-                let topic = Topic::load(path.join(name))?;
-                nodes.entry(name.to_owned()).or_insert(Node {
-                    topic,
-                    siblings: Default::default(),
-                })
-            };
-            node.get(path.join(name), components.as_path().to_path_buf())
-        } else {
-            Err(anyhow!("empty topic name"))
-        }
     }
 
     #[instrument(skip(topic_rx))]
-    async fn topic_manager(mut topic_rx: NewTopicReceiver) {
+    async fn topics(mut topic_rx: NewTopicReceiver) {
         trace!("topic manager spawn start");
         loop {
             match topic_rx.recv().await {
-                Ok((topic, _, _)) => trace!("new topic event {:?}", topic),
+                Ok((topic, _)) => trace!("new topic event {:?}", topic),
                 Err(Lagged(lag)) => {
                     warn!("lagged: {}", lag);
                 }
@@ -256,57 +100,54 @@ impl TopicManager {
         trace!("topic manager spawn stop");
     }
 
-    pub(crate) fn subscribe_channel(&self) -> NewTopicReceiver {
-        self.topic_tx.subscribe()
-    }
-
-    pub(crate) fn new_topic_channel(&self) -> NewTopicSender {
-        self.topic_tx.clone()
-    }
-
     #[instrument(skip(self, msg))]
-    pub(crate) async fn publish(&mut self, topic_name: &str, msg: TopicMessage) -> Result<()> {
-        let tx = if let Some(topic_tx) = self.topics.get(topic_name) {
-            topic_tx.clone()
-        } else {
-            let topic = self.get(topic_name).await?;
-            let topic_tx = topic.topic_tx.clone();
-            self.topics.insert(topic_name.to_owned(), topic_tx.clone());
-            topic_tx
+    pub(crate) async fn publish(&self, topic_name: &str, msg: TopicMessage) -> Result<()> {
+        let mut topics = self.topics.write().await;
+        if !topics.contains_key(topic_name) {
+            let (sender, receiver) = watch::channel(None);
+            topics.insert(topic_name.to_owned(), sender);
+            let mut nodes = self.nodes.write().await;
+            nodes.get(topic_name)?.get_or_insert(receiver);
         };
-        tx.send(msg)
-            .map_err(|e| anyhow!("{:?}", e))
-            .map(|size| trace!("publish topic channel send {} message", size))
+        let topics = topics.downgrade();
+        topics
+            .get(topic_name)
+            .unwrap()
+            .send(Some(msg))
+            .map_err(|e| anyhow!("topic send error: {:?}", e))
+        /*        let sender = topics.get(topic_name);
 
-        /*if let Some(topic_name) = topic_name.strip_prefix('$') {
-            let topic = self.topics.entry('$'.to_string()).or_insert_with(|| {
-                let topic = Topic::new("$".to_owned());
-                new_topic_fn("$".to_owned(), topic.topic_tx.clone());
-                topic
-            });
-            topic.publish(Root::Dollar, topic_name, new_topic_fn)
-        } else {
-            let mut s = topic_name.splitn(2, '/');
-            match s.next() {
-                Some(prefix) => {
-                    println!("SOME prefix '{}'", prefix);
-                    let path = Topic::path(Root::None, prefix);
-                    println!("PATH '{}'", path);
-                    let topic = self.topics.entry(prefix.to_owned()).or_insert_with(|| {
-                        let topic = Topic::new(path.to_owned());
-                        new_topic_fn(path.to_owned(), topic.topic_tx.clone());
-                        topic
-                    });
-                    match s.next() {
-                        Some(suffix) => {
-                            println!("suffix '{}'", suffix);
-                            topic.publish(Root::Name(path.as_str()), suffix, new_topic_fn)
-                        }
-                        None => Ok(topic.topic_tx.clone()),
-                    }
+                if let None = *sender {
+                    debug!("new topic {}", topic_name);
+                    let (tx, rx) = watch::channel(None);
+                    let mut nodes = self.nodes.write().await;
+                    nodes.get(topic_name)?.get_or_insert(rx);
+                    *sender = Some(tx);
                 }
-                None => Err(anyhow!("invalid topic: {}", topic_name)),
-            }
+
+                match sender {
+                    Some(sender) => sender
+                        .send(Some(msg))
+                        .map_err(|e| anyhow!("topic send error: {:?}", e)),
+                    None => unreachable!(),
+                }
+        */
+        /* let mut nodes = self.nodes.write().await;
+        let topic = nodes.get(topic_name)?;
+        //TODO write to persy log
+        if let None = *topic {
+            debug!("new topic {}", topic_name);
+            *topic = Some(Topic::new());
+        //TODO new topic event
+        } else {
+            debug!("found topic {}", topic_name);
+        };
+        match topic {
+            Some(topic) => topic
+                .sender
+                .send(Some(msg))
+                .map_err(|e| anyhow!("topic send error: {:?}", e)),
+            None => unreachable!(),
         }*/
     }
 
@@ -317,7 +158,7 @@ impl TopicManager {
     ) -> Vec<(PathBuf, TopicReceiver, TopicRetainReceiver)> {
         let pattern = Self::pattern(topic_filter);
         let mut res = Vec::new();
-        let path = PathBuf::new();
+        /* let path = PathBuf::new();
 
         let mut stack = VecDeque::new();
         for (node_name, node) in self.nodes.iter() {
@@ -391,7 +232,7 @@ impl TopicManager {
                     }
                 }
             }
-        }
+        }*/
         res
     }
 
@@ -474,21 +315,17 @@ impl TopicManager {
     }
 }
 
-impl Topic {
+/*impl Topic {
     #[instrument]
-    fn load(path: impl AsRef<Path> + Debug + Send + Sync + 'static) -> Result<Self> {
-        trace!("load");
-        let (topic_tx, topic_rx) = broadcast::channel(1024);
-        let (retained_tx, retained_rx) = watch::channel(None);
-        tokio::spawn(async move {
-            if let Err(err) = Self::topic(path, topic_rx, retained_tx).await {
+    fn new() -> Self {
+        let (sender, receiver) = watch::channel(None);
+        /*        tokio::spawn(async move {
+            if let Err(err) = Self::topic(name, receiver).await {
                 warn!(cause = ?err, "topic error");
             }
-        });
-        Ok(Self {
-            topic_tx,
-            retained: retained_rx,
-        })
+        });*/
+
+        Self { sender, receiver }
     }
 
     /* #[instrument(skip(self, parent, new_topic_fn))]
@@ -523,7 +360,7 @@ impl Topic {
         }
     }*/
 
-    fn path(parent: RootType, name: &str) -> String {
+    /*    fn path(parent: RootType, name: &str) -> String {
         match parent {
             RootType::Name(parent) => {
                 let mut path = parent.to_string();
@@ -538,17 +375,13 @@ impl Topic {
             }
             RootType::None => name.to_string(),
         }
-    }
+    }*/
 
-    #[instrument(skip(rx, retained))]
-    async fn topic(
-        path: impl AsRef<Path> + Debug,
-        mut rx: TopicReceiver,
-        retained: TopicRetainSender,
-    ) -> Result<()> {
+    /*#[instrument(skip(receiver))]
+    async fn topic(name: String, mut receiver: TopicReceiver) -> Result<()> {
         trace!("start");
 
-        if let Err(e) = tokio::fs::read_dir(path.as_ref()).await {
+        /*if let Err(e) = tokio::fs::read_dir(path.as_ref()).await {
             debug!("create dir");
             tokio::fs::create_dir(path.as_ref())
                 .await
@@ -567,10 +400,10 @@ impl Topic {
             debug!("Segment and Index successfully created");
             Ok(())
         })
-        .unwrap();
+        .unwrap();*/
 
         loop {
-            match rx.recv().await {
+            /* match rx.recv().await {
                 Ok(msg) => {
                     // trace!("{:?}", msg);
                     if msg.retain && !msg.payload.is_empty() {
@@ -586,14 +419,14 @@ impl Topic {
                     error!(cause = ?err, "topic error: ");
                     break;
                 }
-            }
+            }*/
         }
         trace!("stop");
         Ok(())
-    }
-}
+    }*/
+}*/
 
-impl fmt::Debug for TopicManager {
+impl fmt::Debug for Topics {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.path.display())
     }
@@ -608,7 +441,7 @@ impl fmt::Debug for TopicManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    /*use super::*;
 
     #[tokio::test]
     async fn test_topic() {
@@ -627,5 +460,5 @@ mod tests {
 
         //root.find("aaa/ddd");
         println!("subscribe: {:?}", root.subscribe("/aaa/#"));
-    }
+    }*/
 }
