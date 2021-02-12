@@ -6,4 +6,3 @@ mod session;
 mod shutdown;
 mod subscription;
 pub mod topic;
-mod topic_path;

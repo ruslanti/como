@@ -1,20 +1,20 @@
-use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fmt::Debug;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{anyhow, bail, Error, Result};
+use anyhow::{anyhow, Result};
 use bytes::Bytes;
-use futures::TryFutureExt;
-use persy::{Config, Persy, PersyId, SegmentId, ValueMode};
-use tokio::sync::broadcast::error::RecvError::Lagged;
-use tokio::sync::{broadcast, watch, RwLock};
-use tracing::{debug, error, instrument, trace, warn};
+use persy::{Config, Persy, SegmentId};
+use tokio::sync::{watch, RwLock};
+use tracing::{debug, instrument, trace, warn};
+
+use path::TopicPath;
 
 use crate::mqtt::proto::property::PublishProperties;
 use crate::mqtt::proto::types::QoS;
-use crate::mqtt::topic_path::TopicPath;
+
+mod path;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TopicMessage {
@@ -29,13 +29,10 @@ type NewTopicSender = watch::Sender<String>;
 type NewTopicReceiver = watch::Receiver<String>;
 
 type TopicSender = watch::Sender<Option<TopicMessage>>;
-type TopicReceiver = watch::Receiver<Option<TopicMessage>>;
-
-type TopicRetainEvent = Option<TopicMessage>;
-pub(crate) type TopicRetainReceiver = watch::Receiver<TopicRetainEvent>;
-type TopicRetainSender = watch::Sender<TopicRetainEvent>;
+pub(crate) type TopicReceiver = watch::Receiver<Option<TopicMessage>>;
 
 struct Topic {
+    name: String,
     segment: SegmentId,
     sender: TopicSender,
     receiver: TopicReceiver,
@@ -52,13 +49,6 @@ impl Topics {
         let path = path.as_ref().join("topics").with_extension("db");
         debug!("create {:?}", path);
         let log = match Persy::open_or_create_with(path.as_path(), Config::new(), |log| {
-            // this closure is only called on database creation
-            //let mut tx = log.begin()?;
-            // tx.create_segment("segment")?;
-            //tx.create_index::<u64, PersyId>("index", ValueMode::EXCLUSIVE)?;
-            // tx.create_index::<u64, PersyId>("timestamp", ValueMode::CLUSTER)?;
-            // let prepared = tx.prepare()?;
-            // prepared.commit()?;
             debug!("Segment and Index successfully created");
             Ok(())
         }) {
@@ -73,8 +63,8 @@ impl Topics {
                 for (segment, id) in segments {
                     debug!("topic: {}:{}", segment, id);
                     nodes
-                        .get(segment)
-                        .map(|topic| topic.get_or_insert(Topic::new(id)))
+                        .get(segment.as_str())
+                        .map(|topic| topic.get_or_insert(Topic::new(segment.as_str(), id)))
                         .unwrap();
                 }
             }
@@ -101,7 +91,7 @@ impl Topics {
             //new topic event
             debug!("new topic {}", topic_name);
             let id = tx.create_segment(topic_name)?;
-            *topic = Some(Topic::new(id));
+            *topic = Some(Topic::new(topic_name, id));
 
             if let Err(err) = self.new_topic.0.send(topic_name.to_owned()) {
                 warn!(cause = ?err, "new topic event error");
@@ -125,13 +115,18 @@ impl Topics {
     }
 
     #[instrument(skip(self))]
-    pub(crate) async fn subscribe<'a>(&self, topic_filter: &str) -> Vec<(PathBuf, TopicReceiver)> {
-        let nodes = self.nodes.read().await;
-        //let pattern = Self::pattern(topic_filter);
-        let mut res = Vec::new();
-        // let path = PathBuf::new();
-
-        res
+    pub(crate) async fn filter<'a>(
+        &self,
+        topic_filter: &str,
+    ) -> Result<Vec<(String, TopicReceiver)>> {
+        Ok(self
+            .nodes
+            .read()
+            .await
+            .filter(topic_filter)?
+            .into_iter()
+            .map(|t| (t.name.to_owned(), t.receiver.clone()))
+            .collect())
     }
 
     pub(crate) fn match_filter(topic_name: &str, filter: &str) -> bool {
@@ -196,10 +191,11 @@ impl Topics {
 
 impl Topic {
     #[instrument]
-    fn new(segment: SegmentId) -> Self {
+    fn new(name: &str, segment: SegmentId) -> Self {
         trace!("create topic from segment: {:?}", segment);
         let (sender, receiver) = watch::channel(None);
         Self {
+            name: name.to_string(),
             segment,
             sender,
             receiver,

@@ -1,12 +1,9 @@
-use anyhow::{bail, Result};
-use futures::{Stream, StreamExt};
-use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::broadcast::error::RecvError::Lagged;
+use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, field, instrument, trace, warn};
 
 use crate::mqtt::proto::types::SubscriptionOptions;
-use crate::mqtt::topic::TopicMessage;
+use crate::mqtt::topic::{TopicMessage, TopicReceiver};
 
 pub(crate) type SessionSender = mpsc::Sender<(String, SubscriptionOptions, TopicMessage)>;
 
@@ -31,16 +28,15 @@ impl Subscription {
     }
 
     #[instrument(skip(self, stream, unsubscribe_rx), fields(session = field::display(& self.session)))]
-    pub(crate) async fn subscribe<S>(
+    pub(crate) async fn subscribe(
         &self,
-        topic: String,
-        stream: S,
+        topic: &str,
+        stream: TopicReceiver,
         unsubscribe_rx: oneshot::Receiver<()>,
-    ) where
-        S: Stream<Item = Result<TopicMessage, RecvError>>,
-    {
-        tokio::pin!(stream);
+    ) {
+        //   tokio::pin!(stream);
         trace!("start");
+
         tokio::select! {
             Err(err) = self.subscription_stream(topic, stream) => {
                 warn!(cause = ?err, "subscription error");
@@ -52,23 +48,17 @@ impl Subscription {
         trace!("end");
     }
 
-    async fn subscription_stream<S>(&self, topic: String, mut stream: S) -> Result<()>
-    where
-        S: Stream<Item = Result<TopicMessage, RecvError>> + Unpin,
-    {
-        while let Some(event) = stream.next().await {
+    async fn subscription_stream(&self, topic: &str, mut stream: TopicReceiver) -> Result<()> {
+        while stream.changed().await.is_ok() {
+            let event = stream.borrow().clone();
             match event {
-                Ok(msg) => {
-                    let ret_msg = (topic.to_owned(), self.option.to_owned(), msg);
+                Some(msg) => {
+                    let ret_msg = (topic.to_owned(), self.option.to_owned(), msg.to_owned());
                     trace!("subscription message {:?}", ret_msg);
                     self.session_tx.send(ret_msg).await?;
                 }
-                Err(Lagged(lag)) => {
-                    warn!("subscription '{}' lagged: {}", topic, lag);
-                }
-                Err(err) => {
-                    bail!(err);
-                    //return Err(anyhow!(err));
+                None => {
+                    debug!("empty topic message");
                 }
             }
         }

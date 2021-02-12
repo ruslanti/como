@@ -62,7 +62,7 @@ impl ConnectionHandler {
         let (assigned_client_identifier, identifier) = if let Some(id) = msg.client_identifier {
             (None, id)
         } else {
-            let id: Bytes = Uuid::new_v4().to_hyphenated().to_string().into();
+            let id: Bytes = Uuid::new_v4().to_simple().to_string().into();
             (Some(id.clone()), id)
         };
 

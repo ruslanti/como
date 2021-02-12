@@ -56,7 +56,7 @@ pub(crate) struct Session {
     config: Arc<Settings>,
     server_flows: HashMap<u16, Sender<PublishEvent>>,
     client_flows: HashMap<u16, Sender<PublishEvent>>,
-    topic_manager: Arc<Topics>,
+    topics: Arc<Topics>,
     packet_identifier_seq: Arc<AtomicU16>,
     topic_filters: HashMap<(String, SubscriptionOptions), Vec<oneshot::Sender<()>>>,
 }
@@ -161,7 +161,7 @@ impl Session {
             config,
             server_flows: HashMap::new(),
             client_flows: HashMap::new(),
-            topic_manager,
+            topics: topic_manager,
             packet_identifier_seq: Arc::new(AtomicU16::new(1)),
             topic_filters: HashMap::new(),
         }
@@ -359,11 +359,11 @@ impl Session {
             Some((connection_reply_tx, _, _, _)) => {
                 match msg.qos {
                     //TODO handler error
-                    QoS::AtMostOnce => publish_topic(self.topic_manager.clone(), msg).await?,
+                    QoS::AtMostOnce => publish_topic(self.topics.clone(), msg).await?,
                     QoS::AtLeastOnce => {
                         if let Some(packet_identifier) = msg.packet_identifier {
                             //TODO handler error
-                            publish_topic(self.topic_manager.clone(), msg).await?;
+                            publish_topic(self.topics.clone(), msg).await?;
                             let ack = ControlPacket::PubAck(PubResp {
                                 packet_type: PacketType::PUBACK,
                                 packet_identifier,
@@ -392,7 +392,7 @@ impl Session {
                             {
                                 let session = self.id.clone();
                                 let (tx, rx) = mpsc::channel(1);
-                                let root = self.topic_manager.clone();
+                                let root = self.topics.clone();
                                 let connection_reply_tx = connection_reply_tx.clone();
                                 tokio::spawn(async move {
                                     if let Err(err) = exactly_once_server(
@@ -484,29 +484,29 @@ impl Session {
             Some((connection_reply_tx, _, _, _)) => {
                 debug!("subscribe topic filters: {:?}", msg.topic_filters);
                 let mut reason_codes = Vec::new();
-                for (topic_filter, option) in msg.topic_filters {
+                for (topic_filter, subscription_options) in msg.topic_filters {
                     reason_codes.push(match std::str::from_utf8(&topic_filter[..]) {
                         Ok(topic_filter) => {
                             let subscriptions = self
                                 .topic_filters
-                                .entry((topic_filter.to_owned(), option.to_owned()))
+                                .entry((topic_filter.to_owned(), subscription_options.to_owned()))
                                 .or_insert(vec![]);
-                            let channels = self.topic_manager.subscribe(topic_filter).await;
+                            let channels = self.topics.filter(topic_filter).await?;
                             trace!("subscribe returns {} subscriptions", channels.len());
                             for (topic, channel) in channels {
                                 let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
                                 let subscription = Subscription::new(
                                     self.id.to_owned(),
-                                    option.to_owned(),
+                                    subscription_options.to_owned(),
                                     tx.clone(),
                                 );
                                 subscriptions.push(unsubscribe_tx);
 
-                                /*                                tokio::spawn(async move {
+                                tokio::spawn(async move {
                                     subscription
-                                        .subscribe(topic.to_owned(), channel, unsubscribe_rx)
+                                        .subscribe(topic.as_str(), channel, unsubscribe_rx)
                                         .await
-                                });*/
+                                });
 
                                 /*if let Some(retained) = retained_msg.borrow().clone() {
                                     if retained.retain || retained.ts > self.created {
@@ -521,7 +521,7 @@ impl Session {
                                     }
                                 }*/
                             }
-                            match option.qos {
+                            match subscription_options.qos {
                                 QoS::AtMostOnce => ReasonCode::Success,
                                 QoS::AtLeastOnce => ReasonCode::GrantedQoS1,
                                 QoS::ExactlyOnce => ReasonCode::GrantedQoS2,
@@ -616,7 +616,7 @@ impl Session {
                     if let Some(will) = will {
                         debug!("send will: {:?}", will);
                         publish_topic(
-                            self.topic_manager.clone(),
+                            self.topics.clone(),
                             Publish {
                                 dup: false,
                                 qos: will.qos,
