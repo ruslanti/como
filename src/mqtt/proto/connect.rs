@@ -25,8 +25,8 @@ pub fn decode_connect(mut reader: Bytes) -> Result<Option<ControlPacket>> {
     let will_flag = ((flags & 0b00000100) >> 2) != 0;
     let will_qos_flag: QoS = ((flags & 0b00011000) >> 3).try_into()?;
     let will_retain_flag = ((flags & 0b00100000) >> 5) != 0;
-    let password_flag = ((flags & 0b01000000) >> 6) != 0;
-    let username_flag = ((flags & 0b10000000) >> 7) != 0;
+    let _password_flag = ((flags & 0b01000000) >> 6) != 0;
+    let _username_flag = ((flags & 0b10000000) >> 7) != 0;
 
     let keep_alive = reader.get_u16();
 

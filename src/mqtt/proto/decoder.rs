@@ -50,7 +50,7 @@ impl Decoder for MQTTCodec {
                     return Ok(None);
                 }
                 self.part = PacketPart::FixedHeader;
-                let mut packet = reader.split_to(remaining).freeze();
+                let packet = reader.split_to(remaining).freeze();
                 match packet_type {
                     PacketType::CONNECT => decode_connect(packet),
                     PacketType::CONNACK => decode_connack(packet),

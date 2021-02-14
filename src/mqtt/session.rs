@@ -17,9 +17,11 @@ use crate::mqtt::proto::types::{
     ControlPacket, Disconnect, PacketType, PubResp, Publish, QoS, ReasonCode, SubAck, Subscribe,
     SubscriptionOptions, UnSubscribe, Will,
 };
-use crate::mqtt::subscription::{SessionSender, Subscription};
+
 use crate::mqtt::topic::{TopicMessage, Topics};
 use crate::settings::Settings;
+use byteorder::{BigEndian, ReadBytesExt};
+use sled::{Event, Subscriber};
 
 pub(crate) type ConnectionContextState =
     (Sender<ControlPacket>, ConnectProperties, Option<Will>, bool);
@@ -181,101 +183,90 @@ impl Session {
         mut connection_context_rx: Receiver<ConnectionContextState>,
     ) -> Result<()> {
         trace!("start");
-
-        // subscribe to root topic for new topic creation
-        /*        let new_topic_stream = self
-            .topic_manager
-            .read()
-            .await
-            .subscribe_channel()
-            .into_stream();
-        tokio::pin!(new_topic_stream);*/
-        let (subscription_event_tx, mut subscription_event_rx) = mpsc::channel(32);
-
         loop {
             tokio::select! {
-                res = timeout(self.expire_interval, connection_context_rx.recv()), if self
-                .connection.is_none()  => {
-                    match res {
-                        Ok(Some((connection_reply_tx, prop, will, clean_start))) => {
-                            debug!("new connection context");
-                            if let Some(ex) = prop.session_expire_interval {
-                                self.expire_interval = Duration::from_secs(ex as u64);
+                            res = timeout(self.expire_interval, connection_context_rx.recv()), if self
+                            .connection.is_none()  => {
+                                match res {
+                                    Ok(Some((connection_reply_tx, prop, will, clean_start))) => {
+                                        debug!("new connection context");
+                                        if let Some(ex) = prop.session_expire_interval {
+                                            self.expire_interval = Duration::from_secs(ex as u64);
+                                        }
+                                        self.clear();
+                                        self.connection = Some((connection_reply_tx, prop, will, clean_start));
+                                    },
+                                    Ok(None) => {
+                                        bail!("connection context closed. expire {}", self.expire_interval
+                                        .as_secs());
+                                    }
+                                    Err(e) => {
+                                        debug!("session expired: {}", e);
+                                        break;
+                                    }
+                                }
                             }
-                            self.clear();
-                            self.connection = Some((connection_reply_tx, prop, will, clean_start));
-                        },
-                        Ok(None) => {
-                            bail!("connection context closed. expire {}", self.expire_interval
-                            .as_secs());
-                        }
-                        Err(e) => {
-                            debug!("session expired: {}", e);
-                            break;
-                        }
-                    }
-                }
-                Some(msg) = session_event_rx.recv(), if self.connection.is_some() => {
-                    trace!("session event: {:?}", msg);
-                    match msg {
-                        SessionEvent::Publish(p) => self.publish(p).await?,
-                        SessionEvent::PubAck(p) => self.puback(p).await?,
-                        SessionEvent::PubRec(p) => self.pubrec(p).await?,
-                        SessionEvent::PubRel(p) => self.pubrel(p).await?,
-                        SessionEvent::PubComp(p) => self.pubcomp(p).await?,
-                        SessionEvent::Subscribe(s) => self.subscribe(s, subscription_event_tx.clone()).await?,
-                        SessionEvent::SubAck(s) => self.suback(s).await?,
-                        SessionEvent::UnSubscribe(s) => self.unsubscribe(s).await?,
-                        SessionEvent::UnSubAck(s) => self.unsuback(s).await?,
-                        SessionEvent::Disconnect(d) => {
-                            if let Some(ex) = d.properties.session_expire_interval {
-                                self.expire_interval = Duration::from_secs(ex as u64);
-                            }
-                            self.disconnect(d).await?;
-                            self.connection = None;
-                        }
-                    }
-                },
-                /*Some(event) = new_topic_stream.next() => {
-                    match event {
-                        Ok((topic, topic_tx, retained)) => {
-                            trace!("new topic event {:?}", topic);
-                            for (filter, option) in self.filtered(topic.as_str()) {
-                                debug!("new topic: {} match topic filter {}", topic, filter);
-                                let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
-                                self.topic_filters.entry((filter.to_owned(), option.to_owned())).and_modify(|v| v.push(unsubscribe_tx));
+                            Some(msg) = session_event_rx.recv(), if self.connection.is_some() => {
+                                trace!("session event: {:?}", msg);
+                                match msg {
+                                    SessionEvent::Publish(p) => self.publish(p).await?,
+                                    SessionEvent::PubAck(p) => self.puback(p).await?,
+                                    SessionEvent::PubRec(p) => self.pubrec(p).await?,
+                                    SessionEvent::PubRel(p) => self.pubrel(p).await?,
+                                    SessionEvent::PubComp(p) => self.pubcomp(p).await?,
+                                    SessionEvent::Subscribe(s) => self.subscribe(s).await?,
+                                    SessionEvent::SubAck(s) => self.suback(s).await?,
+                                    SessionEvent::UnSubscribe(s) => self.unsubscribe(s).await?,
+                                    SessionEvent::UnSubAck(s) => self.unsuback(s).await?,
+                                    SessionEvent::Disconnect(d) => {
+                                        if let Some(ex) = d.properties.session_expire_interval {
+                                            self.expire_interval = Duration::from_secs(ex as u64);
+                                        }
+                                        self.disconnect(d).await?;
+                                        self.connection = None;
+                                    }
+                                }
+                            },
+                            /*Some(event) = new_topic_stream.next() => {
+                                match event {
+                                    Ok((topic, topic_tx, retained)) => {
+                                        trace!("new topic event {:?}", topic);
+                                        for (filter, option) in self.filtered(topic.as_str()) {
+                                            debug!("new topic: {} match topic filter {}", topic, filter);
+                                            let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
+                                            self.topic_filters.entry((filter.to_owned(), option.to_owned())).and_modify(|v| v.push(unsubscribe_tx));
 
-                                let subscription = Subscription::new(
-                                    self.id.to_owned(),
-                                    option.to_owned(),
-                                    subscription_event_tx.clone(),
-                                );
+                                            let subscription = Subscription::new(
+                                                self.id.to_owned(),
+                                                option.to_owned(),
+                                                subscription_event_tx.clone(),
+                                            );
 
-                                let topic_name = topic.to_owned();
-                                let stream = topic_tx.subscribe().into_stream();
-                                tokio::spawn(async move {
-                                   subscription.subscribe(topic_name, stream, unsubscribe_rx).await
-                                });
+                                            let topic_name = topic.to_owned();
+                                            let stream = topic_tx.subscribe().into_stream();
+                                            tokio::spawn(async move {
+                                               subscription.subscribe(topic_name, stream, unsubscribe_rx).await
+                                            });
 
-                                let ret_msg = (filter, option, retained.clone());
-                                subscription_event_tx.send(ret_msg).await.map_err(Error::msg)?;
-                            }
-                        },
-                        Err(Lagged(lag)) => {
-                            warn!("new topic event lagged: {}", lag);
-                        },
-                        Err(err) => {
-                            warn!(cause = ?err, "new topic event error: ");
+                                            let ret_msg = (filter, option, retained.clone());
+                                            subscription_event_tx.send(ret_msg).await.map_err(Error::msg)?;
+                                        }
+                                    },
+                                    Err(Lagged(lag)) => {
+                                        warn!("new topic event lagged: {}", lag);
+                                    },
+                                    Err(err) => {
+                                        warn!(cause = ?err, "new topic event error: ");
+                                    }
+                                }
+                            }*/
+            /*                Some((topic_filter, option, message)) = subscription_event_rx.recv(), if self
+                            .connection.is_some() => {
+                                trace!("subscription publish topic: {}, message: {:?}", topic_filter, message);
+                                self.publish_client(option, message).await?
+                            },*/
+                            else => break,
                         }
-                    }
-                }*/
-                Some((topic_filter, option, message)) = subscription_event_rx.recv(), if self
-                .connection.is_some() => {
-                    trace!("subscription publish topic: {}, message: {:?}", topic_filter, message);
-                    self.publish_client(option, message).await?
-                },
-                else => break,
-            }
         }
         trace!("stop");
         Ok(())
@@ -478,8 +469,32 @@ impl Session {
         }
     }
 
-    #[instrument(skip(self, msg, tx), err)]
-    async fn subscribe(&mut self, msg: Subscribe, tx: SessionSender) -> Result<()> {
+    #[instrument(skip(subscriber))]
+    pub(crate) async fn subscription(
+        session: String,
+        topic_name: &str,
+        mut subscriber: Subscriber,
+    ) -> Result<()> {
+        //   tokio::pin!(stream);
+        trace!("start");
+        while let Some(event) = (&mut subscriber).await {
+            match event {
+                Event::Insert { key, value } => match key.as_ref().read_u64::<BigEndian>() {
+                    Ok(id) => {
+                        debug!("id: {}, value: {:#x?}", id, value);
+                    }
+                    Err(_) => warn!("invalid log id: {:#x?}", key),
+                },
+                Event::Remove { .. } => {}
+            }
+        }
+
+        trace!("end");
+        Ok(())
+    }
+
+    #[instrument(skip(self, msg), err)]
+    async fn subscribe(&mut self, msg: Subscribe) -> Result<()> {
         match &self.connection {
             Some((connection_reply_tx, _, _, _)) => {
                 debug!("subscribe topic filters: {:?}", msg.topic_filters);
@@ -491,36 +506,25 @@ impl Session {
                                 .topic_filters
                                 .entry((topic_filter.to_owned(), subscription_options.to_owned()))
                                 .or_insert(vec![]);
-                            let channels = self.topics.filter(topic_filter).await?;
+                            let channels = self.topics.subscribe(topic_filter).await?;
                             trace!("subscribe returns {} subscriptions", channels.len());
-                            for (topic, channel) in channels {
+                            for (topic, subscriber) in channels {
                                 let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
-                                let subscription = Subscription::new(
-                                    self.id.to_owned(),
-                                    subscription_options.to_owned(),
-                                    tx.clone(),
-                                );
                                 subscriptions.push(unsubscribe_tx);
-
+                                let session = self.id.to_owned();
                                 tokio::spawn(async move {
-                                    subscription
-                                        .subscribe(topic.as_str(), channel, unsubscribe_rx)
-                                        .await
-                                });
-
-                                /*if let Some(retained) = retained_msg.borrow().clone() {
-                                    if retained.retain || retained.ts > self.created {
-                                        let ret_msg =
-                                            (topic_filter.to_owned(), option.to_owned(), retained);
-                                        let tx = tx.to_owned();
-                                        tokio::spawn(async move {
-                                            if let Err(err) = tx.send(ret_msg).await {
-                                                warn!(cause = ?err, "could not process retained message");
-                                            }
-                                        });
+                                    tokio::select! {
+                                        Err(err) = Self::subscription(session, topic.as_str(),
+                                        subscriber) => {
+                                            warn!(cause = ?err, "subscription error");
+                                        },
+                                        _ = unsubscribe_rx => {
+                                            debug!("unsubscribe");
+                                        }
                                     }
-                                }*/
+                                });
                             }
+
                             match subscription_options.qos {
                                 QoS::AtMostOnce => ReasonCode::Success,
                                 QoS::AtLeastOnce => ReasonCode::GrantedQoS1,

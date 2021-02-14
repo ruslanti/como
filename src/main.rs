@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
     debug!("{:?}", settings);
 
     let (context_tx, mut context_rx) = mpsc::channel(32);
-    let context = Arc::new(Mutex::new(AppContext::new(settings.clone(), context_tx)));
+    let context = Arc::new(Mutex::new(AppContext::new(settings.clone(), context_tx)?));
 
     let context_cleaner = context.clone();
     tokio::spawn(async move {
