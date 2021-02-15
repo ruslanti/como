@@ -4,12 +4,12 @@ use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Error, Result};
+use anyhow::{anyhow, bail, Context, Error, Result};
 use bytes::Bytes;
 use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
 use tracing::{debug, error, field, instrument, trace};
@@ -20,29 +20,30 @@ use crate::mqtt::proto::property::ConnAckProperties;
 use crate::mqtt::proto::types::{
     Auth, ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, QoS, ReasonCode,
 };
-use crate::mqtt::session::SessionEvent;
+use crate::mqtt::session::{Session, SessionEvent};
 use crate::mqtt::shutdown::Shutdown;
 use crate::settings::ConnectionSettings;
+use std::borrow::{Borrow, BorrowMut};
 
 type SessionContext = Option<(String, Sender<SessionEvent>)>;
 
 #[derive(Debug)]
-pub struct ConnectionHandler {
+pub struct ConnectionHandler<'a> {
     peer: SocketAddr,
     limit_connections: Arc<Semaphore>,
     shutdown_complete: mpsc::Sender<()>,
     keep_alive: Option<Duration>,
-    context: Arc<Mutex<AppContext>>,
-    session: SessionContext,
+    context: Arc<AppContext>,
+    session: Option<Session<'a>>,
     config: ConnectionSettings,
 }
 
-impl ConnectionHandler {
+impl<'a> ConnectionHandler<'a> {
     pub(crate) fn new(
         peer: SocketAddr,
         limit_connections: Arc<Semaphore>,
         shutdown_complete: mpsc::Sender<()>,
-        context: Arc<Mutex<AppContext>>,
+        context: Arc<AppContext>,
         config: ConnectionSettings,
     ) -> Self {
         ConnectionHandler {
@@ -57,7 +58,7 @@ impl ConnectionHandler {
     }
 
     //#[instrument(skip(self, conn_tx, msg), err)]
-    async fn connect(&mut self, msg: Connect, conn_tx: Sender<ControlPacket>) -> Result<()> {
+    async fn connect<'c>(&mut self, msg: Connect, conn_tx: Sender<ControlPacket>) -> Result<()> {
         //trace!("{:?}", msg);
         let (assigned_client_identifier, identifier) = if let Some(id) = msg.client_identifier {
             (None, id)
@@ -97,24 +98,20 @@ impl ConnectionHandler {
                 None
             };
 
-        let mut context = self.context.lock().await;
-        let (session_event_tx, connection_context_tx, session_present) = context.connect(id).await;
+        self.session = Some(self.context.make_session(id, conn_tx, msg));
+        self.context.accuire_session(id, self.peer)?;
 
-        connection_context_tx
-            .send((
-                conn_tx.clone(),
-                msg.properties,
-                msg.will,
-                msg.clean_start_flag,
-            ))
-            .await?;
+        /*connection_context_tx
+        .send((
+            conn_tx.clone(),
+            msg.properties,
+            msg.will,
+            msg.clean_start_flag,
+        ))
+        .await?;*/
 
-        self.session = Some((id.to_string(), session_event_tx));
-        let session_present = if msg.clean_start_flag {
-            false
-        } else {
-            session_present
-        };
+        self.session = None; //Some((id.to_string(), session_event_tx));
+        let session_present = if msg.clean_start_flag { false } else { true };
 
         let ack = ControlPacket::ConnAck(ConnAck {
             session_present,
@@ -147,102 +144,29 @@ impl ConnectionHandler {
     #[instrument(skip(self, conn_tx), err)]
     async fn recv(&mut self, msg: ControlPacket, conn_tx: Sender<ControlPacket>) -> Result<()> {
         //trace!("{:?}", packet);
-        match (self.session.to_owned(), msg) {
+        match (self.session.borrow_mut(), msg) {
             (None, ControlPacket::Connect(connect)) => self.connect(connect, conn_tx).await,
             (None, ControlPacket::Auth(_auth)) => unimplemented!(), //self.process_auth(auth).await,
             (None, packet) => {
                 let context = format!("session: None, packet: {:?}", packet,);
                 Err(anyhow!("unacceptable event").context(context))
             }
-            (Some((_, session_tx)), ControlPacket::Publish(publish)) => {
-                session_tx
-                    .send(SessionEvent::Publish(publish))
-                    .map_err(Error::msg)
-                    .await
-            }
-            (Some((_, session_tx)), ControlPacket::PubAck(response)) => {
-                session_tx
-                    .send(SessionEvent::PubAck(response))
-                    .map_err(Error::msg)
-                    .await
-            }
-            (Some((_, session_tx)), ControlPacket::PubRel(response)) => {
-                session_tx
-                    .send(SessionEvent::PubRel(response))
-                    .map_err(Error::msg)
-                    .await
-            }
-            (Some((_, session_tx)), ControlPacket::PubRec(response)) => {
-                session_tx
-                    .send(SessionEvent::PubRec(response))
-                    .map_err(Error::msg)
-                    .await
-            }
-            (Some((_, session_tx)), ControlPacket::PubComp(response)) => {
-                session_tx
-                    .send(SessionEvent::PubComp(response))
-                    .map_err(Error::msg)
-                    .await
-            }
-            (Some((_, session_tx)), ControlPacket::Subscribe(sub)) => {
-                session_tx
-                    .send(SessionEvent::Subscribe(sub))
-                    .map_err(Error::msg)
-                    .await
-            }
-            (Some((_, session_tx)), ControlPacket::SubAck(sub)) => {
-                session_tx
-                    .send(SessionEvent::SubAck(sub))
-                    .map_err(Error::msg)
-                    .await
-            }
-            (Some((_, session_tx)), ControlPacket::UnSubscribe(sub)) => {
-                session_tx
-                    .send(SessionEvent::UnSubscribe(sub))
-                    .map_err(Error::msg)
-                    .await
-            }
-            (Some((_, session_tx)), ControlPacket::UnSubAck(sub)) => {
-                session_tx
-                    .send(SessionEvent::UnSubAck(sub))
-                    .map_err(Error::msg)
-                    .await
-            }
-            (Some(_), ControlPacket::PingReq) => {
-                conn_tx
-                    .send(ControlPacket::PingResp)
-                    .map_err(Error::msg)
-                    .await
-            }
-            (Some((id, session_tx)), ControlPacket::Disconnect(disconnect)) => {
-                debug!(
-                    "{}: disconnect reason code: {:?}, reason string:{:?}",
-                    id, disconnect.reason_code, disconnect.properties.reason_string
-                );
-                self.session = None;
-                /*                {
-                    let mut context = self.context.lock().await;
-                    context.disconnect(&id, expire).await;
-                }*/
-                session_tx
-                    .send(SessionEvent::Disconnect(disconnect))
-                    .map_err(Error::msg)
-                    .await
-            }
-            (Some((id, _)), packet) => {
-                let context = format!("session: {}, packet: {:?}", id, packet,);
-                Err(anyhow!("unacceptable event").context(context))
-            }
+            (Some(_), ControlPacket::PingReq) => conn_tx
+                .send(ControlPacket::PingResp)
+                .map_err(Error::msg)
+                .await
+                .context("Failure on sending PING resp"),
+            (Some(session), msg) => session.handle(msg).await,
         }
     }
 
-    #[instrument(skip(self), err)]
+    /*    #[instrument(skip(self), err)]
     async fn event(&self, event: SessionEvent) -> Result<()> {
         match &self.session {
             Some((_, tx)) => tx.send(event).map_err(Error::msg).await,
             None => Ok(()),
         }
-    }
+    }*/
 
     async fn _process_auth(&self, msg: Auth) -> Result<()> {
         trace!("{:?}", msg);
@@ -284,7 +208,7 @@ impl ConnectionHandler {
                 Err(e) => {
                     error!("timeout on process connection: {}", e);
                     // handle timeout
-                    match self.session.as_mut() {
+                    /*match self.session.as_mut() {
                         None => return Err(e.into()),
                         Some((id, _session_tx)) => {
                             trace!("DISCONNECT {}", id);
@@ -296,7 +220,7 @@ impl ConnectionHandler {
                             self.disconnect(tx, ReasonCode::KeepAliveTimeout).await?;
                             break;
                         }
-                    }
+                    }*/
                 }
             }
         }
@@ -310,15 +234,15 @@ impl ConnectionHandler {
     {
         let framed = Framed::new(socket, MQTTCodec::new());
         let (sink, stream) = framed.split::<ControlPacket>();
-        let (conn_tx, conn_rx) = mpsc::channel(32);
+        let (session_tx, session_rx) = mpsc::channel(32);
         while !shutdown.is_shutdown() {
             // While reading a request frame, also listen for the shutdown signal.
             tokio::select! {
-                res = self.process_stream(stream, conn_tx) => {
+                res = self.process_stream(stream, session_tx) => {
                     res?; // handle error
                     break; // disconnect
                 },
-                res = send(sink, conn_rx) => {
+                res = send(sink, session_rx) => {
                     res?; // handle error
                     break; // disconnect
                 },
@@ -346,7 +270,7 @@ where
     Ok(())
 }
 
-impl Drop for ConnectionHandler {
+impl Drop for ConnectionHandler<'_> {
     fn drop(&mut self) {
         self.limit_connections.add_permits(1);
     }

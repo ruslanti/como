@@ -12,7 +12,7 @@ use path::TopicPath;
 
 use crate::mqtt::proto::property::PublishProperties;
 use crate::mqtt::proto::types::QoS;
-use sled::{IVec, Subscriber, Tree};
+use sled::{Db, IVec, Subscriber, Tree};
 
 mod path;
 
@@ -34,15 +34,14 @@ struct Topic {
 }
 
 pub struct Topics {
-    db: sled::Db,
+    db: Db,
     new_topic: (NewTopicSender, NewTopicReceiver),
     nodes: RwLock<TopicPath<Topic>>,
 }
 
 impl Topics {
-    pub(crate) fn new(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().join("topics");
-        debug!("create {:?}", path);
+    pub(crate) fn new(path: impl AsRef<Path> + Debug) -> Result<Self> {
+        debug!("open topics db: {:?}", path);
         let db = sled::open(path)?;
 
         let mut nodes = TopicPath::new();

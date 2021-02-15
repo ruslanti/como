@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, Mutex, Semaphore};
+use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::time::{sleep, Duration};
 use tokio_native_tls::TlsAcceptor;
 use tracing::{debug, error, field, info, instrument};
@@ -22,7 +22,7 @@ struct Service {
     shutdown_complete_rx: mpsc::Receiver<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
     config: Arc<Settings>,
-    context: Arc<Mutex<AppContext>>,
+    context: Arc<AppContext>,
 }
 
 pub(crate) async fn run(
@@ -30,7 +30,7 @@ pub(crate) async fn run(
     acceptor: Option<Arc<TlsAcceptor>>,
     config: Arc<Settings>,
     shutdown: impl Future,
-    context: Arc<Mutex<AppContext>>,
+    context: Arc<AppContext>,
 ) -> Result<()> {
     let (notify_shutdown, _) = broadcast::channel(1);
     let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel(1);
@@ -89,7 +89,7 @@ impl Service {
                 self.limit_connections.clone(),
                 self.shutdown_complete_tx.clone(),
                 self.context.clone(),
-                self.config.connection,
+                self.config.connection.to_owned(),
             );
 
             let shutdown = Shutdown::new(self.notify_shutdown.subscribe());

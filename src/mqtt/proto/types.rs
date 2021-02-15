@@ -3,8 +3,7 @@ use std::convert::{TryFrom, TryInto};
 
 use anyhow::anyhow;
 use bytes::Bytes;
-use serde::de::Visitor;
-use serde::{de, Deserialize, Deserializer};
+use serde::{Deserialize, Serialize};
 
 use crate::mqtt::proto::property::{
     AuthProperties, ConnAckProperties, ConnectProperties, DisconnectProperties, PubResProperties,
@@ -21,7 +20,7 @@ macro_rules! end_of_stream {
     };
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Copy, Ord, PartialOrd, Hash)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum QoS {
     AtMostOnce,
     AtLeastOnce,
@@ -51,7 +50,7 @@ impl Into<u8> for QoS {
     }
 }
 
-struct QoSVisitor;
+/*struct QoSVisitor;
 
 impl<'de> Visitor<'de> for QoSVisitor {
     type Value = QoS;
@@ -79,9 +78,9 @@ impl<'de> Deserialize<'de> for QoS {
     {
         deserializer.deserialize_u8(QoSVisitor)
     }
-}
+}*/
 
-#[derive(Debug, Eq, PartialEq, Clone, Copy, Hash)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Hash, Serialize, Deserialize)]
 pub enum Retain {
     SendAtTime,
     SendAtSubscribe,
@@ -355,7 +354,7 @@ pub struct Disconnect {
     pub properties: DisconnectProperties,
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Hash)]
+#[derive(Debug, Eq, PartialEq, Clone, Hash, Serialize, Deserialize)]
 pub struct SubscriptionOptions {
     pub qos: QoS,
     pub nl: bool,
