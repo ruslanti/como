@@ -1,11 +1,9 @@
-use std::cmp::min;
 use std::net::SocketAddr;
 use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
-use bytes::Bytes;
 use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -16,29 +14,26 @@ use tracing::{debug, error, field, instrument, trace};
 use uuid::Uuid;
 
 use crate::mqtt::context::AppContext;
-use crate::mqtt::proto::property::ConnAckProperties;
 use crate::mqtt::proto::types::{
-    Auth, ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, QoS, ReasonCode,
+    Auth, Connect, ControlPacket, Disconnect, MQTTCodec, QoS, ReasonCode,
 };
 use crate::mqtt::session::{Session, SessionEvent};
 use crate::mqtt::shutdown::Shutdown;
 use crate::settings::ConnectionSettings;
-use std::borrow::{Borrow, BorrowMut};
-
-type SessionContext = Option<(String, Sender<SessionEvent>)>;
+use std::borrow::BorrowMut;
 
 #[derive(Debug)]
-pub struct ConnectionHandler<'a> {
+pub struct ConnectionHandler {
     peer: SocketAddr,
     limit_connections: Arc<Semaphore>,
     shutdown_complete: mpsc::Sender<()>,
     keep_alive: Option<Duration>,
     context: Arc<AppContext>,
-    session: Option<Session<'a>>,
+    session: Option<Session>,
     config: ConnectionSettings,
 }
 
-impl<'a> ConnectionHandler<'a> {
+impl ConnectionHandler {
     pub(crate) fn new(
         peer: SocketAddr,
         limit_connections: Arc<Semaphore>,
@@ -58,16 +53,18 @@ impl<'a> ConnectionHandler<'a> {
     }
 
     //#[instrument(skip(self, conn_tx, msg), err)]
-    async fn connect<'c>(&mut self, msg: Connect, conn_tx: Sender<ControlPacket>) -> Result<()> {
+    async fn prepare_session(
+        &mut self,
+        msg: Connect,
+        conn_tx: Sender<ControlPacket>,
+    ) -> Result<Session> {
         //trace!("{:?}", msg);
-        let (assigned_client_identifier, identifier) = if let Some(id) = msg.client_identifier {
-            (None, id)
-        } else {
-            let id: Bytes = Uuid::new_v4().to_simple().to_string().into();
-            (Some(id.clone()), id)
-        };
+        let identifier = msg
+            .client_identifier
+            .clone()
+            .unwrap_or(Uuid::new_v4().to_simple().to_string().into());
 
-        let id = std::str::from_utf8(&identifier[..])?;
+        //let id = std::str::from_utf8(&identifier[..])?;
         //debug!("client identifier: {}", id);
 
         let client_keep_alive = if msg.keep_alive != 0 {
@@ -81,71 +78,27 @@ impl<'a> ConnectionHandler<'a> {
             .or(client_keep_alive)
             .map(|d| Duration::from_secs(d as u64));
 
-        let maximum_qos = if let Some(QoS::ExactlyOnce) = self.config.maximum_qos {
-            None
-        } else {
-            self.config.maximum_qos
-        };
+        let mut session = self.context.make_session(
+            identifier.clone(),
+            conn_tx,
+            self.peer,
+            msg.properties.clone(),
+            msg.will.clone(),
+        );
 
-        let session_expire_interval =
-            if let Some(server_expire) = self.config.session_expire_interval {
-                if let Some(client_expire) = msg.properties.session_expire_interval {
-                    Some(min(server_expire, client_expire))
-                } else {
-                    Some(server_expire)
-                }
-            } else {
-                None
-            };
+        session.handle(ControlPacket::Connect(msg)).await?;
 
-        self.session = Some(self.context.make_session(id, conn_tx, msg));
-        self.context.accuire_session(id, self.peer)?;
-
-        /*connection_context_tx
-        .send((
-            conn_tx.clone(),
-            msg.properties,
-            msg.will,
-            msg.clean_start_flag,
-        ))
-        .await?;*/
-
-        self.session = None; //Some((id.to_string(), session_event_tx));
-        let session_present = if msg.clean_start_flag { false } else { true };
-
-        let ack = ControlPacket::ConnAck(ConnAck {
-            session_present,
-            reason_code: ReasonCode::Success,
-            properties: ConnAckProperties {
-                session_expire_interval,
-                receive_maximum: self.config.receive_maximum,
-                maximum_qos,
-                retain_available: self.config.retain_available,
-                maximum_packet_size: self.config.maximum_packet_size,
-                assigned_client_identifier,
-                topic_alias_maximum: self.config.topic_alias_maximum,
-                reason_string: None,
-                user_properties: vec![],
-                wildcard_subscription_available: None,
-                subscription_identifier_available: None,
-                shared_subscription_available: None,
-                server_keep_alive: self.config.server_keep_alive,
-                response_information: None,
-                server_reference: None,
-                authentication_method: None,
-                authentication_data: None,
-            },
-        });
-        conn_tx.send(ack).await?;
-
-        Ok(())
+        Ok(session)
     }
 
     #[instrument(skip(self, conn_tx), err)]
     async fn recv(&mut self, msg: ControlPacket, conn_tx: Sender<ControlPacket>) -> Result<()> {
         //trace!("{:?}", packet);
         match (self.session.borrow_mut(), msg) {
-            (None, ControlPacket::Connect(connect)) => self.connect(connect, conn_tx).await,
+            (None, ControlPacket::Connect(connect)) => {
+                self.session = self.prepare_session(connect, conn_tx).await.ok();
+                Ok(())
+            }
             (None, ControlPacket::Auth(_auth)) => unimplemented!(), //self.process_auth(auth).await,
             (None, packet) => {
                 let context = format!("session: None, packet: {:?}", packet,);
@@ -270,7 +223,7 @@ where
     Ok(())
 }
 
-impl Drop for ConnectionHandler<'_> {
+impl Drop for ConnectionHandler {
     fn drop(&mut self) {
         self.limit_connections.add_permits(1);
     }

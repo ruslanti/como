@@ -3,18 +3,20 @@ use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, instrument, warn};
 
-use crate::mqtt::proto::types::{Connect, ControlPacket};
+use crate::mqtt::proto::property::ConnectProperties;
+use crate::mqtt::proto::types::{ControlPacket, MqttString, Will};
 use crate::mqtt::session::{Session, SessionState};
 use crate::mqtt::topic::Topics;
 use crate::settings::Settings;
 use sled::{Db, Tree};
+use std::convert::{TryFrom, TryInto};
 use std::net::SocketAddr;
 
 #[derive(Debug)]
 pub(crate) struct AppContext {
     db: Db,
-    sessions: Tree,
-    subscriptions: Tree,
+    sessions_db: Tree,
+    subscriptions_db: Tree,
     pub(crate) config: Arc<Settings>,
     topic_manager: Arc<Topics>,
 }
@@ -28,69 +30,31 @@ impl AppContext {
         let subscriptions = db.open_tree("subscriptions")?;
         Ok(Self {
             db,
-            sessions,
-            subscriptions,
+            sessions_db: sessions,
+            subscriptions_db: subscriptions,
             config,
             topic_manager: Arc::new(Topics::new(topics_db_path)?),
         })
     }
 
-    /*    pub async fn load(&mut self) -> Result<()> {
-        self.topic_manager.load().await
-    }*/
-
-    #[instrument(skip(self))]
-    pub fn clean(&mut self, identifier: String) {
-        /* if self.sessions.remove(identifier.as_str()).is_some() {
-            debug!("removed");
-        }*/
-    }
-
     pub fn make_session(
         &self,
-        session: &str,
+        session: MqttString,
         connection_reply_tx: Sender<ControlPacket>,
-        msg: Connect,
+        peer: SocketAddr,
+        properties: ConnectProperties,
+        will: Option<Will>,
     ) -> Session {
         Session::new(
             session,
             connection_reply_tx,
-            msg.properties,
-            msg.will,
-            self.config.clone(),
+            peer,
+            properties,
+            will,
+            self.config.connection.to_owned(),
             self.topic_manager.clone(),
-            self.subscriptions,
+            self.sessions_db.clone(),
+            self.subscriptions_db.clone(),
         )
-    }
-
-    //#[instrument(skip(self))]
-    pub fn accuire_session(&mut self, session: &str, peer: SocketAddr) -> Result<SessionState> {
-        let mut session_present = false;
-
-        let update_fn = |old: Option<&[u8]>| -> Option<Vec<u8>> {
-            let session = match old {
-                Some(encoded) => {
-                    if let Ok(session) = bincode::deserialize(encoded) {
-                        session_present = true;
-                        //session.peer = peer;
-                        Some(session)
-                    } else {
-                        Some(SessionState::new(peer))
-                    }
-                }
-                None => Some(SessionState::new(peer)),
-            };
-            session.and_then(|s: SessionState| bincode::serialize(&s).ok())
-        };
-
-        if let Some(encoded) = self
-            .sessions
-            .fetch_and_update(session, update_fn)
-            .map_err(Error::msg)?
-        {
-            bincode::deserialize(encoded.as_ref()).map_err(Error::msg)
-        } else {
-            bail!("could not store session");
-        }
     }
 }

@@ -10,6 +10,7 @@ use crate::mqtt::proto::property::{
     PublishProperties, SubAckProperties, SubscribeProperties, UnSubscribeProperties,
     WillProperties,
 };
+use std::fmt::Formatter;
 
 pub type MqttString = Bytes;
 
@@ -302,7 +303,7 @@ impl Into<u8> for ReasonCode {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct Will {
     pub qos: QoS,
     pub retain: bool,

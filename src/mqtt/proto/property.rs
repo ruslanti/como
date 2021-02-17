@@ -167,7 +167,7 @@ impl TryFrom<u32> for Property {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct WillProperties {
     pub will_delay_interval: u32,
     pub payload_format_indicator: Option<bool>,
@@ -178,7 +178,7 @@ pub struct WillProperties {
     pub user_properties: Vec<(MqttString, MqttString)>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct ConnectProperties {
     pub session_expire_interval: Option<u32>,
     pub receive_maximum: Option<u16>,
