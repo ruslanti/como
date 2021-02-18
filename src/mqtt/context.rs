@@ -1,16 +1,15 @@
-use anyhow::{bail, Error, Result};
+use std::net::SocketAddr;
 use std::sync::Arc;
+
+use anyhow::Result;
+use sled::{Db, Tree};
 use tokio::sync::mpsc::Sender;
-use tracing::{debug, instrument, warn};
 
 use crate::mqtt::proto::property::ConnectProperties;
 use crate::mqtt::proto::types::{ControlPacket, MqttString, Will};
-use crate::mqtt::session::{Session, SessionState};
+use crate::mqtt::session::Session;
 use crate::mqtt::topic::Topics;
 use crate::settings::Settings;
-use sled::{Db, Tree};
-use std::convert::{TryFrom, TryInto};
-use std::net::SocketAddr;
 
 #[derive(Debug)]
 pub(crate) struct AppContext {

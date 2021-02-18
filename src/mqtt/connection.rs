@@ -1,3 +1,4 @@
+use std::borrow::BorrowMut;
 use std::net::SocketAddr;
 use std::ops::Add;
 use std::sync::Arc;
@@ -10,17 +11,14 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
-use tracing::{debug, error, field, instrument, trace};
+use tracing::{error, field, instrument, trace};
 use uuid::Uuid;
 
 use crate::mqtt::context::AppContext;
-use crate::mqtt::proto::types::{
-    Auth, Connect, ControlPacket, Disconnect, MQTTCodec, QoS, ReasonCode,
-};
-use crate::mqtt::session::{Session, SessionEvent};
+use crate::mqtt::proto::types::{Auth, Connect, ControlPacket, Disconnect, MQTTCodec, ReasonCode};
+use crate::mqtt::session::Session;
 use crate::mqtt::shutdown::Shutdown;
 use crate::settings::ConnectionSettings;
-use std::borrow::BorrowMut;
 
 #[derive(Debug)]
 pub struct ConnectionHandler {
@@ -96,7 +94,7 @@ impl ConnectionHandler {
         //trace!("{:?}", packet);
         match (self.session.borrow_mut(), msg) {
             (None, ControlPacket::Connect(connect)) => {
-                self.session = self.prepare_session(connect, conn_tx).await.ok();
+                self.session = Some(self.prepare_session(connect, conn_tx).await?);
                 Ok(())
             }
             (None, ControlPacket::Auth(_auth)) => unimplemented!(), //self.process_auth(auth).await,

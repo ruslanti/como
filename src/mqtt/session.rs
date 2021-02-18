@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{anyhow, bail, Error, Result};
+use anyhow::{anyhow, bail, Context, Error, Result};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
@@ -21,7 +21,7 @@ use crate::mqtt::proto::types::{
 };
 
 use crate::mqtt::topic::{TopicMessage, Topics};
-use crate::settings::{ConnectionSettings, Settings};
+use crate::settings::ConnectionSettings;
 use byteorder::{BigEndian, ReadBytesExt};
 use sled::{Batch, Event, IVec, Subscriber, Tree};
 use std::borrow::Borrow;
@@ -30,11 +30,11 @@ use std::net::SocketAddr;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SubscriptionKey<'a> {
-    session: &'a str,
-    topic_filter: &'a str,
+    session: &'a [u8],
+    topic_filter: &'a [u8],
 }
 
-#[derive(Debug, Eq, PartialEq)]
+/*#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum SessionEvent {
     Publish(Publish),
     PubAck(PubResp),
@@ -46,7 +46,7 @@ pub(crate) enum SessionEvent {
     UnSubscribe(UnSubscribe),
     UnSubAck(SubAck),
     Disconnect(Disconnect),
-}
+}*/
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum PublishEvent {
@@ -62,10 +62,10 @@ pub(crate) struct SessionState {
 }
 
 trait Subscriptions {
-    fn store_subscription(&self, topic_filter: &str, option: SubscriptionOptions) -> Result<()>;
-    fn remove_subscription(&self, topic_filter: &str) -> Result<()>;
-    fn list_subscriptions(&self) -> Result<Vec<&str>>;
-    fn clear_subscriptions(&self) -> Result<()>;
+    fn store_subscription(&self, topic_filter: &[u8], option: SubscriptionOptions) -> Result<()>;
+    fn remove_subscription(&self, topic_filter: &[u8]) -> Result<bool>;
+    fn list_subscriptions(&self) -> Result<Vec<(IVec, SubscriptionOptions)>>;
+    fn clear_subscriptions(&self) -> Result<usize>;
 }
 
 #[derive(Debug)]
@@ -180,8 +180,6 @@ impl SessionState {
 }
 
 impl Session {
-    #[instrument(skip(id, config, topic_manager),
-    fields(identifier = field::debug(& id)))]
     pub fn new(
         id: MqttString,
         connection_reply_tx: Sender<ControlPacket>,
@@ -193,7 +191,7 @@ impl Session {
         sessions_db: Tree,
         subscriptions_db: Tree,
     ) -> Self {
-        info!("new session");
+        info!("new session: {:?}", id);
         Self {
             id,
             //created: Instant::now(),
@@ -213,21 +211,12 @@ impl Session {
         }
     }
 
-    fn clear(&mut self) {
-        self.server_flows.clear();
-        self.client_flows.clear();
-        self.topic_filters.clear();
-    }
-
     //#[instrument(skip(self))]
-    pub fn acquire_session(&self) -> Result<bool> {
-        let mut session_present = false;
-
+    pub fn acquire(&self) -> Result<bool> {
         let update_fn = |old: Option<&[u8]>| -> Option<Vec<u8>> {
             let session = match old {
                 Some(encoded) => {
                     if let Ok(mut session) = SessionState::try_from(encoded) {
-                        session_present = true;
                         session.peer = self.peer;
                         Some(session)
                     } else {
@@ -239,40 +228,17 @@ impl Session {
             session.and_then(|s: SessionState| s.try_into().ok())
         };
 
-        if let Some(encoded) = self
+        if let Some(_encoded) = self
             .sessions_db
             .fetch_and_update(self.id.clone(), update_fn)
             .map_err(Error::msg)?
         {
-            Ok(session_present)
+            Ok(true)
         } else {
-            bail!("could not store session");
+            Ok(false)
         }
     }
 
-    pub async fn handle(&mut self, msg: ControlPacket) -> Result<()> {
-        trace!("session event: {:?}", msg);
-        match msg {
-            ControlPacket::Connect(p) => self.connect(p).await,
-            ControlPacket::Publish(p) => self.publish(p).await,
-            ControlPacket::PubAck(p) => self.puback(p).await,
-            ControlPacket::PubRec(p) => self.pubrec(p).await,
-            ControlPacket::PubRel(p) => self.pubrel(p).await,
-            ControlPacket::PubComp(p) => self.pubcomp(p).await,
-            ControlPacket::Subscribe(s) => self.subscribe(s).await,
-            ControlPacket::SubAck(s) => self.suback(s).await,
-            ControlPacket::UnSubscribe(s) => self.unsubscribe(s).await,
-            ControlPacket::UnSubAck(s) => self.unsuback(s).await,
-            ControlPacket::Disconnect(d) => {
-                if let Some(ex) = d.properties.session_expire_interval {
-                    self.expire_interval = Duration::from_secs(ex as u64);
-                }
-                self.disconnect(d).await
-                //self.connection = None;
-            }
-            _ => unreachable!(),
-        }
-    }
     /*
         #[instrument(skip(self, session_event_rx, connection_context_rx), fields(identifier = field::display(& self.id)),
         err)]
@@ -442,68 +408,118 @@ impl Session {
         Ok(())
     }
 
-    #[instrument(skip(self, msg), err)]
-    async fn connect(&mut self, msg: Connect) -> Result<()> {
-        let session_present = self.acquire_session()?;
-
-        if session_present {
-            if msg.clean_start_flag {
-                self.remove_subscription("")?
-            } else {
-                // load session state
-            }
-        }
-
-        let assigned_client_identifier = if let Some(id) = msg.client_identifier.clone() {
-            None
-        } else {
-            Some(self.id.clone())
-        };
-
-        let maximum_qos = if let Some(QoS::ExactlyOnce) = self.config.maximum_qos {
-            None
-        } else {
-            self.config.maximum_qos
-        };
-
-        let session_expire_interval =
-            if let Some(server_expire) = self.config.session_expire_interval {
-                if let Some(client_expire) = msg.properties.session_expire_interval {
-                    Some(min(server_expire, client_expire))
-                } else {
-                    Some(server_expire)
+    pub async fn handle(&mut self, msg: ControlPacket) -> Result<()> {
+        match msg {
+            ControlPacket::Connect(p) => self.connect(p).await,
+            ControlPacket::Publish(p) => self.publish(p).await,
+            ControlPacket::PubAck(p) => self.puback(p).await,
+            ControlPacket::PubRec(p) => self.pubrec(p).await,
+            ControlPacket::PubRel(p) => self.pubrel(p).await,
+            ControlPacket::PubComp(p) => self.pubcomp(p).await,
+            ControlPacket::Subscribe(s) => self.subscribe(s).await,
+            ControlPacket::SubAck(s) => self.suback(s).await,
+            ControlPacket::UnSubscribe(s) => self.unsubscribe(s).await,
+            ControlPacket::UnSubAck(s) => self.unsuback(s).await,
+            ControlPacket::Disconnect(d) => {
+                if let Some(ex) = d.properties.session_expire_interval {
+                    self.expire_interval = Duration::from_secs(ex as u64);
                 }
-            } else {
-                None
-            };
-
-        let ack = ControlPacket::ConnAck(ConnAck {
-            session_present,
-            reason_code: ReasonCode::Success,
-            properties: ConnAckProperties {
-                session_expire_interval,
-                receive_maximum: self.config.receive_maximum,
-                maximum_qos,
-                retain_available: self.config.retain_available,
-                maximum_packet_size: self.config.maximum_packet_size,
-                assigned_client_identifier,
-                topic_alias_maximum: self.config.topic_alias_maximum,
-                reason_string: None,
-                user_properties: vec![],
-                wildcard_subscription_available: None,
-                subscription_identifier_available: None,
-                shared_subscription_available: None,
-                server_keep_alive: self.config.server_keep_alive,
-                response_information: None,
-                server_reference: None,
-                authentication_method: None,
-                authentication_data: None,
-            },
-        });
-        self.connection_reply_tx.send(ack).await.map_err(Error::msg)
+                self.disconnect(d).await
+                //self.connection = None;
+            }
+            _ => unreachable!(),
+        }
     }
 
-    #[instrument(skip(self, msg), err)]
+    #[instrument(skip(self), fields(identifier = field::debug(& self.id)), err)]
+    fn init(&mut self, clean_start: bool) -> Result<bool> {
+        let session_present = self.acquire().context("acquire session")?;
+
+        if session_present {
+            if clean_start {
+                let removed = self.clear_subscriptions().context("clean start session")?;
+                info!("removed {} subscriptions", removed);
+            } else {
+                // load session state
+                let subscriptions = self.list_subscriptions().context("get subscriptions")?;
+                for (topic_filter, option) in subscriptions {
+                    debug!("subscribe {:?}:{:?}", topic_filter, option);
+                }
+                // start subscriptions
+            }
+        };
+
+        Ok(session_present)
+    }
+
+    #[instrument(skip(self, msg), fields(identifier = field::debug(& self.id)), err)]
+    async fn connect(&mut self, msg: Connect) -> Result<()> {
+        match self.init(msg.clean_start_flag) {
+            Ok(session_present) => {
+                trace!("session_present: {}", session_present);
+                let assigned_client_identifier = if let Some(_) = msg.client_identifier.clone() {
+                    None
+                } else {
+                    Some(self.id.clone())
+                };
+
+                let maximum_qos = if let Some(QoS::ExactlyOnce) = self.config.maximum_qos {
+                    None
+                } else {
+                    self.config.maximum_qos
+                };
+
+                let session_expire_interval =
+                    if let Some(server_expire) = self.config.session_expire_interval {
+                        if let Some(client_expire) = msg.properties.session_expire_interval {
+                            Some(min(server_expire, client_expire))
+                        } else {
+                            Some(server_expire)
+                        }
+                    } else {
+                        None
+                    };
+
+                let ack = ControlPacket::ConnAck(ConnAck {
+                    session_present,
+                    reason_code: ReasonCode::Success,
+                    properties: ConnAckProperties {
+                        session_expire_interval,
+                        receive_maximum: self.config.receive_maximum,
+                        maximum_qos,
+                        retain_available: self.config.retain_available,
+                        maximum_packet_size: self.config.maximum_packet_size,
+                        assigned_client_identifier,
+                        topic_alias_maximum: self.config.topic_alias_maximum,
+                        reason_string: None,
+                        user_properties: vec![],
+                        wildcard_subscription_available: None,
+                        subscription_identifier_available: None,
+                        shared_subscription_available: None,
+                        server_keep_alive: self.config.server_keep_alive,
+                        response_information: None,
+                        server_reference: None,
+                        authentication_method: None,
+                        authentication_data: None,
+                    },
+                });
+                self.connection_reply_tx.send(ack).await.map_err(Error::msg)
+            }
+            Err(err) => {
+                warn!(cause = ?err, "session error: ");
+                let ack = ControlPacket::ConnAck(ConnAck {
+                    session_present: false,
+                    reason_code: ReasonCode::UnspecifiedError,
+                    properties: ConnAckProperties::default(),
+                });
+                self.connection_reply_tx.send(ack).await?;
+                // disconnect
+                return Err(err);
+            }
+        }
+    }
+
+    #[instrument(skip(self, msg), fields(identifier = field::debug(& self.id)), err)]
     async fn publish(&mut self, msg: Publish) -> Result<()> {
         match msg.qos {
             //TODO handler error
@@ -521,7 +537,7 @@ impl Session {
                             user_properties: vec![],
                         },
                     });
-                    trace!("send {:?}", ack);
+                    //trace!("send {:?}", ack);
                     self.connection_reply_tx.send(ack).await?
                 } else {
                     bail!("undefined packet_identifier");
@@ -625,7 +641,9 @@ impl Session {
 
     #[instrument(skip(subscriber))]
     pub(crate) async fn subscription(
+        &self,
         session: MqttString,
+        connection_reply_tx: Sender<ControlPacket>,
         topic_name: &str,
         mut subscriber: Subscriber,
     ) -> Result<()> {
@@ -648,7 +666,7 @@ impl Session {
     }
 
     async fn subscribe_topic(
-        &mut self,
+        &self,
         topic_filter: MqttString,
         options: SubscriptionOptions,
     ) -> Result<ReasonCode> {
@@ -661,25 +679,27 @@ impl Session {
             QoS::ExactlyOnce => ReasonCode::GrantedQoS2,
         };
         // add a subscription record in sled db
-        self.store_subscription(topic_filter, options)?;
+        self.store_subscription(topic_filter.as_ref(), options)?;
 
-        let subscriptions = self
-            .topic_filters
-            .entry(topic_filter.to_owned())
-            .or_insert(vec![]);
+        /*        let subscriptions = self
+        .topic_filters
+        .entry(topic_filter.to_owned())
+        .or_insert(vec![]);*/
+        let mut subscriptions: Vec<oneshot::Sender<()>>;
         for (topic, subscriber) in channels {
             let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
             subscriptions.push(unsubscribe_tx);
             let session = self.id.to_owned();
-            tokio::spawn(async move {
+            let connection_reply_tx = self.connection_reply_tx.clone();
+            tokio::spawn(async {
                 tokio::select! {
-                Err(err) = Self::subscription(session, topic.as_str(),
-                subscriber) => {
-                warn ! (cause = ? err, "subscription error");
-                },
-                _ = unsubscribe_rx => {
-                debug ! ("unsubscribe");
-                }
+                    Err(err) = self.subscription(session, connection_reply_tx, topic.as_str(),
+                    subscriber) => {
+                        warn!(cause = ? err, "subscription error");
+                    },
+                    _ = unsubscribe_rx => {
+                        debug!("unsubscribe");
+                    }
                 }
             });
         }
@@ -729,7 +749,7 @@ impl Session {
                     self.topic_filters
                         .remove(topic_filter)
                         .map(|removed| debug!("stop {} subscriptions", removed.len()));
-                    self.remove_subscription(topic_filter)?;
+                    self.remove_subscription(topic_filter.as_ref())?;
                     ReasonCode::Success
                 }
                 Err(err) => {
@@ -793,9 +813,9 @@ impl Session {
 }
 
 impl Subscriptions for Session {
-    fn store_subscription(&self, topic_filter: &str, option: SubscriptionOptions) -> Result<()> {
+    fn store_subscription(&self, topic_filter: &[u8], option: SubscriptionOptions) -> Result<()> {
         let key = SubscriptionKey {
-            session: std::str::from_utf8(&self.id)?,
+            session: self.id.as_ref(),
             topic_filter,
         };
         self.subscriptions_db
@@ -804,46 +824,57 @@ impl Subscriptions for Session {
             .map_err(Error::msg)
     }
 
-    fn remove_subscription(&self, topic_filter: &str) -> Result<()> {
+    fn remove_subscription(&self, topic_filter: &[u8]) -> Result<bool> {
         let key = SubscriptionKey {
-            session: std::str::from_utf8(&self.id)?,
+            session: self.id.as_ref(),
             topic_filter,
         };
         self.subscriptions_db
             .remove(bincode::serialize(&key)?)
-            .map(|_| ())
+            .map(|d| d.is_some())
             .map_err(Error::msg)
     }
 
-    fn list_subscriptions(&self) -> Result<Vec<&str>, Error> {
+    fn list_subscriptions(&self) -> Result<Vec<(IVec, SubscriptionOptions)>, Error> {
         let key = SubscriptionKey {
-            session: std::str::from_utf8(&self.id)?,
-            topic_filter: "",
+            session: self.id.as_ref(),
+            topic_filter: "".as_ref(),
         };
-        let key = bincode::serialize(&key)?;
-        let dg: Vec<_> = self
-            .subscriptions_db
-            .scan_prefix(key)
-            .filter_map(|d| d.ok())
-            .collect();
+        let prefix = bincode::serialize(&key)?;
+        let mut ret = vec![];
 
-        let g = self
-            .subscriptions_db
-            .scan_prefix(bincode::serialize(&key)?)
-            .map(|res| res.map(|(k, v)| (k, v)));
-        Ok(vec![])
+        for res in self.subscriptions_db.scan_prefix(prefix) {
+            match res {
+                Ok((key, value)) => ret.push((key, SubscriptionOptions::try_from(value)?)),
+                Err(err) => warn!(cause = ?err, "subscription scan error:"),
+            }
+        }
+
+        Ok(ret)
     }
 
-    fn clear_subscriptions(&self) -> Result<()> {
-        let prefix = SubscriptionKey {
-            session: std::str::from_utf8(&self.id)?,
-            topic_filter: "",
+    fn clear_subscriptions(&self) -> Result<usize> {
+        let key = SubscriptionKey {
+            session: self.id.as_ref(),
+            topic_filter: "".as_ref(),
         };
         let mut batch = Batch::default();
+        let prefix = bincode::serialize(&key)?;
+        let mut ret = 0;
+
+        for res in self.subscriptions_db.scan_prefix(prefix) {
+            match res {
+                Ok((key, _)) => {
+                    batch.remove(key);
+                    ret += 1;
+                }
+                Err(err) => warn!(cause = ?err, "subscription scan error:"),
+            }
+        }
         self.subscriptions_db
-            .scan_prefix(bincode::serialize(&prefix)?)
-            .map(|res| res.map(|(key, _)| batch.remove(key)));
-        self.subscriptions_db.apply_batch(batch).map_err(Error::msg)
+            .apply_batch(batch)
+            .map(|_| ret)
+            .map_err(Error::msg)
     }
 }
 

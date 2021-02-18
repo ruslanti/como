@@ -223,6 +223,30 @@ pub struct PublishProperties {
     pub content_type: Option<MqttString>,
 }
 
+impl Default for ConnAckProperties {
+    fn default() -> Self {
+        ConnAckProperties {
+            session_expire_interval: None,
+            receive_maximum: None,
+            maximum_qos: None,
+            retain_available: None,
+            maximum_packet_size: None,
+            assigned_client_identifier: None,
+            topic_alias_maximum: None,
+            reason_string: None,
+            user_properties: vec![],
+            wildcard_subscription_available: None,
+            subscription_identifier_available: None,
+            shared_subscription_available: None,
+            server_keep_alive: None,
+            response_information: None,
+            server_reference: None,
+            authentication_method: None,
+            authentication_data: None,
+        }
+    }
+}
+
 impl Default for PublishProperties {
     fn default() -> Self {
         PublishProperties {

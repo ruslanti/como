@@ -1,16 +1,17 @@
 use core::fmt;
 use std::convert::{TryFrom, TryInto};
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Error};
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+use serde::de::Visitor;
+use serde::{de, Deserialize, Deserializer, Serialize};
+use sled::IVec;
 
 use crate::mqtt::proto::property::{
     AuthProperties, ConnAckProperties, ConnectProperties, DisconnectProperties, PubResProperties,
     PublishProperties, SubAckProperties, SubscribeProperties, UnSubscribeProperties,
     WillProperties,
 };
-use std::fmt::Formatter;
 
 pub type MqttString = Bytes;
 
@@ -21,7 +22,7 @@ macro_rules! end_of_stream {
     };
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Copy, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Ord, PartialOrd, Hash, Serialize)]
 pub enum QoS {
     AtMostOnce,
     AtLeastOnce,
@@ -51,7 +52,7 @@ impl Into<u8> for QoS {
     }
 }
 
-/*struct QoSVisitor;
+struct QoSVisitor;
 
 impl<'de> Visitor<'de> for QoSVisitor {
     type Value = QoS;
@@ -79,7 +80,7 @@ impl<'de> Deserialize<'de> for QoS {
     {
         deserializer.deserialize_u8(QoSVisitor)
     }
-}*/
+}
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Hash, Serialize, Deserialize)]
 pub enum Retain {
@@ -505,6 +506,14 @@ impl fmt::Debug for Disconnect {
         let mut debug_struct = f.debug_struct("DISCONNECT");
         debug_struct.field("reason_code", &self.reason_code);
         debug_struct.finish()
+    }
+}
+
+impl TryFrom<IVec> for SubscriptionOptions {
+    type Error = Error;
+
+    fn try_from(encoded: IVec) -> Result<Self, Self::Error> {
+        bincode::deserialize(encoded.as_ref()).map_err(Error::msg)
     }
 }
 

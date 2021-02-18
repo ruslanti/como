@@ -5,14 +5,14 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
+use sled::{Db, IVec, Subscriber, Tree};
 use tokio::sync::{watch, RwLock};
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, instrument, trace, warn};
 
 use path::TopicPath;
 
 use crate::mqtt::proto::property::PublishProperties;
 use crate::mqtt::proto::types::QoS;
-use sled::{Db, IVec, Subscriber, Tree};
 
 mod path;
 
@@ -118,10 +118,10 @@ impl Topics {
             .map(|t| (t.name.to_owned(), t.log.watch_prefix(vec![])))
             .collect())
     }
-
+    /*
     pub(crate) fn match_filter(topic_name: &str, filter: &str) -> bool {
         false
-    }
+    }*/
 }
 
 impl Drop for Topics {
