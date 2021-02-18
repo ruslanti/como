@@ -1,11 +1,16 @@
-use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::cmp::min;
 use std::collections::HashMap;
+use std::convert::{TryFrom, TryInto};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
+use byteorder::{BigEndian, ReadBytesExt};
+use serde::{Deserialize, Serialize};
+use sled::{Batch, Event, IVec, Subscriber, Tree};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
@@ -19,20 +24,16 @@ use crate::mqtt::proto::types::{
     ConnAck, Connect, ControlPacket, Disconnect, MqttString, PacketType, PubResp, Publish, QoS,
     ReasonCode, SubAck, Subscribe, SubscriptionOptions, UnSubscribe, Will,
 };
-
 use crate::mqtt::topic::{TopicMessage, Topics};
 use crate::settings::ConnectionSettings;
-use byteorder::{BigEndian, ReadBytesExt};
-use sled::{Batch, Event, IVec, Subscriber, Tree};
-use std::borrow::Borrow;
-use std::convert::{TryFrom, TryInto};
-use std::net::SocketAddr;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SubscriptionKey<'a> {
     session: &'a [u8],
     topic_filter: &'a [u8],
 }
+
+pub(crate) type SubscriptionEvent = ();
 
 /*#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum SessionEvent {
@@ -71,7 +72,8 @@ trait Subscriptions {
 #[derive(Debug)]
 pub(crate) struct Session {
     id: MqttString,
-    connection_reply_tx: Sender<ControlPacket>,
+    response_tx: Sender<ControlPacket>,
+    subscription_tx: Sender<SubscriptionEvent>,
     peer: SocketAddr,
     properties: ConnectProperties,
     will: Option<Will>,
@@ -100,12 +102,12 @@ async fn publish_topic(root: Arc<Topics>, msg: Publish) -> Result<()> {
     root.publish(topic, message).await
 }
 
-#[instrument(skip(rx, connection_reply_tx), err)]
+#[instrument(skip(rx, response_tx), err)]
 async fn exactly_once_client(
     session: MqttString,
     packet_identifier: u16,
     mut rx: Receiver<PublishEvent>,
-    connection_reply_tx: Sender<ControlPacket>,
+    response_tx: Sender<ControlPacket>,
 ) -> Result<()> {
     if let Some(event) = rx.recv().await {
         if let PublishEvent::PubRec(_msg) = event {
@@ -115,7 +117,7 @@ async fn exactly_once_client(
                 reason_code: ReasonCode::Success,
                 properties: Default::default(),
             });
-            connection_reply_tx.send(rel).await?;
+            response_tx.send(rel).await?;
 
             match rx.recv().await {
                 Some(PublishEvent::PubComp(comp)) => {
@@ -131,13 +133,13 @@ async fn exactly_once_client(
     Ok(())
 }
 
-#[instrument(skip(rx, connection_reply_tx, root), err)]
+#[instrument(skip(rx, response_tx, root), err)]
 async fn exactly_once_server(
     session: MqttString,
     packet_identifier: u16,
     root: Arc<Topics>,
     mut rx: Receiver<PublishEvent>,
-    connection_reply_tx: Sender<ControlPacket>,
+    response_tx: Sender<ControlPacket>,
 ) -> Result<()> {
     if let Some(event) = rx.recv().await {
         if let PublishEvent::Publish(msg) = event {
@@ -149,7 +151,7 @@ async fn exactly_once_server(
                 reason_code: ReasonCode::Success,
                 properties: Default::default(),
             });
-            connection_reply_tx.send(rec).await?;
+            response_tx.send(rec).await?;
 
             match rx.recv().await {
                 Some(PublishEvent::PubRel(rel)) => {
@@ -161,7 +163,7 @@ async fn exactly_once_server(
                         reason_code: ReasonCode::Success,
                         properties: Default::default(),
                     });
-                    connection_reply_tx.send(comp).await?;
+                    response_tx.send(comp).await?;
                 }
                 Some(event) => bail!("{:?} unknown event received: {:?}", session, event),
                 None => bail!("{:?} channel closed", session),
@@ -182,7 +184,8 @@ impl SessionState {
 impl Session {
     pub fn new(
         id: MqttString,
-        connection_reply_tx: Sender<ControlPacket>,
+        response_tx: Sender<ControlPacket>,
+        subscription_tx: Sender<SubscriptionEvent>,
         peer: SocketAddr,
         properties: ConnectProperties,
         will: Option<Will>,
@@ -195,7 +198,8 @@ impl Session {
         Self {
             id,
             //created: Instant::now(),
-            connection_reply_tx,
+            response_tx,
+            subscription_tx,
             peer,
             properties,
             will,
@@ -253,13 +257,13 @@ impl Session {
                                 res = timeout(self.expire_interval, connection_context_rx.recv()), if self
                                 .connection.is_none()  => {
                                     match res {
-                                        Ok(Some((connection_reply_tx, prop, will, clean_start))) => {
+                                        Ok(Some((response_tx, prop, will, clean_start))) => {
                                             debug!("new connection context");
                                             if let Some(ex) = prop.session_expire_interval {
                                                 self.expire_interval = Duration::from_secs(ex as u64);
                                             }
                                             self.clear();
-                                            self.connection = Some((connection_reply_tx, prop, will, clean_start));
+                                            self.connection = Some((response_tx, prop, will, clean_start));
                                         },
                                         Ok(None) => {
                                             bail!("connection context closed. expire {}", self.expire_interval
@@ -381,25 +385,18 @@ impl Session {
             }
         }
 
-        self.connection_reply_tx
-            .send(publish)
-            .await
-            .map_err(Error::msg)?;
+        self.response_tx.send(publish).await.map_err(Error::msg)?;
 
         if QoS::ExactlyOnce == qos {
             let (tx, rx) = mpsc::channel(1);
             let packet_identifier = packet_identifier.unwrap();
             self.client_flows.insert(packet_identifier, tx);
-            let connection_reply_tx = self.connection_reply_tx.clone();
+            let response_tx = self.response_tx.clone();
             let session = self.id.clone();
             tokio::spawn(async move {
-                if let Err(err) = exactly_once_client(
-                    session.to_owned(),
-                    packet_identifier,
-                    rx,
-                    connection_reply_tx,
-                )
-                .await
+                if let Err(err) =
+                    exactly_once_client(session.to_owned(), packet_identifier, rx, response_tx)
+                        .await
                 {
                     error!(cause = ?err, "QoS 2 protocol error: {}", err);
                 }
@@ -408,7 +405,7 @@ impl Session {
         Ok(())
     }
 
-    pub async fn handle(&mut self, msg: ControlPacket) -> Result<()> {
+    pub async fn handle_msg(&mut self, msg: ControlPacket) -> Result<()> {
         match msg {
             ControlPacket::Connect(p) => self.connect(p).await,
             ControlPacket::Publish(p) => self.publish(p).await,
@@ -429,6 +426,10 @@ impl Session {
             }
             _ => unreachable!(),
         }
+    }
+
+    pub async fn handle_event(&mut self, event: SubscriptionEvent) -> Result<()> {
+        Ok(())
     }
 
     #[instrument(skip(self), fields(identifier = field::debug(& self.id)), err)]
@@ -503,7 +504,7 @@ impl Session {
                         authentication_data: None,
                     },
                 });
-                self.connection_reply_tx.send(ack).await.map_err(Error::msg)
+                self.response_tx.send(ack).await.map_err(Error::msg)
             }
             Err(err) => {
                 warn!(cause = ?err, "session error: ");
@@ -512,7 +513,7 @@ impl Session {
                     reason_code: ReasonCode::UnspecifiedError,
                     properties: ConnAckProperties::default(),
                 });
-                self.connection_reply_tx.send(ack).await?;
+                self.response_tx.send(ack).await?;
                 // disconnect
                 return Err(err);
             }
@@ -538,7 +539,7 @@ impl Session {
                         },
                     });
                     //trace!("send {:?}", ack);
-                    self.connection_reply_tx.send(ack).await?
+                    self.response_tx.send(ack).await?
                 } else {
                     bail!("undefined packet_identifier");
                 }
@@ -550,21 +551,21 @@ impl Session {
                             reason_code: ReasonCode::PacketIdentifierInUse,
                             properties: Default::default(),
                         });
-                        self.connection_reply_tx.send(disconnect).await?;
+                        self.response_tx.send(disconnect).await?;
                     } else if self.server_flows.len()
                         < self.config.receive_maximum.unwrap() as usize
                     {
                         let session = self.id.clone();
                         let (tx, rx) = mpsc::channel(1);
                         let root = self.topics.clone();
-                        let connection_reply_tx = self.connection_reply_tx.clone();
+                        let response_tx = self.response_tx.clone();
                         tokio::spawn(async move {
                             if let Err(err) = exactly_once_server(
                                 session,
                                 packet_identifier,
                                 root,
                                 rx,
-                                connection_reply_tx,
+                                response_tx,
                             )
                             .await
                             {
@@ -578,7 +579,7 @@ impl Session {
                             reason_code: ReasonCode::ReceiveMaximumExceeded,
                             properties: Default::default(),
                         });
-                        self.connection_reply_tx.send(disconnect).await?;
+                        self.response_tx.send(disconnect).await?;
                     }
                 } else {
                     bail!("undefined packet_identifier");
@@ -641,9 +642,8 @@ impl Session {
 
     #[instrument(skip(subscriber))]
     pub(crate) async fn subscription(
-        &self,
         session: MqttString,
-        connection_reply_tx: Sender<ControlPacket>,
+        subscription_tx: Sender<SubscriptionEvent>,
         topic_name: &str,
         mut subscriber: Subscriber,
     ) -> Result<()> {
@@ -654,10 +654,11 @@ impl Session {
                 Event::Insert { key, value } => match key.as_ref().read_u64::<BigEndian>() {
                     Ok(id) => {
                         debug!("id: {}, value: {:#x?}", id, value);
+                        subscription_tx.send(()).await?
                     }
                     Err(_) => warn!("invalid log id: {:#x?}", key),
                 },
-                Event::Remove { .. } => {}
+                Event::Remove { .. } => unreachable!(),
             }
         }
 
@@ -666,7 +667,7 @@ impl Session {
     }
 
     async fn subscribe_topic(
-        &self,
+        &mut self,
         topic_filter: MqttString,
         options: SubscriptionOptions,
     ) -> Result<ReasonCode> {
@@ -681,19 +682,19 @@ impl Session {
         // add a subscription record in sled db
         self.store_subscription(topic_filter.as_ref(), options)?;
 
-        /*        let subscriptions = self
-        .topic_filters
-        .entry(topic_filter.to_owned())
-        .or_insert(vec![]);*/
-        let mut subscriptions: Vec<oneshot::Sender<()>>;
+        let subscriptions = self
+            .topic_filters
+            .entry(topic_filter.to_owned())
+            .or_insert(vec![]);
+
         for (topic, subscriber) in channels {
             let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
             subscriptions.push(unsubscribe_tx);
             let session = self.id.to_owned();
-            let connection_reply_tx = self.connection_reply_tx.clone();
-            tokio::spawn(async {
+            let subscription_tx = self.subscription_tx.clone();
+            tokio::spawn(async move {
                 tokio::select! {
-                    Err(err) = self.subscription(session, connection_reply_tx, topic.as_str(),
+                    Err(err) = Self::subscription(session, subscription_tx, topic.as_str(),
                     subscriber) => {
                         warn!(cause = ? err, "subscription error");
                     },
@@ -726,10 +727,7 @@ impl Session {
             properties: Default::default(),
             reason_codes,
         });
-        self.connection_reply_tx
-            .send(suback)
-            .await
-            .map_err(Error::msg)
+        self.response_tx.send(suback).await.map_err(Error::msg)
         // trace!("send {:?}", suback);
     }
 
@@ -764,10 +762,7 @@ impl Session {
             properties: Default::default(),
             reason_codes,
         });
-        self.connection_reply_tx
-            .send(unsuback)
-            .await
-            .map_err(Error::msg)
+        self.response_tx.send(unsuback).await.map_err(Error::msg)
         // trace!("send {:?}", suback);
     }
 

@@ -7,7 +7,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::mqtt::proto::property::ConnectProperties;
 use crate::mqtt::proto::types::{ControlPacket, MqttString, Will};
-use crate::mqtt::session::Session;
+use crate::mqtt::session::{Session, SubscriptionEvent};
 use crate::mqtt::topic::Topics;
 use crate::settings::Settings;
 
@@ -39,14 +39,16 @@ impl AppContext {
     pub fn make_session(
         &self,
         session: MqttString,
-        connection_reply_tx: Sender<ControlPacket>,
+        response_tx: Sender<ControlPacket>,
+        subscription_tx: Sender<SubscriptionEvent>,
         peer: SocketAddr,
         properties: ConnectProperties,
         will: Option<Will>,
     ) -> Session {
         Session::new(
             session,
-            connection_reply_tx,
+            response_tx,
+            subscription_tx,
             peer,
             properties,
             will,

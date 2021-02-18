@@ -4,6 +4,16 @@ use std::fmt::Debug;
 use std::path::{Component, Path};
 
 use anyhow::{anyhow, Result};
+use nom::branch::alt;
+use nom::bytes::complete::{is_not, tag, take_until, take_while};
+use nom::char;
+use nom::character::complete::char;
+use nom::character::{is_alphabetic, is_alphanumeric};
+use nom::combinator::opt;
+use nom::multi::{many0, separated_list1};
+use nom::sequence::{terminated, tuple};
+use nom::tag;
+use nom::IResult;
 use tracing::instrument;
 
 #[derive(Debug, Clone, Eq, Ord, PartialOrd, PartialEq)]
@@ -210,6 +220,35 @@ impl<T> TopicPath<T> {
         }
         Ok(pattern)
     }
+
+    fn pattern_parse(topic_filter: &str) -> IResult<&str, (Option<&str>, Vec<&str>, Option<&str>)> {
+        // let is_slash = is_not("/");
+        let mut t = tuple((
+            opt(alt((tag("/"), tag("$")))),
+            many0(terminated(take_until("/"), tag("/"))),
+            opt(tag("#")),
+        ));
+        //let method = take_while1(is_alpha);
+        //  let s = separated_list1(tag!("/"), is_alpha);
+        t(topic_filter)
+    }
+}
+
+struct TopicFilter {}
+
+impl TopicFilter {
+    fn parse(topic_filter: &str) -> IResult<&str, (Option<&str>, Vec<&str>, Option<&str>)> {
+        let separator = tag("/");
+        let multi_level = tag("#");
+        // let single_level = tag("+");
+        let hidden = tag("$");
+
+        let prefix = opt(alt((separator, hidden)));
+        let tokens = many0(terminated(take_until("/"), opt(tag("/"))));
+        let suffix = opt(multi_level);
+
+        tuple((prefix, tokens, suffix))(topic_filter)
+    }
 }
 
 #[cfg(test)]
@@ -219,6 +258,14 @@ mod tests {
     #[derive(Debug, Default, Eq, PartialEq, Clone, Copy)]
     struct TestTopic<'a> {
         test: &'a str,
+    }
+
+    #[test]
+    fn test_nom_parser() {
+        println!("{:?}", TopicFilter::parse("/topic1/topic2/topic3/#"));
+        println!("{:?}", TopicFilter::parse("/topic1/+/topic2/topic3/"));
+        println!("{:?}", TopicFilter::parse("topic1/topic2/topic3"));
+        println!("{:?}", TopicFilter::parse("$topic1/topic2/topic3"));
     }
 
     #[test]

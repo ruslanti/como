@@ -29,3 +29,4 @@ serde = { version = "1", features = ["derive"] }
 uuid = { version = "0.8", features = ["v4"] }
 rand = "0.8"
 sled = "0.34"
+nom = "6.1.2"
