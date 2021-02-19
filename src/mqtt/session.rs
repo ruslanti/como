@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use std::borrow::Borrow;
 use std::cmp::min;
 use std::collections::HashMap;
@@ -33,21 +34,26 @@ struct SubscriptionKey<'a> {
     topic_filter: &'a [u8],
 }
 
-pub(crate) type SubscriptionEvent = ();
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct SubscriptionEvent {
+    id: u64,
+    subscription_qos: QoS,
+    msg: TopicMessage,
+}
 
-/*#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum SessionEvent {
-    Publish(Publish),
-    PubAck(PubResp),
-    PubRec(PubResp),
-    PubRel(PubResp),
-    PubComp(PubResp),
-    Subscribe(Subscribe),
-    SubAck(SubAck),
-    UnSubscribe(UnSubscribe),
-    UnSubAck(SubAck),
-    Disconnect(Disconnect),
-}*/
+impl SubscriptionEvent {
+    pub fn new() -> Self {
+        SubscriptionEvent {
+            id: 0,
+            subscription_qos: QoS::AtLeastOnce,
+            msg: TopicMessage {
+                retain: false,
+                qos: QoS::AtMostOnce,
+                payload: vec![],
+            },
+        }
+    }
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum PublishEvent {
@@ -63,7 +69,7 @@ pub(crate) struct SessionState {
 }
 
 trait Subscriptions {
-    fn store_subscription(&self, topic_filter: &[u8], option: SubscriptionOptions) -> Result<()>;
+    fn store_subscription(&self, topic_filter: &[u8], option: &SubscriptionOptions) -> Result<()>;
     fn remove_subscription(&self, topic_filter: &[u8]) -> Result<bool>;
     fn list_subscriptions(&self) -> Result<Vec<(IVec, SubscriptionOptions)>>;
     fn clear_subscriptions(&self) -> Result<usize>;
@@ -92,11 +98,10 @@ async fn publish_topic(root: Arc<Topics>, msg: Publish) -> Result<()> {
     let topic = std::str::from_utf8(&msg.topic_name[..])?;
 
     let message = TopicMessage {
-        ts: Instant::now(),
         retain: msg.retain,
         qos: msg.qos,
-        properties: msg.properties,
-        payload: msg.payload,
+        //properties: msg.properties,
+        payload: msg.payload.to_vec(),
     };
 
     root.publish(topic, message).await
@@ -349,14 +354,11 @@ impl Session {
             .collect()
     }*/
 
-    #[instrument(skip(self, msg), fields(identifier = field::debug(& self.id)), err)]
-    async fn publish_client(
-        &mut self,
-        option: SubscriptionOptions,
-        msg: TopicMessage,
-    ) -> Result<()> {
+    #[instrument(skip(self), fields(identifier = field::debug(& self.id)), err)]
+    async fn publish_client(&mut self, event: SubscriptionEvent) -> Result<()> {
+        let msg = event.msg;
         let packet_identifier = self.packet_identifier_seq.clone();
-        let qos = min(msg.qos, option.qos);
+        let qos = min(msg.qos, event.subscription_qos);
         let packet_identifier = if QoS::AtMostOnce == qos {
             None
         } else {
@@ -374,8 +376,8 @@ impl Session {
             retain: msg.retain,
             topic_name: Default::default(),
             packet_identifier,
-            properties: msg.properties,
-            payload: msg.payload,
+            properties: PublishProperties::default(),
+            payload: Bytes::from(msg.payload),
         });
 
         if let Some(maximum_packet_size) = self.properties.maximum_packet_size {
@@ -429,7 +431,7 @@ impl Session {
     }
 
     pub async fn handle_event(&mut self, event: SubscriptionEvent) -> Result<()> {
-        Ok(())
+        self.publish_client(event).await
     }
 
     #[instrument(skip(self), fields(identifier = field::debug(& self.id)), err)]
@@ -640,9 +642,10 @@ impl Session {
         }
     }
 
-    #[instrument(skip(subscriber))]
+    #[instrument(skip(subscriber, subscription_tx))]
     pub(crate) async fn subscription(
         session: MqttString,
+        option: SubscriptionOptions,
         subscription_tx: Sender<SubscriptionEvent>,
         topic_name: &str,
         mut subscriber: Subscriber,
@@ -650,11 +653,20 @@ impl Session {
         //   tokio::pin!(stream);
         trace!("start");
         while let Some(event) = (&mut subscriber).await {
+            debug!("receive subscription event {:?}", event);
             match event {
                 Event::Insert { key, value } => match key.as_ref().read_u64::<BigEndian>() {
                     Ok(id) => {
-                        debug!("id: {}, value: {:#x?}", id, value);
-                        subscription_tx.send(()).await?
+                        let msg = bincode::deserialize(&value).context("deserialize event")?;
+                        debug!("id: {}, value: {:?}", id, msg);
+                        subscription_tx
+                            .send(SubscriptionEvent {
+                                id,
+                                subscription_qos: option.qos,
+                                msg,
+                            })
+                            .await
+                            .context("subscription send")?
                     }
                     Err(_) => warn!("invalid log id: {:#x?}", key),
                 },
@@ -680,7 +692,7 @@ impl Session {
             QoS::ExactlyOnce => ReasonCode::GrantedQoS2,
         };
         // add a subscription record in sled db
-        self.store_subscription(topic_filter.as_ref(), options)?;
+        self.store_subscription(topic_filter.as_ref(), options.borrow())?;
 
         let subscriptions = self
             .topic_filters
@@ -692,9 +704,11 @@ impl Session {
             subscriptions.push(unsubscribe_tx);
             let session = self.id.to_owned();
             let subscription_tx = self.subscription_tx.clone();
+            let options = options.to_owned();
             tokio::spawn(async move {
                 tokio::select! {
-                    Err(err) = Self::subscription(session, subscription_tx, topic.as_str(),
+                    Err(err) = Self::subscription(session, options, subscription_tx, topic
+                    .as_str(),
                     subscriber) => {
                         warn!(cause = ? err, "subscription error");
                     },
@@ -808,7 +822,7 @@ impl Session {
 }
 
 impl Subscriptions for Session {
-    fn store_subscription(&self, topic_filter: &[u8], option: SubscriptionOptions) -> Result<()> {
+    fn store_subscription(&self, topic_filter: &[u8], option: &SubscriptionOptions) -> Result<()> {
         let key = SubscriptionKey {
             session: self.id.as_ref(),
             topic_filter,

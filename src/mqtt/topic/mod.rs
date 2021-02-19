@@ -3,8 +3,9 @@ use std::fmt::Debug;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use sled::{Db, IVec, Subscriber, Tree};
 use tokio::sync::{watch, RwLock};
 use tracing::{debug, instrument, trace, warn};
@@ -13,20 +14,17 @@ use path::TopicPath;
 
 use crate::mqtt::proto::property::PublishProperties;
 use crate::mqtt::proto::types::QoS;
+use std::convert::{TryFrom, TryInto};
 
 mod path;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TopicMessage {
-    pub ts: Instant,
     pub retain: bool,
     pub qos: QoS,
-    pub properties: PublishProperties,
-    pub payload: Bytes,
+    //pub properties: PublishProperties,
+    pub payload: Vec<u8>,
 }
-
-type NewTopicSender = watch::Sender<String>;
-type NewTopicReceiver = watch::Receiver<String>;
 
 struct Topic {
     name: String,
@@ -35,7 +33,6 @@ struct Topic {
 
 pub struct Topics {
     db: Db,
-    new_topic: (NewTopicSender, NewTopicReceiver),
     nodes: RwLock<TopicPath<Topic>>,
 }
 
@@ -68,7 +65,6 @@ impl Topics {
         }
         Ok(Self {
             db,
-            new_topic: watch::channel("".to_owned()),
             nodes: RwLock::new(nodes),
         })
     }
@@ -89,9 +85,9 @@ impl Topics {
             });
 
             if topic.is_some() {
-                if let Err(err) = self.new_topic.0.send(name.to_owned()) {
+                /*if let Err(err) = self.new_topic.0.send(name.to_owned()) {
                     warn!(cause = ?err, "new topic event error");
-                }
+                }*/
             }
         } else {
             debug!("found topic {}", name);
@@ -99,8 +95,9 @@ impl Topics {
 
         if let Some(topic) = topic {
             let id = self.db.generate_id()?;
-            trace!("append {} - {} bytes", id, msg.payload.len());
-            topic.log.insert(id.to_be_bytes(), msg)?;
+            let value = bincode::serialize(&msg)?;
+            trace!("append {} - {:?} bytes", id, value);
+            topic.log.insert(id.to_be_bytes(), value)?;
             Ok(())
         } else {
             Err(anyhow!("error"))
@@ -132,9 +129,11 @@ impl Drop for Topics {
     }
 }
 
-impl From<TopicMessage> for IVec {
-    fn from(m: TopicMessage) -> Self {
-        IVec::from(m.payload.as_ref())
+impl TryFrom<IVec> for TopicMessage {
+    type Error = Error;
+
+    fn try_from(encoded: IVec) -> Result<Self> {
+        bincode::deserialize(encoded.as_ref()).map_err(Error::msg)
     }
 }
 

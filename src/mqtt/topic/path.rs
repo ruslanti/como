@@ -5,14 +5,11 @@ use std::path::{Component, Path};
 
 use anyhow::{anyhow, Result};
 use nom::branch::alt;
-use nom::bytes::complete::{is_not, tag, take_until, take_while};
-use nom::char;
-use nom::character::complete::char;
-use nom::character::{is_alphabetic, is_alphanumeric};
+use nom::bytes::complete::{tag, take_until, take_while};
+use nom::character::is_alphanumeric;
 use nom::combinator::opt;
-use nom::multi::{many0, separated_list1};
+use nom::multi::many0;
 use nom::sequence::{terminated, tuple};
-use nom::tag;
 use nom::IResult;
 use tracing::instrument;
 
@@ -237,7 +234,34 @@ impl<T> TopicPath<T> {
 struct TopicFilter {}
 
 impl TopicFilter {
-    fn parse(topic_filter: &str) -> IResult<&str, (Option<&str>, Vec<&str>, Option<&str>)> {
+    fn parse_level(input: &[u8]) -> IResult<&[u8], Vec<MatchState>> {
+        let mut tokens = many0(terminated(take_until("/"), opt(tag("/"))));
+        tokens(input).map(|(r, t)| {
+            (
+                r,
+                t.iter()
+                    .map(|e| MatchState::Topic(std::str::from_utf8(e).unwrap()))
+                    .collect(),
+            )
+        })
+    }
+
+    fn parse_token(input: &[u8]) -> IResult<&[u8], &[u8]> {
+        take_while(is_alphanumeric)(input)
+    }
+
+    fn parse_dollar(input: &[u8]) -> IResult<&[u8], MatchState> {
+        //let token = many_till(is_alphabetic, tag("/"));
+
+        tuple((tag("$"), take_while(is_alphanumeric)))(input)
+            .map(|(r, (_, t2))| (r, MatchState::Dollar(std::str::from_utf8(t2).unwrap())))
+    }
+
+    fn parse_root(input: &[u8]) -> IResult<&[u8], MatchState> {
+        tag("/")(input).map(|(r, _t)| (r, MatchState::Root))
+    }
+
+    fn parse(topic_filter: &[u8]) -> IResult<&[u8], (Option<&[u8]>, Vec<&[u8]>, Option<&[u8]>)> {
         let separator = tag("/");
         let multi_level = tag("#");
         // let single_level = tag("+");
@@ -262,10 +286,32 @@ mod tests {
 
     #[test]
     fn test_nom_parser() {
-        println!("{:?}", TopicFilter::parse("/topic1/topic2/topic3/#"));
-        println!("{:?}", TopicFilter::parse("/topic1/+/topic2/topic3/"));
-        println!("{:?}", TopicFilter::parse("topic1/topic2/topic3"));
-        println!("{:?}", TopicFilter::parse("$topic1/topic2/topic3"));
+        assert_eq!(
+            Some((b"/".as_ref(), MatchState::Dollar("topic1"))),
+            TopicFilter::parse_dollar(b"$topic1/").ok()
+        );
+        assert_eq!(
+            Some((b"".as_ref(), MatchState::Dollar("topic1"))),
+            TopicFilter::parse_dollar(b"$topic1").ok()
+        );
+        println!("{:?}", TopicFilter::parse_dollar(b"$topic1"));
+        println!("{:?}", TopicFilter::parse_dollar(b"topic1"));
+
+        println!("{:?}", TopicFilter::parse_root(b"/topic1"));
+        println!("{:?}", TopicFilter::parse_root(b"topic1"));
+
+        println!("{:?}", TopicFilter::parse_level(b"/topic1/topic2/topic3/#"));
+        println!(
+            "{:?}",
+            TopicFilter::parse_level(b"/topic1/+/topic2/topic3/")
+        );
+        println!("{:?}", TopicFilter::parse_level(b"topic1/topic2/topic3"));
+        println!("{:?}", TopicFilter::parse_level(b"$topic1/topic2/topic3"));
+
+        println!("{:?}", TopicFilter::parse(b"/topic1/topic2/topic3/#"));
+        println!("{:?}", TopicFilter::parse(b"/topic1/+/topic2/topic3/"));
+        println!("{:?}", TopicFilter::parse(b"topic1/topic2/topic3"));
+        println!("{:?}", TopicFilter::parse(b"$topic1/topic2/topic3"));
     }
 
     #[test]

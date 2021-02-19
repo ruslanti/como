@@ -3,14 +3,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Error, Result};
-use futures::{SinkExt, StreamExt, TryFutureExt};
+use anyhow::{anyhow, bail, Context, Error, Result};
+use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
-use tracing::{debug, field, instrument, trace};
+use tracing::{debug, field, instrument, trace, warn};
 use uuid::Uuid;
 
 use crate::mqtt::context::AppContext;
@@ -18,6 +18,7 @@ use crate::mqtt::proto::types::{Auth, Connect, ControlPacket, Disconnect, MQTTCo
 use crate::mqtt::session::{Session, SubscriptionEvent};
 use crate::mqtt::shutdown::Shutdown;
 use crate::settings::ConnectionSettings;
+use std::ops::Add;
 
 #[derive(Debug)]
 pub struct ConnectionHandler {
@@ -92,7 +93,7 @@ impl ConnectionHandler {
         Ok(session)
     }
 
-    #[instrument(skip(self), err)]
+    #[instrument(skip(self, response_tx, subscription_tx), err)]
     async fn recv(
         &mut self,
         msg: ControlPacket,
@@ -125,10 +126,7 @@ impl ConnectionHandler {
     #[instrument(skip(self), err)]
     async fn subscription_event(&mut self, event: SubscriptionEvent) -> Result<()> {
         match (self.session.borrow_mut(), event) {
-            (None, _) => {
-                let context = format!("session: None, event: {:?}", event,);
-                Err(anyhow!("unacceptable event").context(context))
-            }
+            (None, _) => Err(anyhow!("unacceptable event").context("subscription event")),
             (Some(session), event) => session.handle_event(event).await,
         }
     }
@@ -151,46 +149,42 @@ impl ConnectionHandler {
         conn_tx.send(disc).await.map_err(Error::msg)
     }
 
-    /* async fn process_stream<S>(&mut self, mut stream: S, tx: Sender<ControlPacket>) -> Result<()>
+    async fn process_stream<S>(
+        &mut self,
+        mut stream: S,
+        response_tx: Sender<ControlPacket>,
+        subscription_tx: Sender<SubscriptionEvent>,
+    ) -> Result<()>
     where
         S: Stream<Item = Result<ControlPacket, anyhow::Error>> + Unpin,
     {
         loop {
-            let duration = self
-                .keep_alive
-                .map_or(Duration::from_secs(u16::max_value() as u64), |d| {
-                    d.add(Duration::from_millis(100))
-                });
-            match timeout(duration, stream.next()).await {
-                Ok(timeout_res) => {
-                    if let Some(res) = timeout_res {
-                        self.recv(res?, tx).await?;
-                    } else {
-                        trace!("disconnected");
-                        break;
-                    }
+            let duration = self.keep_alive.add(Duration::from_millis(100));
+
+            match timeout(duration, stream.next()).await? {
+                Some(res) => {
+                    self.recv(res?, response_tx.borrow(), subscription_tx.borrow())
+                        .await?;
                 }
-                Err(e) => {
-                    error!("timeout on process connection: {}", e);
-                    // handle timeout
-                    /*match self.session.as_mut() {
-                        None => return Err(e.into()),
-                        Some((id, _session_tx)) => {
-                            trace!("DISCONNECT {}", id);
-                            self.event(SessionEvent::Disconnect(Disconnect {
-                                reason_code: ReasonCode::KeepAliveTimeout,
-                                properties: Default::default(),
-                            }))
-                            .await?;
-                            self.disconnect(tx, ReasonCode::KeepAliveTimeout).await?;
-                            break;
-                        }
-                    }*/
+                None => {
+                    debug!("None request. Disconnected");
+                    break;
                 }
             }
         }
         Ok(())
-    }*/
+    }
+
+    #[instrument(skip(self, subscriber_rx), fields(remote = field::display(& self.peer)), err)]
+    async fn process_subscriptions(
+        &mut self,
+        mut subscriber_rx: Receiver<SubscriptionEvent>,
+    ) -> Result<()> {
+        while let Some(event) = subscriber_rx.recv().await {
+            self.subscription_event(event).await?
+        }
+        Ok(())
+    }
 
     #[instrument(skip(self, socket, shutdown), fields(remote = field::display(& self.peer)), err)]
     pub(crate) async fn connection<S>(&mut self, socket: S, mut shutdown: Shutdown) -> Result<()>
@@ -200,14 +194,16 @@ impl ConnectionHandler {
         let framed = Framed::new(socket, MQTTCodec::new());
         let (mut sink, mut stream) = framed.split::<ControlPacket>();
         let (response_tx, mut response_rx) = mpsc::channel::<ControlPacket>(32);
-        let (subscriber_tx, mut subscriber_rx) = mpsc::channel::<SubscriptionEvent>(32);
+        let (subscription_tx, mut subscription_rx) = mpsc::channel::<SubscriptionEvent>(32);
 
         while !shutdown.is_shutdown() {
+            debug!("###################################################");
+            let duration = self.keep_alive.add(Duration::from_millis(100));
             // While reading a request frame, also listen for the shutdown signal.
             tokio::select! {
-                res = timeout(self.keep_alive, stream.next()) => {
+                res = timeout(duration, stream.next()) => {
                     if let Some(res) = res? {
-                        self.recv(res?, response_tx.borrow(), subscriber_tx.borrow()).await?;
+                        self.recv(res?, response_tx.borrow(), subscription_tx.borrow()).await?;
                     } else {
                         debug!("None request. Disconnected");
                         break;
@@ -222,7 +218,7 @@ impl ConnectionHandler {
                         break;
                     }
                 }
-                res = subscriber_rx.recv() => {
+                res = subscription_rx.recv() => {
                     trace!("subscription event: {:?}", res);
                     if let Some(event) = res {
                         self.subscription_event(event).await?;
@@ -235,41 +231,24 @@ impl ConnectionHandler {
                      break;
                  }
             }
-            /*            tokio::select! {
-                            res = self.process_stream(stream, response_tx) => {
-                                res?; // handle error
-                                break; // disconnect
-                            },
-                            res = send(sink, response_rx) => {
-                                res?; // handle error
-                                break; // disconnect
-                            },
-            /*                Some(msg) = response_rx.recv() => {
-
-                            },*/
-                            _ = shutdown.recv() => {
-                                //self.disconnect(conn_tx.clone(), ReasonCode::ServerShuttingDown).await?;
-                                break;
-                            }
-                        };*/
         }
         Ok(())
     }
 }
 
-/*#[instrument(skip(sink, reply), err)]
-async fn send<S>(mut sink: S, mut reply: Receiver<ControlPacket>) -> Result<()>
+#[instrument(skip(sink, response_rx), err)]
+async fn send<S>(mut sink: S, mut response_rx: Receiver<ControlPacket>) -> Result<()>
 where
     S: Sink<ControlPacket> + Unpin,
 {
-    while let Some(msg) = reply.recv().await {
+    while let Some(msg) = response_rx.recv().await {
         trace!("{:?}", msg);
         if let Err(_err) = sink.send(msg).await {
             bail!("socket send error");
         }
     }
     Ok(())
-}*/
+}
 
 impl Drop for ConnectionHandler {
     fn drop(&mut self) {
