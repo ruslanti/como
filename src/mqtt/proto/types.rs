@@ -4,7 +4,7 @@ use std::convert::{TryFrom, TryInto};
 use anyhow::{anyhow, Error};
 use bytes::Bytes;
 use serde::de::Visitor;
-use serde::{de, Deserialize, Deserializer, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use sled::IVec;
 
 use crate::mqtt::proto::property::{
@@ -22,7 +22,7 @@ macro_rules! end_of_stream {
     };
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Copy, Ord, PartialOrd, Hash, Serialize)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Ord, PartialOrd, Hash)]
 pub enum QoS {
     AtMostOnce,
     AtLeastOnce,
@@ -79,6 +79,15 @@ impl<'de> Deserialize<'de> for QoS {
         D: Deserializer<'de>,
     {
         deserializer.deserialize_u8(QoSVisitor)
+    }
+}
+
+impl Serialize for QoS {
+    fn serialize<S>(&self, serializer: S) -> Result<<S as Serializer>::Ok, <S as Serializer>::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u8((*self).into())
     }
 }
 
@@ -342,7 +351,7 @@ pub struct Publish {
     pub payload: MqttString,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct PubResp {
     pub packet_type: PacketType,
     pub packet_identifier: u16,
@@ -364,28 +373,28 @@ pub struct SubscriptionOptions {
     pub retain: Retain,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct Subscribe {
     pub packet_identifier: u16,
     pub properties: SubscribeProperties,
     pub topic_filters: Vec<(MqttString, SubscriptionOptions)>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct SubAck {
     pub packet_identifier: u16,
     pub properties: SubAckProperties,
     pub reason_codes: Vec<ReasonCode>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct UnSubscribe {
     pub packet_identifier: u16,
     pub properties: UnSubscribeProperties,
     pub topic_filters: Vec<MqttString>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct Auth {
     pub reason_code: ReasonCode,
     pub properties: AuthProperties,
@@ -445,14 +454,14 @@ impl fmt::Debug for ControlPacket {
             ControlPacket::Connect(m) => write!(f, "{:?}", m),
             ControlPacket::ConnAck(m) => write!(f, "{:?}", m),
             ControlPacket::Publish(m) => write!(f, "{:?}", m),
-            ControlPacket::PubAck(m) => write!(f, "{:?}", m),
-            ControlPacket::PubRec(m) => write!(f, "{:?}", m),
-            ControlPacket::PubRel(m) => write!(f, "{:?}", m),
-            ControlPacket::PubComp(m) => write!(f, "{:?}", m),
+            ControlPacket::PubAck(m) => write!(f, "PUBACK {:?}", m),
+            ControlPacket::PubRec(m) => write!(f, "PUBREC {:?}", m),
+            ControlPacket::PubRel(m) => write!(f, "PUBREL {:?}", m),
+            ControlPacket::PubComp(m) => write!(f, "PUBCOMP {:?}", m),
             ControlPacket::Subscribe(m) => write!(f, "{:?}", m),
-            ControlPacket::SubAck(m) => write!(f, "{:?}", m),
+            ControlPacket::SubAck(m) => write!(f, "SUBACK {:?}", m),
             ControlPacket::UnSubscribe(m) => write!(f, "{:?}", m),
-            ControlPacket::UnSubAck(m) => write!(f, "{:?}", m),
+            ControlPacket::UnSubAck(m) => write!(f, "UNSUBACK {:?}", m),
             ControlPacket::PingReq => write!(f, "PINGREQ"),
             ControlPacket::PingResp => write!(f, "PINGRESP"),
             ControlPacket::Disconnect(m) => write!(f, "{:?}", m),
@@ -501,10 +510,49 @@ impl fmt::Debug for Publish {
     }
 }
 
+impl fmt::Debug for PubResp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("");
+        debug_struct.field("reason_code", &self.reason_code);
+        debug_struct.finish()
+    }
+}
+
 impl fmt::Debug for Disconnect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("DISCONNECT");
         debug_struct.field("reason_code", &self.reason_code);
+        debug_struct.finish()
+    }
+}
+
+impl fmt::Debug for Subscribe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("SUBSCRIBE");
+        debug_struct.field("topic_filters", &self.topic_filters);
+        debug_struct.finish()
+    }
+}
+
+impl fmt::Debug for SubAck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("");
+        debug_struct.field("reason_codes", &self.reason_codes);
+        debug_struct.finish()
+    }
+}
+
+impl fmt::Debug for UnSubscribe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("UNSUBSCRIBE");
+        debug_struct.field("topic_filters", &self.topic_filters);
+        debug_struct.finish()
+    }
+}
+
+impl fmt::Debug for Auth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug_struct = f.debug_struct("AUTH");
         debug_struct.finish()
     }
 }

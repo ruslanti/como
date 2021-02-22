@@ -1,16 +1,17 @@
 use std::borrow::{Borrow, BorrowMut};
 use std::net::SocketAddr;
+use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Error, Result};
-use futures::{Sink, SinkExt, Stream, StreamExt, TryFutureExt};
+use anyhow::{anyhow, Context, Error, Result};
+use futures::{SinkExt, StreamExt, TryFutureExt};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
-use tracing::{debug, field, instrument, trace, warn};
+use tracing::{debug, field, instrument, trace};
 use uuid::Uuid;
 
 use crate::mqtt::context::AppContext;
@@ -18,7 +19,6 @@ use crate::mqtt::proto::types::{Auth, Connect, ControlPacket, Disconnect, MQTTCo
 use crate::mqtt::session::{Session, SubscriptionEvent};
 use crate::mqtt::shutdown::Shutdown;
 use crate::settings::ConnectionSettings;
-use std::ops::Add;
 
 #[derive(Debug)]
 pub struct ConnectionHandler {
@@ -93,7 +93,7 @@ impl ConnectionHandler {
         Ok(session)
     }
 
-    #[instrument(skip(self, response_tx, subscription_tx), err)]
+    //#[instrument(skip(self, response_tx, subscription_tx), err)]
     async fn recv(
         &mut self,
         msg: ControlPacket,
@@ -149,7 +149,7 @@ impl ConnectionHandler {
         conn_tx.send(disc).await.map_err(Error::msg)
     }
 
-    async fn process_stream<S>(
+    /*    async fn process_stream<S>(
         &mut self,
         mut stream: S,
         response_tx: Sender<ControlPacket>,
@@ -173,8 +173,8 @@ impl ConnectionHandler {
             }
         }
         Ok(())
-    }
-
+    }*/
+    /*
     #[instrument(skip(self, subscriber_rx), fields(remote = field::display(& self.peer)), err)]
     async fn process_subscriptions(
         &mut self,
@@ -184,10 +184,10 @@ impl ConnectionHandler {
             self.subscription_event(event).await?
         }
         Ok(())
-    }
+    }*/
 
-    #[instrument(skip(self, socket, shutdown), fields(remote = field::display(& self.peer)), err)]
-    pub(crate) async fn connection<S>(&mut self, socket: S, mut shutdown: Shutdown) -> Result<()>
+    #[instrument(skip(self, socket, shutdown), fields(peer = field::display(& self.peer)), err)]
+    pub(crate) async fn client<S>(&mut self, socket: S, mut shutdown: Shutdown) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -197,21 +197,22 @@ impl ConnectionHandler {
         let (subscription_tx, mut subscription_rx) = mpsc::channel::<SubscriptionEvent>(32);
 
         while !shutdown.is_shutdown() {
-            debug!("###################################################");
             let duration = self.keep_alive.add(Duration::from_millis(100));
             // While reading a request frame, also listen for the shutdown signal.
             tokio::select! {
                 res = timeout(duration, stream.next()) => {
                     if let Some(res) = res? {
-                        self.recv(res?, response_tx.borrow(), subscription_tx.borrow()).await?;
+                        let p = res?;
+                        debug!("received {:?}", p);
+                        self.recv(p, response_tx.borrow(), subscription_tx.borrow()).await?;
                     } else {
-                        debug!("None request. Disconnected");
+                        debug!("Disconnected");
                         break;
                     }
                 }
                 res = response_rx.recv() => {
-                    trace!("response: {:?}", res);
                     if let Some(res) = res {
+                        debug!("sending {:?}", res);
                         sink.send(res).await.context("socket send error")?
                     } else {
                         debug!("None response. Disconnected");
@@ -235,7 +236,7 @@ impl ConnectionHandler {
         Ok(())
     }
 }
-
+/*
 #[instrument(skip(sink, response_rx), err)]
 async fn send<S>(mut sink: S, mut response_rx: Receiver<ControlPacket>) -> Result<()>
 where
@@ -248,7 +249,7 @@ where
         }
     }
     Ok(())
-}
+}*/
 
 impl Drop for ConnectionHandler {
     fn drop(&mut self) {

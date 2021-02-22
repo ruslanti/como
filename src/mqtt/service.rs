@@ -6,7 +6,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::time::{sleep, Duration};
 use tokio_native_tls::TlsAcceptor;
-use tracing::{debug, error, field, info, instrument};
+use tracing::{error, field, info, instrument};
 
 use crate::mqtt::connection::ConnectionHandler;
 use crate::mqtt::context::AppContext;
@@ -97,13 +97,13 @@ impl Service {
             if let Some(acceptor) = self.acceptor.as_ref() {
                 let stream = acceptor.accept(stream).await?;
                 tokio::spawn(async move {
-                    if let Err(err) = handler.connection(stream, shutdown).await {
+                    if let Err(err) = handler.client(stream, shutdown).await {
                         error!(cause = ?err, "connection error");
                     }
                 });
             } else {
                 tokio::spawn(async move {
-                    if let Err(err) = handler.connection(stream, shutdown).await {
+                    if let Err(err) = handler.client(stream, shutdown).await {
                         error!(cause = ?err, "connection error");
                     }
                 });
@@ -118,7 +118,7 @@ impl Service {
         loop {
             match self.listener.accept().await {
                 Ok((socket, address)) => {
-                    debug!("inbound connection: {:?} ", address);
+                    info!("inbound connection: {:?} ", address);
                     return Ok(socket);
                 }
                 Err(err) => {
