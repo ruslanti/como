@@ -7,7 +7,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::mqtt::proto::property::ConnectProperties;
 use crate::mqtt::proto::types::{ControlPacket, MqttString, Will};
-use crate::mqtt::session::{Session, SubscriptionEvent};
+use crate::mqtt::session::Session;
 use crate::mqtt::topic::Topics;
 use crate::settings::Settings;
 
@@ -40,7 +40,6 @@ impl AppContext {
         &self,
         session: MqttString,
         response_tx: Sender<ControlPacket>,
-        subscription_tx: Sender<SubscriptionEvent>,
         peer: SocketAddr,
         properties: ConnectProperties,
         will: Option<Will>,
@@ -48,7 +47,6 @@ impl AppContext {
         Session::new(
             session,
             response_tx,
-            subscription_tx,
             peer,
             properties,
             will,

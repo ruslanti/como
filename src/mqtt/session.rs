@@ -6,12 +6,13 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Error, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::Bytes;
+use nom::AsBytes;
 use serde::{Deserialize, Serialize};
 use sled::{Batch, Event, IVec, Subscriber, Tree};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 use tracing::{debug, error, field, info, instrument, trace, warn};
@@ -35,11 +36,18 @@ struct SubscriptionKey<'a> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct SubscriptionEvent {
+pub(crate) struct TopicMessage {
     id: u64,
     topic_name: String,
     subscription_qos: QoS,
     msg: PubMessage,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum SessionEvent {
+    SessionTaken(SessionState),
+    TopicMessage(TopicMessage),
+    NewTopic,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -66,7 +74,8 @@ trait Subscriptions {
 pub(crate) struct Session {
     id: MqttString,
     response_tx: Sender<ControlPacket>,
-    subscription_tx: Sender<SubscriptionEvent>,
+    session_event_tx: Sender<SessionEvent>,
+    session_event_rx: Receiver<SessionEvent>,
     peer: SocketAddr,
     properties: ConnectProperties,
     will: Option<Will>,
@@ -91,7 +100,6 @@ impl Session {
     pub fn new(
         id: MqttString,
         response_tx: Sender<ControlPacket>,
-        subscription_tx: Sender<SubscriptionEvent>,
         peer: SocketAddr,
         properties: ConnectProperties,
         will: Option<Will>,
@@ -101,13 +109,14 @@ impl Session {
         subscriptions_db: Tree,
     ) -> Self {
         info!("new session: {:?}", id);
-        let (subscription_tx, mut subscription_rx) = mpsc::channel::<SubscriptionEvent>(32);
+        let (session_event_tx, session_event_rx) = mpsc::channel(32);
 
         Self {
             id,
             //created: Instant::now(),
             response_tx,
-            subscription_tx,
+            session_event_tx,
+            session_event_rx,
             peer,
             properties,
             will,
@@ -152,7 +161,7 @@ impl Session {
     }
 
     #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
-    async fn publish_client(&mut self, event: SubscriptionEvent) -> Result<()> {
+    async fn publish_client(&mut self, event: TopicMessage) -> Result<()> {
         let msg = event.msg;
         let packet_identifier = self.packet_identifier_seq.clone();
         let qos = min(msg.qos, event.subscription_qos);
@@ -204,7 +213,7 @@ impl Session {
         Ok(())
     }
 
-    pub async fn handle_msg(&mut self, msg: ControlPacket) -> Result<()> {
+    pub async fn handle_msg(&mut self, msg: ControlPacket) -> Result<Option<ControlPacket>> {
         match msg {
             ControlPacket::Connect(p) => self.connect(p).await,
             ControlPacket::Publish(p) => self.publish(p).await,
@@ -227,22 +236,27 @@ impl Session {
         }
     }
 
-    pub async fn handle_event(&mut self, event: SubscriptionEvent) -> Result<()> {
-        self.publish_client(event).await
-    }
-
     #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
     pub(crate) async fn session(&mut self) -> Result<()> {
-        //self.publish_client(event).await
-        /*                res = subscription_rx.recv() => {
-            trace!("subscription event: {:?}", res);
-            if let Some(event) = res {
-                self.subscription_event(event).await?;
-            } else {
-                debug!("None event.");
+        tokio::select! {
+            res = self.session_event_rx.recv() => {
+                if let Some(event) = res {
+                    trace!("subscription event: {:?}", event);
+                    match event {
+                        SessionEvent::SessionTaken(_taken) => unimplemented!(),
+                        SessionEvent::TopicMessage(message) => self
+                            .publish_client(message)
+                            .await
+                            .context("publish_client")?,
+                        _ => {}
+                    }
+                }
             }
-        }*/
-        debug!("HANDLE");
+            res = self.taken() => {
+                res?
+            }
+        }
+
         Ok(())
     }
 
@@ -267,8 +281,34 @@ impl Session {
         Ok(session_present)
     }
 
+    async fn taken(&self) -> Result<()> {
+        let session_db = self.sessions_db.clone();
+        let prefix = self.id.clone();
+        let session_event_tx = self.session_event_tx.clone();
+        let mut subscriber = session_db.watch_prefix(prefix.clone());
+        if let Some(event) = (&mut subscriber).await {
+            match event {
+                Event::Insert { key, value } => {
+                    if key.as_bytes() == prefix.as_bytes() {
+                        let state = SessionState::try_from(value).context("deserialize event")?;
+                        info!("acquired session by: {}", state.peer);
+                        session_event_tx
+                            .send(SessionEvent::SessionTaken(state))
+                            .await
+                            .context("SessionTaken event")?
+                    } else {
+                        warn!("wrong modified session: {:?}", key);
+                        unreachable!()
+                    }
+                }
+                Event::Remove { .. } => unreachable!(),
+            }
+        }
+        Ok(())
+    }
+
     #[instrument(skip(self, msg), fields(client_identifier = field::debug(& self.id)), err)]
-    async fn connect(&mut self, msg: Connect) -> Result<()> {
+    async fn connect(&mut self, msg: Connect) -> Result<Option<ControlPacket>> {
         match self.init(msg.clean_start_flag) {
             Ok(session_present) => {
                 trace!("session_present: {}", session_present);
@@ -318,7 +358,8 @@ impl Session {
                         authentication_data: None,
                     },
                 });
-                self.response_tx.send(ack).await.map_err(Error::msg)
+                Ok(Some(ack))
+                //self.response_tx.send(ack).await.map_err(Error::msg)
             }
             Err(err) => {
                 warn!(cause = ?err, "session error: ");
@@ -327,18 +368,20 @@ impl Session {
                     reason_code: ReasonCode::UnspecifiedError,
                     properties: ConnAckProperties::default(),
                 });
-                self.response_tx.send(ack).await?;
-                // disconnect
-                return Err(err);
+                Ok(Some(ack))
+                //self.response_tx.send(ack).await?;
             }
         }
     }
 
     #[instrument(skip(self, msg), fields(client_identifier = field::debug(& self.id)), err)]
-    async fn publish(&mut self, msg: Publish) -> Result<()> {
+    async fn publish(&mut self, msg: Publish) -> Result<Option<ControlPacket>> {
         match msg.qos {
             //TODO handler error
-            QoS::AtMostOnce => self.topics.publish(msg).await?,
+            QoS::AtMostOnce => {
+                self.topics.publish(msg).await?;
+                Ok(None)
+            }
             QoS::AtLeastOnce => {
                 if let Some(packet_identifier) = msg.packet_identifier {
                     //TODO handler error
@@ -353,9 +396,10 @@ impl Session {
                         },
                     });
                     //trace!("send {:?}", ack);
-                    self.response_tx.send(ack).await?
+                    Ok(Some(ack))
+                //self.response_tx.send(ack).await?
                 } else {
-                    bail!("undefined packet_identifier");
+                    Err(anyhow!("undefined packet_identifier"))
                 }
             }
             QoS::ExactlyOnce => {
@@ -365,7 +409,8 @@ impl Session {
                             reason_code: ReasonCode::PacketIdentifierInUse,
                             properties: Default::default(),
                         });
-                        self.response_tx.send(disconnect).await?;
+                        Ok(Some(disconnect))
+                    //self.response_tx.send(disconnect).await?;
                     } else if self.server_flows.len()
                         < self.config.receive_maximum.unwrap() as usize
                     {
@@ -387,35 +432,38 @@ impl Session {
                             }
                         });
                         self.server_flows.insert(packet_identifier, tx.clone());
-                        tx.send(PublishEvent::Publish(msg)).await?
+                        tx.send(PublishEvent::Publish(msg)).await?;
+                        Ok(None)
                     } else {
                         let disconnect = ControlPacket::Disconnect(Disconnect {
                             reason_code: ReasonCode::ReceiveMaximumExceeded,
                             properties: Default::default(),
                         });
-                        self.response_tx.send(disconnect).await?;
+                        Ok(Some(disconnect))
+                        //self.response_tx.send(disconnect).await?;
                     }
                 } else {
-                    bail!("undefined packet_identifier");
+                    Err(anyhow!("undefined packet_identifier"))
                 }
             }
         }
-        Ok(())
     }
 
     #[instrument(skip(self), err)]
-    async fn puback(&self, msg: PubResp) -> Result<()> {
+    async fn puback(&self, msg: PubResp) -> Result<Option<ControlPacket>> {
         trace!("{:?}", msg);
-        Ok(())
+        Ok(None)
     }
 
     #[instrument(skip(self), err)]
-    async fn pubrel(&self, msg: PubResp) -> Result<()> {
+    async fn pubrel(&self, msg: PubResp) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.server_flows.get(&msg.packet_identifier) {
             tx.clone()
                 .send(PublishEvent::PubRel(msg))
                 .await
-                .map_err(Error::msg)
+                .context("PUBREL event")
+                .map_err(Error::msg)?;
+            Ok(None)
         } else {
             Err(anyhow!(
                 "protocol flow error: not found flow for packet identifier {}",
@@ -425,12 +473,14 @@ impl Session {
     }
 
     #[instrument(skip(self), err)]
-    async fn pubrec(&self, msg: PubResp) -> Result<()> {
+    async fn pubrec(&self, msg: PubResp) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.client_flows.get(&msg.packet_identifier) {
             tx.clone()
                 .send(PublishEvent::PubRec(msg))
                 .await
-                .map_err(Error::msg)
+                .context("PUBREC event")
+                .map_err(Error::msg)?;
+            Ok(None)
         } else {
             Err(anyhow!(
                 "protocol flow error: not found flow for packet identifier {}",
@@ -440,12 +490,14 @@ impl Session {
     }
 
     #[instrument(skip(self), err)]
-    async fn pubcomp(&self, msg: PubResp) -> Result<()> {
+    async fn pubcomp(&self, msg: PubResp) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.client_flows.get(&msg.packet_identifier) {
             tx.clone()
                 .send(PublishEvent::PubComp(msg))
                 .await
-                .map_err(Error::msg)
+                .context("PUBCOMP event")
+                .map_err(Error::msg)?;
+            Ok(None)
         } else {
             Err(anyhow!(
                 "protocol flow error: not found flow for packet identifier {}",
@@ -454,11 +506,11 @@ impl Session {
         }
     }
 
-    #[instrument(skip(option, subscriber, subscription_tx))]
+    #[instrument(skip(option, subscriber, session_event_tx))]
     pub(crate) async fn subscription(
         client_identifier: MqttString,
         option: SubscriptionOptions,
-        subscription_tx: Sender<SubscriptionEvent>,
+        session_event_tx: Sender<SessionEvent>,
         topic_name: String,
         mut subscriber: Subscriber,
     ) -> Result<()> {
@@ -472,13 +524,13 @@ impl Session {
                         //debug!("id: {}, value: {:?}", id, value);
                         let msg =
                             bincode::deserialize(value.as_ref()).context("deserialize event")?;
-                        subscription_tx
-                            .send(SubscriptionEvent {
+                        session_event_tx
+                            .send(SessionEvent::TopicMessage(TopicMessage {
                                 id,
                                 topic_name: topic_name.to_owned(),
                                 subscription_qos: option.qos,
                                 msg,
-                            })
+                            }))
                             .await
                             .context("subscription send")?
                     }
@@ -522,7 +574,7 @@ impl Session {
             let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
             subscriptions.push(unsubscribe_tx);
             let session = self.id.to_owned();
-            let subscription_tx = self.subscription_tx.clone();
+            let subscription_tx = self.session_event_tx.clone();
             let options = options.to_owned();
             let topic_name = topic.to_owned();
             tokio::spawn(async move {
@@ -543,7 +595,7 @@ impl Session {
     }
 
     #[instrument(skip(self, msg), err)]
-    async fn subscribe(&mut self, msg: Subscribe) -> Result<()> {
+    async fn subscribe(&mut self, msg: Subscribe) -> Result<Option<ControlPacket>> {
         debug!("subscribe topic filters: {:?}", msg.topic_filters);
         let mut reason_codes = Vec::new();
         for (topic_filter, options) in msg.topic_filters {
@@ -562,17 +614,18 @@ impl Session {
             properties: Default::default(),
             reason_codes,
         });
-        self.response_tx.send(suback).await.map_err(Error::msg)
+        Ok(Some(suback))
+        //self.response_tx.send(suback).await.map_err(Error::msg)
     }
 
     #[instrument(skip(self), err)]
-    async fn suback(&self, msg: SubAck) -> Result<()> {
+    async fn suback(&self, msg: SubAck) -> Result<Option<ControlPacket>> {
         trace!("{:?}", msg);
-        Ok(())
+        Ok(None)
     }
 
     #[instrument(skip(self, msg), err)]
-    async fn unsubscribe(&mut self, msg: UnSubscribe) -> Result<()> {
+    async fn unsubscribe(&mut self, msg: UnSubscribe) -> Result<Option<ControlPacket>> {
         debug!("topic filters: {:?}", msg.topic_filters);
         let mut reason_codes = Vec::new();
         for topic_filter in msg.topic_filters {
@@ -596,18 +649,19 @@ impl Session {
             properties: Default::default(),
             reason_codes,
         });
-        self.response_tx.send(unsuback).await.map_err(Error::msg)
+        Ok(Some(unsuback))
+        //self.response_tx.send(unsuback).await.map_err(Error::msg)
         // trace!("send {:?}", suback);
     }
 
     #[instrument(skip(self), err)]
-    async fn unsuback(&self, msg: SubAck) -> Result<()> {
+    async fn unsuback(&self, msg: SubAck) -> Result<Option<ControlPacket>> {
         trace!("{:?}", msg);
-        Ok(())
+        Ok(None)
     }
 
     #[instrument(skip(self, msg))]
-    async fn disconnect(&self, msg: Disconnect) -> Result<()> {
+    async fn disconnect(&self, msg: Disconnect) -> Result<Option<ControlPacket>> {
         if msg.reason_code != ReasonCode::Success {
             // publish will
             if let Some(will) = self.will.borrow() {
@@ -634,7 +688,7 @@ impl Session {
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 }
 

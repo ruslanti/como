@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Error, Result};
-use futures::{SinkExt, StreamExt, TryFutureExt};
+use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, Semaphore};
@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::mqtt::context::AppContext;
 use crate::mqtt::proto::types::{Auth, Connect, ControlPacket, Disconnect, MQTTCodec, ReasonCode};
-use crate::mqtt::session::{Session, SubscriptionEvent};
+use crate::mqtt::session::Session;
 use crate::mqtt::shutdown::Shutdown;
 use crate::settings::ConnectionSettings;
 
@@ -53,9 +53,8 @@ impl ConnectionHandler {
     //#[instrument(skip(self, conn_tx, msg), err)]
     async fn prepare_session(
         &mut self,
-        msg: Connect,
+        msg: &Connect,
         response_tx: Sender<ControlPacket>,
-        subscription_tx: Sender<SubscriptionEvent>,
     ) -> Result<Session> {
         //trace!("{:?}", msg);
         let identifier = msg
@@ -79,17 +78,13 @@ impl ConnectionHandler {
             .unwrap_or(self.keep_alive);
         trace!("keep_alive: {:?}", self.keep_alive);
 
-        let mut session = self.context.make_session(
+        let session = self.context.make_session(
             identifier.clone(),
             response_tx,
-            subscription_tx,
             self.peer,
             msg.properties.clone(),
             msg.will.clone(),
         );
-
-        session.handle_msg(ControlPacket::Connect(msg)).await?;
-
         Ok(session)
     }
 
@@ -98,27 +93,22 @@ impl ConnectionHandler {
         &mut self,
         msg: ControlPacket,
         response_tx: &Sender<ControlPacket>,
-        subscription_tx: &Sender<SubscriptionEvent>,
-    ) -> Result<()> {
+    ) -> Result<Option<ControlPacket>> {
         //trace!("{:?}", packet);
         match (self.session.borrow_mut(), msg) {
             (None, ControlPacket::Connect(connect)) => {
-                self.session = Some(
-                    self.prepare_session(connect, response_tx.clone(), subscription_tx.clone())
-                        .await?,
-                );
-                Ok(())
+                let session = self.prepare_session(&connect, response_tx.clone()).await?;
+                self.session
+                    .get_or_insert(session)
+                    .handle_msg(ControlPacket::Connect(connect))
+                    .await
             }
             (None, ControlPacket::Auth(_auth)) => unimplemented!(), //self.process_auth(auth).await,
             (None, packet) => {
                 let context = format!("session: None, packet: {:?}", packet,);
                 Err(anyhow!("unacceptable event").context(context))
             }
-            (Some(_), ControlPacket::PingReq) => response_tx
-                .send(ControlPacket::PingResp)
-                .map_err(Error::msg)
-                .await
-                .context("Failure on sending PING resp"),
+            (Some(_), ControlPacket::PingReq) => Ok(Some(ControlPacket::PingResp)),
             (Some(session), msg) => session.handle_msg(msg).await,
         }
     }
@@ -148,43 +138,6 @@ impl ConnectionHandler {
         conn_tx.send(disc).await.map_err(Error::msg)
     }
 
-    /*    async fn process_stream<S>(
-        &mut self,
-        mut stream: S,
-        response_tx: Sender<ControlPacket>,
-        subscription_tx: Sender<SubscriptionEvent>,
-    ) -> Result<()>
-    where
-        S: Stream<Item = Result<ControlPacket, anyhow::Error>> + Unpin,
-    {
-        loop {
-            let duration = self.keep_alive.add(Duration::from_millis(100));
-
-            match timeout(duration, stream.next()).await? {
-                Some(res) => {
-                    self.recv(res?, response_tx.borrow(), subscription_tx.borrow())
-                        .await?;
-                }
-                None => {
-                    debug!("None request. Disconnected");
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }*/
-    /*
-    #[instrument(skip(self, subscriber_rx), fields(remote = field::display(& self.peer)), err)]
-    async fn process_subscriptions(
-        &mut self,
-        mut subscriber_rx: Receiver<SubscriptionEvent>,
-    ) -> Result<()> {
-        while let Some(event) = subscriber_rx.recv().await {
-            self.subscription_event(event).await?
-        }
-        Ok(())
-    }*/
-
     #[instrument(skip(self, socket, shutdown), fields(peer = field::display(& self.peer)), err)]
     pub(crate) async fn client<S>(&mut self, socket: S, mut shutdown: Shutdown) -> Result<()>
     where
@@ -203,7 +156,10 @@ impl ConnectionHandler {
                     if let Some(res) = res? {
                         let p = res?;
                         debug!("received {:?}", p);
-                        self.recv(p, response_tx.borrow(), subscription_tx.borrow()).await?;
+                        if let Some(msg) = self.recv(p, response_tx.borrow()).await? {
+                            debug!("sending {:?}", msg);
+                            sink.send(msg).await.context("socket send error")?
+                        }
                     } else {
                         debug!("Disconnected");
                         break;
@@ -220,6 +176,7 @@ impl ConnectionHandler {
                 }
                 res = self.session(), if self.session.is_some() => {
                      trace!("session event: {:?}", res);
+                     res?;
                 }
                  _ = shutdown.recv() => {
                      //self.disconnect(conn_tx.clone(), ReasonCode::ServerShuttingDown).await?;

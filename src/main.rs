@@ -8,8 +8,6 @@ use native_tls::TlsAcceptor;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::{debug, Level};
-use tracing_subscriber::field::MakeExt;
-use tracing_subscriber::fmt::format;
 
 use mqtt::service;
 
@@ -52,11 +50,11 @@ async fn main() -> Result<()> {
         tracing_appender::non_blocking(std::io::stdout())
     };
 
-    let field_formatter =
-        // Construct a custom formatter for `Debug` fields
-        format::debug_fn(|writer, field, value| write!(writer, "{}:{:?}", field, value))
-            .delimited(", ");
-
+    /*    let field_formatter =
+            // Construct a custom formatter for `Debug` fields
+            format::debug_fn(|writer, field, value| write!(writer, "{}:{:?}", field, value))
+                .delimited(", ");
+    */
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(Level::from_str(settings.log.level.as_str())?)
         .with_ansi(true)
