@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 
 use anyhow::{anyhow, bail, ensure, Result};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::mqtt::proto::encoder::{encode_utf8_string, encode_variable_integer};
@@ -12,10 +12,10 @@ pub fn decode_publish(
     dup: bool,
     qos: QoS,
     retain: bool,
-    reader: &mut BytesMut,
+    mut reader: Bytes,
 ) -> Result<Option<ControlPacket>> {
     end_of_stream!(reader.remaining() < 3, "publish topic name");
-    let topic_name = match decode_utf8_string(reader)? {
+    let topic_name = match decode_utf8_string(&mut reader)? {
         Some(v) => v,
         None => bail!("missing topic in publish message"),
     };
@@ -25,8 +25,8 @@ pub fn decode_publish(
         end_of_stream!(reader.remaining() < 2, "publish packet identifier");
         Some(reader.get_u16())
     };
-    let properties_length = decode_variable_integer(reader)? as usize;
-    let properties = decode_publish_properties(&mut reader.split_to(properties_length))?;
+    let properties_length = decode_variable_integer(&mut reader)? as usize;
+    let properties = decode_publish_properties(reader.split_to(properties_length))?;
     Ok(Some(ControlPacket::Publish(Publish {
         dup,
         qos,
@@ -34,14 +34,14 @@ pub fn decode_publish(
         topic_name,
         packet_identifier,
         properties,
-        payload: reader.to_bytes(),
+        payload: reader,
     })))
 }
 
-pub fn decode_publish_properties(reader: &mut BytesMut) -> Result<PublishProperties> {
+pub fn decode_publish_properties(mut reader: Bytes) -> Result<PublishProperties> {
     let mut builder = PropertiesBuilder::new();
     while reader.has_remaining() {
-        let id = decode_variable_integer(reader)?;
+        let id = decode_variable_integer(&mut reader)?;
         match id.try_into()? {
             Property::PayloadFormatIndicator => {
                 end_of_stream!(reader.remaining() < 1, "payload format indicator");
@@ -52,14 +52,17 @@ pub fn decode_publish_properties(reader: &mut BytesMut) -> Result<PublishPropert
                 builder = builder.message_expire_interval(reader.get_u32())?;
             }
             Property::ContentType => {
-                builder = builder.content_type(decode_utf8_string(reader)?)?;
+                builder = builder.content_type(decode_utf8_string(&mut reader)?)?;
             }
             Property::ResponseTopic => {
-                builder = builder.response_topic(decode_utf8_string(reader)?)?;
+                builder = builder.response_topic(decode_utf8_string(&mut reader)?)?;
             }
             Property::CorrelationData => unimplemented!(),
             Property::UserProperty => {
-                let user_property = (decode_utf8_string(reader)?, decode_utf8_string(reader)?);
+                let user_property = (
+                    decode_utf8_string(&mut reader)?,
+                    decode_utf8_string(&mut reader)?,
+                );
                 if let (Some(key), Some(value)) = user_property {
                     builder = builder.user_properties((key, value));
                 }
@@ -70,7 +73,7 @@ pub fn decode_publish_properties(reader: &mut BytesMut) -> Result<PublishPropert
             }
             Property::SubscriptionIdentifier => {
                 end_of_stream!(reader.remaining() < 4, "subscription identifier");
-                builder = builder.subscription_identifier(decode_variable_integer(reader)?)?;
+                builder = builder.subscription_identifier(decode_variable_integer(&mut reader)?)?;
             }
             _ => bail!("unknown publish property: {:x}", id),
         }

@@ -21,7 +21,7 @@ pub struct TlsSettings {
     pub pass: String,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ConnectionSettings {
     pub idle_keep_alive: u16,
@@ -32,6 +32,7 @@ pub struct ConnectionSettings {
     pub retain_available: Option<bool>,
     pub maximum_packet_size: Option<u32>,
     pub topic_alias_maximum: Option<u16>,
+    pub db_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,7 +45,7 @@ pub struct LogSettings {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct TopicSettings {
-    pub path: String,
+    pub db_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,7 +60,7 @@ pub struct Settings {
 impl Default for TopicSettings {
     fn default() -> Self {
         TopicSettings {
-            path: "data".to_string(),
+            db_path: "data/topics".to_string(),
         }
     }
 }
@@ -89,7 +90,7 @@ impl Default for TlsSettings {
 impl Default for ConnectionSettings {
     fn default() -> Self {
         ConnectionSettings {
-            idle_keep_alive: 500,
+            idle_keep_alive: 400,
             server_keep_alive: None,
             session_expire_interval: None,
             receive_maximum: None,
@@ -97,6 +98,7 @@ impl Default for ConnectionSettings {
             retain_available: None,
             maximum_packet_size: None,
             topic_alias_maximum: None,
+            db_path: "data/sessions".to_string(),
         }
     }
 }

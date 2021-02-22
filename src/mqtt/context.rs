@@ -1,73 +1,59 @@
-use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use anyhow::Result;
+use sled::{Db, Tree};
 use tokio::sync::mpsc::Sender;
-use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, instrument, warn};
 
-use crate::mqtt::session::{ConnectionContextState, Session, SessionEvent};
-use crate::mqtt::topic::TopicManager;
+use crate::mqtt::proto::property::ConnectProperties;
+use crate::mqtt::proto::types::{ControlPacket, MqttString, Will};
+use crate::mqtt::session::Session;
+use crate::mqtt::topic::Topics;
 use crate::settings::Settings;
 
 #[derive(Debug)]
 pub(crate) struct AppContext {
-    sessions: HashMap<String, (Sender<SessionEvent>, Sender<ConnectionContextState>)>,
+    db: Db,
+    sessions_db: Tree,
+    subscriptions_db: Tree,
     pub(crate) config: Arc<Settings>,
-    topic_manager: Arc<RwLock<TopicManager>>,
-    tx: mpsc::Sender<String>,
+    topic_manager: Arc<Topics>,
 }
 
 impl AppContext {
-    pub fn new(config: Arc<Settings>, tx: mpsc::Sender<String>) -> Self {
-        Self {
-            sessions: HashMap::new(),
+    pub fn new(config: Arc<Settings>) -> Result<Self> {
+        let sessions_db_path = config.connection.db_path.to_owned();
+        let topics_db_path = config.topic.db_path.to_owned();
+        let db = sled::open(sessions_db_path)?;
+        let sessions = db.open_tree("sessions")?;
+        let subscriptions = db.open_tree("subscriptions")?;
+        Ok(Self {
+            db,
+            sessions_db: sessions,
+            subscriptions_db: subscriptions,
             config,
-            topic_manager: Arc::new(RwLock::new(TopicManager::new())),
-            tx,
-        }
+            topic_manager: Arc::new(Topics::new(topics_db_path)?),
+        })
     }
 
-    #[instrument(skip(self))]
-    pub fn clean(&mut self, identifier: String) {
-        if self.sessions.remove(identifier.as_str()).is_some() {
-            debug!("removed");
-        }
-    }
-
-    #[instrument(skip(self))]
-    pub async fn connect(
-        &mut self,
-        key: &str,
-    ) -> (Sender<SessionEvent>, Sender<ConnectionContextState>, bool) {
-        if let Some((session_event_tx, connection_context_tx)) = self.sessions.get(key) {
-            (
-                session_event_tx.clone(),
-                connection_context_tx.clone(),
-                true,
-            )
-        } else {
-            let (session_event_tx, session_event_rx) = mpsc::channel(32);
-            let (connection_context_tx, connection_context_rx) = mpsc::channel(3);
-            let mut session = Session::new(key, self.config.clone(), self.topic_manager.clone());
-            let tx = self.tx.clone();
-            let s = key.to_owned();
-            tokio::spawn(async move {
-                if let Err(err) = session
-                    .session(session_event_rx, connection_context_rx)
-                    .await
-                {
-                    //FIXME handle session end and disconnect connection
-                    warn!(cause = ?err, "session error");
-                };
-                if let Err(err) = tx.send(s).await {
-                    debug!(cause = ?err, "session clear error");
-                }
-            });
-            self.sessions.insert(
-                key.to_string(),
-                (session_event_tx.clone(), connection_context_tx.clone()),
-            );
-            (session_event_tx, connection_context_tx, false)
-        }
+    pub fn make_session(
+        &self,
+        session: MqttString,
+        response_tx: Sender<ControlPacket>,
+        peer: SocketAddr,
+        properties: ConnectProperties,
+        will: Option<Will>,
+    ) -> Session {
+        Session::new(
+            session,
+            response_tx,
+            peer,
+            properties,
+            will,
+            self.config.connection.to_owned(),
+            self.topic_manager.clone(),
+            self.sessions_db.clone(),
+            self.subscriptions_db.clone(),
+        )
     }
 }

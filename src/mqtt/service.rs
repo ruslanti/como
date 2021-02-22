@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, Mutex, Semaphore};
+use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::time::{sleep, Duration};
 use tokio_native_tls::TlsAcceptor;
-use tracing::{debug, error, field, info, instrument};
+use tracing::{error, field, info, instrument};
 
 use crate::mqtt::connection::ConnectionHandler;
 use crate::mqtt::context::AppContext;
@@ -22,7 +22,7 @@ struct Service {
     shutdown_complete_rx: mpsc::Receiver<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
     config: Arc<Settings>,
-    context: Arc<Mutex<AppContext>>,
+    context: Arc<AppContext>,
 }
 
 pub(crate) async fn run(
@@ -30,7 +30,7 @@ pub(crate) async fn run(
     acceptor: Option<Arc<TlsAcceptor>>,
     config: Arc<Settings>,
     shutdown: impl Future,
-    context: Arc<Mutex<AppContext>>,
+    context: Arc<AppContext>,
 ) -> Result<()> {
     let (notify_shutdown, _) = broadcast::channel(1);
     let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel(1);
@@ -50,7 +50,7 @@ pub(crate) async fn run(
     tokio::select! {
         res = service.listen() => {
             if let Err(err) = res {
-                error!(cause = %err, "failed to accept");
+                error!(cause = ?err, "failed to accept");
             }
         }
         _ = shutdown => {
@@ -80,7 +80,7 @@ impl Service {
     async fn listen(&mut self) -> Result<()> {
         info!("accepting inbound connections");
         loop {
-            self.limit_connections.acquire().await.forget();
+            self.limit_connections.acquire().await?.forget();
 
             let stream = self.accept().await?;
 
@@ -89,7 +89,7 @@ impl Service {
                 self.limit_connections.clone(),
                 self.shutdown_complete_tx.clone(),
                 self.context.clone(),
-                self.config.connection,
+                self.config.connection.to_owned(),
             );
 
             let shutdown = Shutdown::new(self.notify_shutdown.subscribe());
@@ -97,13 +97,13 @@ impl Service {
             if let Some(acceptor) = self.acceptor.as_ref() {
                 let stream = acceptor.accept(stream).await?;
                 tokio::spawn(async move {
-                    if let Err(err) = handler.connection(stream, shutdown).await {
+                    if let Err(err) = handler.client(stream, shutdown).await {
                         error!(cause = ?err, "connection error");
                     }
                 });
             } else {
                 tokio::spawn(async move {
-                    if let Err(err) = handler.connection(stream, shutdown).await {
+                    if let Err(err) = handler.client(stream, shutdown).await {
                         error!(cause = ?err, "connection error");
                     }
                 });
@@ -118,7 +118,7 @@ impl Service {
         loop {
             match self.listener.accept().await {
                 Ok((socket, address)) => {
-                    debug!("inbound connection: {:?} ", address);
+                    info!("inbound connection: {:?} ", address);
                     return Ok(socket);
                 }
                 Err(err) => {

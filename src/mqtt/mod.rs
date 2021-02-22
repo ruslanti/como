@@ -1,10 +1,8 @@
 pub mod connection;
 pub mod context;
-//mod partition;
+mod exactly_once;
 pub mod proto;
-//mod segment;
 pub mod service;
 mod session;
 mod shutdown;
-mod subscription;
 pub mod topic;

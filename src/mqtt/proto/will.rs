@@ -1,15 +1,15 @@
 use std::convert::TryInto;
 
 use anyhow::{anyhow, bail, ensure, Result};
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes};
 
 use crate::mqtt::proto::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::mqtt::proto::property::{PropertiesBuilder, Property, WillProperties};
 
-pub fn decode_will_properties(reader: &mut BytesMut) -> Result<WillProperties> {
+pub fn decode_will_properties(mut reader: Bytes) -> Result<WillProperties> {
     let mut builder = PropertiesBuilder::new();
     while reader.has_remaining() {
-        let id = decode_variable_integer(reader)?;
+        let id = decode_variable_integer(&mut reader)?;
         match id.try_into()? {
             Property::WillDelayInterval => {
                 end_of_stream!(reader.remaining() < 4, "will delay interval");
@@ -24,14 +24,17 @@ pub fn decode_will_properties(reader: &mut BytesMut) -> Result<WillProperties> {
                 builder = builder.message_expire_interval(reader.get_u32())?;
             }
             Property::ContentType => {
-                builder = builder.content_type(decode_utf8_string(reader)?)?;
+                builder = builder.content_type(decode_utf8_string(&mut reader)?)?;
             }
             Property::ResponseTopic => {
-                builder = builder.response_topic(decode_utf8_string(reader)?)?;
+                builder = builder.response_topic(decode_utf8_string(&mut reader)?)?;
             }
             Property::CorrelationData => unimplemented!(),
             Property::UserProperty => {
-                let user_property = (decode_utf8_string(reader)?, decode_utf8_string(reader)?);
+                let user_property = (
+                    decode_utf8_string(&mut reader)?,
+                    decode_utf8_string(&mut reader)?,
+                );
                 if let (Some(key), Some(value)) = user_property {
                     builder = builder.user_properties((key, value));
                 }

@@ -3,12 +3,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
 use native_tls::Identity;
 use native_tls::TlsAcceptor;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, Level};
 
 use mqtt::service;
@@ -51,24 +49,28 @@ async fn main() -> Result<()> {
     } else {
         tracing_appender::non_blocking(std::io::stdout())
     };
+
+    /*    let field_formatter =
+            // Construct a custom formatter for `Debug` fields
+            format::debug_fn(|writer, field, value| write!(writer, "{}:{:?}", field, value))
+                .delimited(", ");
+    */
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(Level::from_str(settings.log.level.as_str())?)
-        .with_ansi(false)
+        .with_ansi(true)
         .with_writer(non_blocking)
+        //.pretty()
+        .with_thread_ids(true)
+        //.with_thread_names(true)
+        .with_target(false)
+        //.fmt_fields(field_formatter)
+        //.compact()
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("no global subscriber has been set");
 
     debug!("{:?}", settings);
 
-    let (context_tx, mut context_rx) = mpsc::channel(32);
-    let context = Arc::new(Mutex::new(AppContext::new(settings.clone(), context_tx)));
-    let context_cleaner = context.clone();
-    tokio::spawn(async move {
-        while let Some(s) = context_rx.next().await {
-            let mut context = context_cleaner.lock().await;
-            context.clean(s);
-        }
-    });
+    let context = Arc::new(AppContext::new(settings.clone())?);
 
     // Bind a TCP listener
     let listener = TcpListener::bind(&format!(
