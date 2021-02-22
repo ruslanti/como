@@ -123,11 +123,10 @@ impl ConnectionHandler {
         }
     }
 
-    #[instrument(skip(self), err)]
-    async fn subscription_event(&mut self, event: SubscriptionEvent) -> Result<()> {
-        match (self.session.borrow_mut(), event) {
-            (None, _) => Err(anyhow!("unacceptable event").context("subscription event")),
-            (Some(session), event) => session.handle_event(event).await,
+    async fn session(&mut self) -> Result<()> {
+        match self.session.borrow_mut() {
+            None => Err(anyhow!("unacceptable event").context("subscription event")),
+            Some(session) => session.session().await,
         }
     }
 
@@ -194,11 +193,11 @@ impl ConnectionHandler {
         let framed = Framed::new(socket, MQTTCodec::new());
         let (mut sink, mut stream) = framed.split::<ControlPacket>();
         let (response_tx, mut response_rx) = mpsc::channel::<ControlPacket>(32);
-        let (subscription_tx, mut subscription_rx) = mpsc::channel::<SubscriptionEvent>(32);
 
         while !shutdown.is_shutdown() {
             let duration = self.keep_alive.add(Duration::from_millis(100));
             // While reading a request frame, also listen for the shutdown signal.
+            trace!("select with timeout {} ms", duration.as_millis());
             tokio::select! {
                 res = timeout(duration, stream.next()) => {
                     if let Some(res) = res? {
@@ -219,13 +218,8 @@ impl ConnectionHandler {
                         break;
                     }
                 }
-                res = subscription_rx.recv() => {
-                    trace!("subscription event: {:?}", res);
-                    if let Some(event) = res {
-                        self.subscription_event(event).await?;
-                    } else {
-                        debug!("None event.");
-                    }
+                res = self.session(), if self.session.is_some() => {
+                     trace!("session event: {:?}", res);
                 }
                  _ = shutdown.recv() => {
                      //self.disconnect(conn_tx.clone(), ReasonCode::ServerShuttingDown).await?;

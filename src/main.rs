@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
         .with_thread_ids(true)
         //.with_thread_names(true)
         .with_target(false)
-        .fmt_fields(field_formatter)
+        //.fmt_fields(field_formatter)
         //.compact()
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("no global subscriber has been set");

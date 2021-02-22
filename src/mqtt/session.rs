@@ -101,6 +101,8 @@ impl Session {
         subscriptions_db: Tree,
     ) -> Self {
         info!("new session: {:?}", id);
+        let (subscription_tx, mut subscription_rx) = mpsc::channel::<SubscriptionEvent>(32);
+
         Self {
             id,
             //created: Instant::now(),
@@ -227,6 +229,21 @@ impl Session {
 
     pub async fn handle_event(&mut self, event: SubscriptionEvent) -> Result<()> {
         self.publish_client(event).await
+    }
+
+    #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
+    pub(crate) async fn session(&mut self) -> Result<()> {
+        //self.publish_client(event).await
+        /*                res = subscription_rx.recv() => {
+            trace!("subscription event: {:?}", res);
+            if let Some(event) = res {
+                self.subscription_event(event).await?;
+            } else {
+                debug!("None event.");
+            }
+        }*/
+        debug!("HANDLE");
+        Ok(())
     }
 
     #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
@@ -497,9 +514,9 @@ impl Session {
             .entry(topic_filter.to_owned())
             .or_insert(vec![]);
 
-        if subscriptions.is_empty() {
+        /*        if subscriptions.is_empty() {
             new_topic_subscribe().await?;
-        }
+        }*/
 
         for (topic, subscriber) in channels {
             let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();

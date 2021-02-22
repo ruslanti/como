@@ -90,7 +90,7 @@ impl Default for TlsSettings {
 impl Default for ConnectionSettings {
     fn default() -> Self {
         ConnectionSettings {
-            idle_keep_alive: 500,
+            idle_keep_alive: 400,
             server_keep_alive: None,
             session_expire_interval: None,
             receive_maximum: None,
