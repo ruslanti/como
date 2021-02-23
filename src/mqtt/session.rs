@@ -13,7 +13,7 @@ use nom::AsBytes;
 use serde::{Deserialize, Serialize};
 use sled::{Batch, Event, IVec, Subscriber, Tree};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::Duration;
 use tracing::{debug, error, field, info, instrument, trace, warn};
 
@@ -47,7 +47,6 @@ pub(crate) struct TopicMessage {
 pub(crate) enum SessionEvent {
     SessionTaken(SessionState),
     TopicMessage(TopicMessage),
-    NewTopic,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -83,12 +82,12 @@ pub(crate) struct Session {
     config: ConnectionSettings,
     server_flows: HashMap<u16, Sender<PublishEvent>>,
     client_flows: HashMap<u16, Sender<PublishEvent>>,
-    topics: Arc<Topics<'static>>,
+    topics: Arc<Topics>,
     packet_identifier_seq: Arc<AtomicU16>,
     sessions_db: Tree,
     subscriptions_db: Tree,
     topic_filters: HashMap<String, Vec<oneshot::Sender<()>>>,
-    topic_event_rx: Receiver<&'static str>,
+    topic_event: broadcast::Receiver<String>,
 }
 
 impl SessionState {
@@ -105,13 +104,13 @@ impl Session {
         properties: ConnectProperties,
         will: Option<Will>,
         config: ConnectionSettings,
-        topic_manager: Arc<Topics<'static>>,
+        topic_manager: Arc<Topics>,
         sessions_db: Tree,
         subscriptions_db: Tree,
     ) -> Self {
         info!("new session: {:?}", id);
         let (session_event_tx, session_event_rx) = mpsc::channel(32);
-
+        let topic_event = topic_manager.topic_event();
         Self {
             id,
             //created: Instant::now(),
@@ -130,7 +129,7 @@ impl Session {
             sessions_db,
             subscriptions_db,
             topic_filters: HashMap::new(),
-            topic_event_rx: topic_manager.topic_event(),
+            topic_event,
         }
     }
 
@@ -240,15 +239,27 @@ impl Session {
 
     #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
     pub(crate) async fn session(&mut self) -> Result<()> {
-        if let Some(event) = self.session_event_rx.recv().await {
-            trace!("subscription event: {:?}", event);
-            match event {
-                SessionEvent::SessionTaken(_taken) => unimplemented!(),
-                SessionEvent::TopicMessage(message) => self
-                    .publish_client(message)
-                    .await
-                    .context("publish_client")?,
-                SessionEvent::NewTopic => {}
+        tokio::select! {
+            res = self.session_event_rx.recv() => {
+                if let Some(event) = res {
+                    trace!("subscription event: {:?}", event);
+                    match event {
+                        SessionEvent::SessionTaken(_taken) => unimplemented!(),
+                        SessionEvent::TopicMessage(message) => self
+                            .publish_client(message)
+                            .await
+                            .context("publish_client")?,
+                    }
+                }
+            }
+            res = self.topic_event.recv() => {
+                match res {
+                    Ok(topic_name) => {
+                        debug!("new topic event: {}", topic_name);
+                        self.topic_filters.iter().for_each(|(k, v)| {})
+                    }
+                    Err(err) => warn!(cause=?err, "new topic event recv error")
+                }
             }
         }
         Ok(())
@@ -548,8 +559,6 @@ impl Session {
         Ok(())
     }
 
-    async fn new_topic_subscribe(&self) {}
-
     async fn subscribe_topic(
         &mut self,
         topic_filter: &str,
@@ -569,10 +578,6 @@ impl Session {
             .topic_filters
             .entry(topic_filter.to_owned())
             .or_insert(vec![]);
-
-        /*        if subscriptions.is_empty() {
-            new_topic_subscribe().await?;
-        }*/
 
         for (topic, subscriber) in channels {
             let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
