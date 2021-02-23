@@ -13,7 +13,7 @@ use nom::AsBytes;
 use serde::{Deserialize, Serialize};
 use sled::{Batch, Event, IVec, Subscriber, Tree};
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::Duration;
 use tracing::{debug, error, field, info, instrument, trace, warn};
 
@@ -47,7 +47,6 @@ pub(crate) struct TopicMessage {
 pub(crate) enum SessionEvent {
     SessionTaken(SessionState),
     TopicMessage(TopicMessage),
-    NewTopic,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -88,6 +87,7 @@ pub(crate) struct Session {
     sessions_db: Tree,
     subscriptions_db: Tree,
     topic_filters: HashMap<String, Vec<oneshot::Sender<()>>>,
+    topic_event: broadcast::Receiver<String>,
 }
 
 impl SessionState {
@@ -110,7 +110,7 @@ impl Session {
     ) -> Self {
         info!("new session: {:?}", id);
         let (session_event_tx, session_event_rx) = mpsc::channel(32);
-
+        let topic_event = topic_manager.topic_event();
         Self {
             id,
             //created: Instant::now(),
@@ -129,6 +129,7 @@ impl Session {
             sessions_db,
             subscriptions_db,
             topic_filters: HashMap::new(),
+            topic_event,
         }
     }
 
@@ -248,21 +249,27 @@ impl Session {
                             .publish_client(message)
                             .await
                             .context("publish_client")?,
-                        _ => {}
                     }
                 }
             }
-            res = self.taken() => {
-                res?
+            res = self.topic_event.recv() => {
+                match res {
+                    Ok(topic_name) => {
+                        debug!("new topic event: {}", topic_name);
+                        self.topic_filters.iter().for_each(|(k, v)| {})
+                    }
+                    Err(err) => warn!(cause=?err, "new topic event recv error")
+                }
             }
         }
-
         Ok(())
     }
 
     #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
     fn init(&mut self, clean_start: bool) -> Result<bool> {
         let session_present = self.acquire().context("acquire session")?;
+
+        self.taken();
 
         if session_present {
             if clean_start {
@@ -281,30 +288,38 @@ impl Session {
         Ok(session_present)
     }
 
-    async fn taken(&self) -> Result<()> {
-        let session_db = self.sessions_db.clone();
+    fn taken(&self) {
         let prefix = self.id.clone();
         let session_event_tx = self.session_event_tx.clone();
-        let mut subscriber = session_db.watch_prefix(prefix.clone());
-        if let Some(event) = (&mut subscriber).await {
-            match event {
-                Event::Insert { key, value } => {
-                    if key.as_bytes() == prefix.as_bytes() {
-                        let state = SessionState::try_from(value).context("deserialize event")?;
-                        info!("acquired session by: {}", state.peer);
-                        session_event_tx
-                            .send(SessionEvent::SessionTaken(state))
-                            .await
-                            .context("SessionTaken event")?
-                    } else {
-                        warn!("wrong modified session: {:?}", key);
-                        unreachable!()
+        let mut subscriber = self.sessions_db.watch_prefix(prefix.as_bytes());
+        tokio::spawn(async move {
+            while let Some(event) = (&mut subscriber).await {
+                match event {
+                    Event::Insert { key, value } => {
+                        if key.as_bytes() == prefix.as_bytes() {
+                            let state = SessionState::try_from(value)
+                                .context("deserialize event")
+                                .unwrap_or(SessionState {
+                                    peer: SocketAddr::new("0.0.0.0".parse().unwrap(), 0),
+                                });
+                            info!("acquired session by: {}", state.peer);
+                            if let Err(err) = session_event_tx
+                                .send(SessionEvent::SessionTaken(state))
+                                .await
+                                .context("SessionTaken event")
+                            {
+                                warn!(cause=?err, "SessionTaken event sent error");
+                            }
+                            break;
+                        } else {
+                            warn!("wrong modified session: {:?}", key);
+                            unreachable!()
+                        }
                     }
+                    Event::Remove { .. } => unreachable!(),
                 }
-                Event::Remove { .. } => unreachable!(),
             }
-        }
-        Ok(())
+        });
     }
 
     #[instrument(skip(self, msg), fields(client_identifier = field::debug(& self.id)), err)]
@@ -544,8 +559,6 @@ impl Session {
         Ok(())
     }
 
-    async fn new_topic_subscribe(&self) {}
-
     async fn subscribe_topic(
         &mut self,
         topic_filter: &str,
@@ -565,10 +578,6 @@ impl Session {
             .topic_filters
             .entry(topic_filter.to_owned())
             .or_insert(vec![]);
-
-        /*        if subscriptions.is_empty() {
-            new_topic_subscribe().await?;
-        }*/
 
         for (topic, subscriber) in channels {
             let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();

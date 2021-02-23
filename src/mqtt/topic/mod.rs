@@ -6,6 +6,8 @@ use std::path::Path;
 use anyhow::{anyhow, Error, Result};
 use serde::{Deserialize, Serialize};
 use sled::{Db, IVec, Subscriber, Tree};
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::RwLock;
 use tracing::{debug, instrument, trace, warn};
 
@@ -31,6 +33,7 @@ struct Topic {
 pub struct Topics {
     db: Db,
     nodes: RwLock<TopicPath<Topic>>,
+    new_topic_event: Sender<String>,
 }
 
 impl Topics {
@@ -60,15 +63,18 @@ impl Topics {
                 })
             })?;
         }
+
+        let (new_topic_event, _) = broadcast::channel(32);
+
         Ok(Self {
             db,
             nodes: RwLock::new(nodes),
+            new_topic_event,
         })
     }
 
-    #[instrument(skip(self, msg))]
-    pub(crate) async fn new_topic_subscriber(&self, msg: Publish) -> Subscriber {
-        self.db.watch_prefix(vec![])
+    pub(crate) fn topic_event(&self) -> Receiver<String> {
+        self.new_topic_event.subscribe()
     }
 
     #[instrument(skip(self, msg))]
@@ -86,10 +92,10 @@ impl Topics {
                 log,
             });
 
-            if topic.is_some() {
-                /*if let Err(err) = self.new_topic.0.send(name.to_owned()) {
+            if let Some(topic) = topic {
+                if let Err(err) = self.new_topic_event.send(topic.name.clone()) {
                     warn!(cause = ?err, "new topic event error");
-                }*/
+                }
             }
         } else {
             debug!("found topic {}", topic_name);
