@@ -238,31 +238,25 @@ impl Session {
 
     #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
     pub(crate) async fn session(&mut self) -> Result<()> {
-        tokio::select! {
-            res = self.session_event_rx.recv() => {
-                if let Some(event) = res {
-                    trace!("subscription event: {:?}", event);
-                    match event {
-                        SessionEvent::SessionTaken(_taken) => unimplemented!(),
-                        SessionEvent::TopicMessage(message) => self
-                            .publish_client(message)
-                            .await
-                            .context("publish_client")?,
-                        _ => {}
-                    }
-                }
-            }
-            res = self.taken() => {
-                res?
+        if let Some(event) = self.session_event_rx.recv().await {
+            trace!("subscription event: {:?}", event);
+            match event {
+                SessionEvent::SessionTaken(_taken) => unimplemented!(),
+                SessionEvent::TopicMessage(message) => self
+                    .publish_client(message)
+                    .await
+                    .context("publish_client")?,
+                SessionEvent::NewTopic => {}
             }
         }
-
         Ok(())
     }
 
     #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
     fn init(&mut self, clean_start: bool) -> Result<bool> {
         let session_present = self.acquire().context("acquire session")?;
+
+        self.taken();
 
         if session_present {
             if clean_start {
@@ -281,30 +275,38 @@ impl Session {
         Ok(session_present)
     }
 
-    async fn taken(&self) -> Result<()> {
-        let session_db = self.sessions_db.clone();
+    fn taken(&self) {
         let prefix = self.id.clone();
         let session_event_tx = self.session_event_tx.clone();
-        let mut subscriber = session_db.watch_prefix(prefix.clone());
-        if let Some(event) = (&mut subscriber).await {
-            match event {
-                Event::Insert { key, value } => {
-                    if key.as_bytes() == prefix.as_bytes() {
-                        let state = SessionState::try_from(value).context("deserialize event")?;
-                        info!("acquired session by: {}", state.peer);
-                        session_event_tx
-                            .send(SessionEvent::SessionTaken(state))
-                            .await
-                            .context("SessionTaken event")?
-                    } else {
-                        warn!("wrong modified session: {:?}", key);
-                        unreachable!()
+        let mut subscriber = self.sessions_db.watch_prefix(prefix.as_bytes());
+        tokio::spawn(async move {
+            while let Some(event) = (&mut subscriber).await {
+                match event {
+                    Event::Insert { key, value } => {
+                        if key.as_bytes() == prefix.as_bytes() {
+                            let state = SessionState::try_from(value)
+                                .context("deserialize event")
+                                .unwrap_or(SessionState {
+                                    peer: SocketAddr::new("0.0.0.0".parse().unwrap(), 0),
+                                });
+                            info!("acquired session by: {}", state.peer);
+                            if let Err(err) = session_event_tx
+                                .send(SessionEvent::SessionTaken(state))
+                                .await
+                                .context("SessionTaken event")
+                            {
+                                warn!(cause=?err, "SessionTaken event sent error");
+                            }
+                            break;
+                        } else {
+                            warn!("wrong modified session: {:?}", key);
+                            unreachable!()
+                        }
                     }
+                    Event::Remove { .. } => unreachable!(),
                 }
-                Event::Remove { .. } => unreachable!(),
             }
-        }
-        Ok(())
+        });
     }
 
     #[instrument(skip(self, msg), fields(client_identifier = field::debug(& self.id)), err)]
