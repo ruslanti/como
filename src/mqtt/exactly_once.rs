@@ -43,7 +43,7 @@ pub(crate) async fn exactly_once_client(
 pub(crate) async fn exactly_once_server(
     session: MqttString,
     packet_identifier: u16,
-    root: Arc<Topics>,
+    root: Arc<Topics<'static>>,
     mut rx: Receiver<PublishEvent>,
     response_tx: Sender<ControlPacket>,
 ) -> Result<()> {

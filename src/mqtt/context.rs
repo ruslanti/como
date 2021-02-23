@@ -17,7 +17,7 @@ pub(crate) struct AppContext {
     sessions_db: Tree,
     subscriptions_db: Tree,
     pub(crate) config: Arc<Settings>,
-    topic_manager: Arc<Topics>,
+    topic_manager: Arc<Topics<'static>>,
 }
 
 impl AppContext {

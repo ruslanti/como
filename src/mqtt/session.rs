@@ -83,11 +83,12 @@ pub(crate) struct Session {
     config: ConnectionSettings,
     server_flows: HashMap<u16, Sender<PublishEvent>>,
     client_flows: HashMap<u16, Sender<PublishEvent>>,
-    topics: Arc<Topics>,
+    topics: Arc<Topics<'static>>,
     packet_identifier_seq: Arc<AtomicU16>,
     sessions_db: Tree,
     subscriptions_db: Tree,
     topic_filters: HashMap<String, Vec<oneshot::Sender<()>>>,
+    topic_event_rx: Receiver<&'static str>,
 }
 
 impl SessionState {
@@ -104,7 +105,7 @@ impl Session {
         properties: ConnectProperties,
         will: Option<Will>,
         config: ConnectionSettings,
-        topic_manager: Arc<Topics>,
+        topic_manager: Arc<Topics<'static>>,
         sessions_db: Tree,
         subscriptions_db: Tree,
     ) -> Self {
@@ -129,6 +130,7 @@ impl Session {
             sessions_db,
             subscriptions_db,
             topic_filters: HashMap::new(),
+            topic_event_rx: topic_manager.topic_event(),
         }
     }
 

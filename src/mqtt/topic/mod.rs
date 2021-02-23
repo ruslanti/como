@@ -5,7 +5,9 @@ use std::path::Path;
 
 use anyhow::{anyhow, Error, Result};
 use serde::{Deserialize, Serialize};
-use sled::{Db, IVec, Subscriber, Tree};
+use sled::{Db, Event, IVec, Subscriber, Tree};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::RwLock;
 use tracing::{debug, instrument, trace, warn};
 
@@ -28,12 +30,14 @@ struct Topic {
     log: Tree,
 }
 
-pub struct Topics {
+pub struct Topics<'a> {
     db: Db,
     nodes: RwLock<TopicPath<Topic>>,
+    new_topic_event_tx: Sender<&'a str>,
+    new_topic_event_rx: Receiver<&'a str>,
 }
 
-impl Topics {
+impl Topics<'static> {
     pub(crate) fn new(path: impl AsRef<Path> + Debug) -> Result<Self> {
         debug!("open topics db: {:?}", path);
         let db = sled::open(path)?;
@@ -60,19 +64,23 @@ impl Topics {
                 })
             })?;
         }
+
+        let (new_topic_event_tx, new_topic_event_rx) = mpsc::channel(32);
+
         Ok(Self {
             db,
             nodes: RwLock::new(nodes),
+            new_topic_event_tx,
+            new_topic_event_rx,
         })
     }
 
-    #[instrument(skip(self, msg))]
-    pub(crate) async fn new_topic_subscriber(&self, msg: Publish) -> Subscriber {
-        self.db.watch_prefix(vec![])
+    pub(crate) fn topic_event(&self) -> Receiver<&'static str> {
+        self.new_topic_event_rx.clone()
     }
 
     #[instrument(skip(self, msg))]
-    pub(crate) async fn publish(&self, msg: Publish) -> Result<()> {
+    pub(crate) async fn publish(&'static self, msg: Publish) -> Result<()> {
         let topic_name = std::str::from_utf8(&msg.topic_name[..])?;
         let mut nodes = self.nodes.write().await;
         let topic = nodes.get(topic_name)?;
@@ -86,10 +94,10 @@ impl Topics {
                 log,
             });
 
-            if topic.is_some() {
-                /*if let Err(err) = self.new_topic.0.send(name.to_owned()) {
+            if let Some(topic) = topic {
+                if let Err(err) = self.new_topic_event_tx.send(topic.name.as_str()).await {
                     warn!(cause = ?err, "new topic event error");
-                }*/
+                }
             }
         } else {
             debug!("found topic {}", topic_name);
@@ -124,7 +132,7 @@ impl Topics {
     }*/
 }
 
-impl Drop for Topics {
+impl Drop for Topics<'_> {
     fn drop(&mut self) {
         if let Err(err) = self.db.flush() {
             eprintln!("topics db flush error: {}", err);
@@ -150,7 +158,7 @@ impl From<Publish> for PubMessage {
     }
 }
 
-impl fmt::Debug for Topics {
+impl fmt::Debug for Topics<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Topics")
     }
