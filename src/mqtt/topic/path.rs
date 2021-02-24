@@ -3,19 +3,19 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Debug;
 use std::path::{Component, Path};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until, take_while};
+use nom::bytes::complete::{tag, take_while, take_while1};
 use nom::character::is_alphanumeric;
-use nom::combinator::{eof, opt};
+use nom::combinator::opt;
 use nom::multi::many0;
 use nom::sequence::{terminated, tuple};
 use nom::IResult;
 use tracing::instrument;
 
 #[derive(Debug, Clone, Eq, Ord, PartialOrd, PartialEq)]
-enum RootType {
-    RootDir,
+enum NodeType {
+    Root,
     Dollar(String),
     Name(String),
 }
@@ -28,11 +28,11 @@ struct TopicNode<T> {
 
 #[derive(Debug)]
 pub struct TopicPath<T> {
-    nodes: BTreeMap<RootType, TopicNode<T>>,
+    nodes: BTreeMap<NodeType, TopicNode<T>>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum MatchState<'a> {
+pub(crate) enum MatchState<'a> {
     Root,
     Topic(&'a str),
     SingleLevel,
@@ -129,15 +129,15 @@ impl<T> TopicPath<T> {
         }
     }
 
-    fn root_key(component: &Component) -> Result<RootType> {
+    fn root_key(component: &Component) -> Result<NodeType> {
         match component {
-            Component::RootDir => Ok(RootType::RootDir),
+            Component::RootDir => Ok(NodeType::Root),
             Component::Normal(name) => {
                 let name = name.to_str().ok_or(anyhow!("invalid os str"))?;
                 if name.starts_with('$') {
-                    Ok(RootType::Dollar(name.to_owned()))
+                    Ok(NodeType::Dollar(name.to_owned()))
                 } else {
-                    Ok(RootType::Name(name.to_owned()))
+                    Ok(NodeType::Name(name.to_owned()))
                 }
             }
             _ => Err(anyhow!("unexpected component: {:?}", component)),
@@ -152,7 +152,8 @@ impl<T> TopicPath<T> {
 
     #[instrument(skip(self))]
     pub(crate) fn filter(&self, topic_filter: &str) -> Result<Vec<&T>> {
-        let mut pattern = Self::pattern(topic_filter)?;
+        let mut pattern =
+            parse_topic_filter(topic_filter.as_bytes()).context("parse topic filter")?;
         let mut filtered = Vec::new();
         // println!("{:?}", pattern);
 
@@ -160,7 +161,7 @@ impl<T> TopicPath<T> {
             Some(state) => {
                 for (root, node) in self.nodes.iter() {
                     match root {
-                        RootType::RootDir => match state {
+                        NodeType::Root => match state {
                             MatchState::Root | MatchState::SingleLevel => {
                                 let pattern = &mut pattern;
                                 filter_result!(node, pattern, filtered);
@@ -172,7 +173,7 @@ impl<T> TopicPath<T> {
                             }
                             _ => {}
                         },
-                        RootType::Name(name) => match state {
+                        NodeType::Name(name) => match state {
                             MatchState::Topic(token) if token == name => {
                                 let pattern = &mut pattern;
                                 filter_result!(node, pattern, filtered);
@@ -190,7 +191,7 @@ impl<T> TopicPath<T> {
                             }
                             _ => {}
                         },
-                        RootType::Dollar(name) if state == MatchState::Dollar(name) => {
+                        NodeType::Dollar(name) if state == MatchState::Dollar(name) => {
                             let pattern = &mut pattern;
                             filter_result!(node, pattern, filtered);
                         }
@@ -202,77 +203,111 @@ impl<T> TopicPath<T> {
         }
         Ok(filtered)
     }
+}
 
-    fn pattern(topic_filter: &str) -> Result<VecDeque<MatchState>> {
-        let mut pattern = VecDeque::new();
-        for item in topic_filter.split('/') {
-            let state = match item {
-                "#" => MatchState::MultiLevel,
-                "+" => MatchState::SingleLevel,
-                token if token.is_empty() => MatchState::Root,
-                token if token.starts_with("$") => MatchState::Dollar(token),
-                _ => MatchState::Topic(item),
-            };
-            pattern.push_back(state);
-        }
+fn parse_root(input: &[u8]) -> IResult<&[u8], Option<MatchState>> {
+    opt(tag("/"))(input).map(|(remaining, parsed)| (remaining, parsed.map(|_| MatchState::Root)))
+}
+
+fn parse_dollar(input: &[u8]) -> IResult<&[u8], Option<MatchState>> {
+    let mut dollar = opt(tuple((tag("$"), take_while1(is_alphanumeric))));
+    dollar(input).map(|(remaining, parsed)| {
+        (
+            remaining,
+            parsed.map(|(pr, name)| match pr {
+                b"$" => MatchState::Dollar(std::str::from_utf8(name).unwrap()),
+                _ => unreachable!(),
+            }),
+        )
+    })
+}
+
+fn parse_suffix(input: &[u8]) -> IResult<&[u8], Option<MatchState>> {
+    let mut suffix = opt(alt((tag("#"), take_while1(is_alphanumeric))));
+    suffix(input).map(|(remaining, parsed)| {
+        (
+            remaining,
+            parsed.map(|e| match e {
+                b"#" => MatchState::MultiLevel,
+                _ => MatchState::Topic(std::str::from_utf8(e).unwrap()),
+            }),
+        )
+    })
+}
+
+fn parse_tokens(input: &[u8]) -> IResult<&[u8], Vec<MatchState>> {
+    let token = alt((tag("+"), take_while(is_alphanumeric)));
+    let mut tokens = many0(terminated(token, tag("/")));
+    tokens(input).map(|(remaining, parsed)| {
+        (
+            remaining,
+            parsed
+                .into_iter()
+                .filter_map(|e| match e {
+                    b"+" => Some(MatchState::SingleLevel),
+                    v if !v.is_empty() => Some(MatchState::Topic(std::str::from_utf8(v).unwrap())),
+                    _ => None,
+                })
+                .collect(),
+        )
+    })
+}
+
+pub(crate) fn parse_topic_filter(topic_filter: &[u8]) -> Result<VecDeque<MatchState>> {
+    let mut pattern = VecDeque::new();
+
+    let err = |_| {
+        anyhow!(
+            "could not parse:  {}",
+            std::str::from_utf8(topic_filter).unwrap()
+        )
+    };
+
+    let (topic_filter, root) = parse_root(topic_filter)
+        .map_err(err)
+        .context("parse root")?;
+    let topic_filter = if let Some(root) = root {
+        pattern.push_back(root);
+        topic_filter
+    } else {
+        let (topic_filter, prefix) = parse_dollar(topic_filter)
+            .map_err(err)
+            .context("parse dollar")?;
+        if let Some(prefix) = prefix {
+            pattern.push_back(prefix);
+        };
+        topic_filter
+    };
+
+    let (topic_filter, prefix) = parse_tokens(topic_filter)
+        .map_err(err)
+        .context("parse token")?;
+    pattern.extend(prefix);
+
+    let (topic_filter, suffix) = parse_suffix(topic_filter)
+        .map_err(err)
+        .context("parse suffix")?;
+    if let Some(suffix) = suffix {
+        pattern.push_back(suffix)
+    };
+
+    if topic_filter.is_empty() {
         Ok(pattern)
-    }
-
-    fn pattern_parse(topic_filter: &str) -> IResult<&str, (Option<&str>, Vec<&str>, Option<&str>)> {
-        // let is_slash = is_not("/");
-        let mut t = tuple((
-            opt(alt((tag("/"), tag("$")))),
-            many0(terminated(take_until("/"), tag("/"))),
-            opt(tag("#")),
-        ));
-        //let method = take_while1(is_alpha);
-        //  let s = separated_list1(tag!("/"), is_alpha);
-        t(topic_filter)
+    } else {
+        Err(anyhow!(
+            "topic filter {:?} could not be parsed",
+            topic_filter
+        ))
     }
 }
 
-struct TopicFilter {}
+fn parse_topic_name(topic_name: &[u8]) -> Result<VecDeque<NodeType>> {
+    let mut pattern = VecDeque::new();
 
-impl TopicFilter {
-    fn parse_level(input: &[u8]) -> IResult<&[u8], Vec<MatchState>> {
-        let mut tokens = many0(terminated(take_until("/"), opt(tag("/"))));
-        tokens(input).map(|(r, t)| {
-            (
-                r,
-                t.iter()
-                    .map(|e| MatchState::Topic(std::str::from_utf8(e).unwrap()))
-                    .collect(),
-            )
-        })
-    }
-
-    fn parse_token(input: &[u8]) -> IResult<&[u8], &[u8]> {
-        take_while(is_alphanumeric)(input)
-    }
-
-    fn parse_dollar(input: &[u8]) -> IResult<&[u8], MatchState> {
-        //let token = many_till(is_alphabetic, tag("/"));
-
-        tuple((tag("$"), take_while(is_alphanumeric)))(input)
-            .map(|(r, (_, t2))| (r, MatchState::Dollar(std::str::from_utf8(t2).unwrap())))
-    }
-
-    fn parse_root(input: &[u8]) -> IResult<&[u8], MatchState> {
-        tag("/")(input).map(|(r, _t)| (r, MatchState::Root))
-    }
-
-    fn parse(topic_filter: &[u8]) -> IResult<&[u8], (Option<&[u8]>, Vec<&[u8]>, Option<&[u8]>)> {
-        let root = tag("/");
-        let multi_level = tag("#");
-        // let single_level = tag("+");
-        let hidden = tag("$");
-        let f = eof;
-
-        let prefix = opt(alt((root, eof)));
-        let tokens = many0(terminated(take_until("/"), opt(tag("/"))));
-        let suffix = opt(multi_level);
-
-        tuple((prefix, tokens, suffix))(topic_filter)
+    if topic_name.is_empty() {
+        Ok(pattern)
+    } else {
+        Err(anyhow!("topic name {:?} could not be parsed", topic_name))
     }
 }
 
@@ -287,50 +322,188 @@ mod tests {
 
     #[test]
     fn test_nom_parser() {
-        /*        assert_eq!(
-            Some((b"/".as_ref(), MatchState::Dollar("topic1"))),
-            TopicFilter::parse_dollar(b"$topic1/").ok()
+        assert_eq!(
+            parse_topic_filter(b"topic/").unwrap(),
+            [MatchState::Topic("topic")]
         );
         assert_eq!(
-            Some((b"".as_ref(), MatchState::Dollar("topic1"))),
-            TopicFilter::parse_dollar(b"$topic1").ok()
+            parse_topic_filter(b"topic/Test/").unwrap(),
+            [MatchState::Topic("topic"), MatchState::Topic("Test")]
         );
         assert_eq!(
-            Some((b"".as_ref(), MatchState::Dollar("topic1"))),
-            TopicFilter::parse_dollar(b"$topic1").ok()
+            parse_topic_filter(b"topic/+/").unwrap(),
+            [MatchState::Topic("topic"), MatchState::SingleLevel]
         );
-        assert!(TopicFilter::parse_dollar(b"topic1").is_err());
-        /*
         assert_eq!(
-            Some((b"topic1".as_ref(), MatchState::Root)),
-            TopicFilter::parse_dollar(b"/topic1").ok()
-        );*/
-        assert!(TopicFilter::parse_dollar(b"topic1").is_err());
-
-        println!("{:?}", TopicFilter::parse_root(b"/topic1"));
-        println!("{:?}", TopicFilter::parse_root(b"topic1"));
-
-        println!("{:?}", TopicFilter::parse_level(b"/topic1/topic2/topic3/#"));
-        println!(
-            "{:?}",
-            TopicFilter::parse_level(b"/topic1/+/topic2/topic3/")
-        );*/
-        /*        println!("{:?}", TopicFilter::parse_level(b"topic1/topic2/topic3"));
-        println!("{:?}", TopicFilter::parse_level(b"$topic1/topic2/topic3"));*/
-
-        println!(
-            "{:?}",
-            TopicFilter::parse(b"/topic1/topic2/topic3/#").unwrap()
+            parse_topic_filter(b"+/topic/").unwrap(),
+            [MatchState::SingleLevel, MatchState::Topic("topic")]
         );
-        println!(
-            "{:?}",
-            TopicFilter::parse(b"/topic1/+/topic2/topic3/").unwrap()
+        assert_eq!(
+            parse_topic_filter(b"+/+/").unwrap(),
+            [MatchState::SingleLevel, MatchState::SingleLevel]
         );
-        println!("{:?}", TopicFilter::parse(b"topic1/topic2/topic3").unwrap());
-        println!(
-            "{:?}",
-            TopicFilter::parse(b"$topic1/topic2/topic3").unwrap()
+
+        assert_eq!(
+            parse_topic_filter(b"topic/#").unwrap(),
+            [MatchState::Topic("topic"), MatchState::MultiLevel]
         );
+        assert!(parse_topic_filter(b"topic/$ff").is_err());
+
+        assert_eq!(
+            parse_topic_filter(b"topic/Test/#").unwrap(),
+            [
+                MatchState::Topic("topic"),
+                MatchState::Topic("Test"),
+                MatchState::MultiLevel
+            ]
+        );
+        assert_eq!(
+            parse_topic_filter(b"topic/+/#").unwrap(),
+            [
+                MatchState::Topic("topic"),
+                MatchState::SingleLevel,
+                MatchState::MultiLevel
+            ]
+        );
+        assert_eq!(
+            parse_topic_filter(b"+/topic/#").unwrap(),
+            [
+                MatchState::SingleLevel,
+                MatchState::Topic("topic"),
+                MatchState::MultiLevel
+            ]
+        );
+        assert_eq!(
+            parse_topic_filter(b"+/+/#").unwrap(),
+            [
+                MatchState::SingleLevel,
+                MatchState::SingleLevel,
+                MatchState::MultiLevel
+            ]
+        );
+
+        assert_eq!(
+            parse_topic_filter(b"/topic/").unwrap(),
+            [MatchState::Root, MatchState::Topic("topic")]
+        );
+        assert_eq!(
+            parse_topic_filter(b"/topic/Test/").unwrap(),
+            [
+                MatchState::Root,
+                MatchState::Topic("topic"),
+                MatchState::Topic("Test")
+            ]
+        );
+        assert_eq!(
+            parse_topic_filter(b"/topic/+/").unwrap(),
+            [
+                MatchState::Root,
+                MatchState::Topic("topic"),
+                MatchState::SingleLevel
+            ]
+        );
+        assert_eq!(
+            parse_topic_filter(b"/+/topic/").unwrap(),
+            [
+                MatchState::Root,
+                MatchState::SingleLevel,
+                MatchState::Topic("topic")
+            ]
+        );
+        assert_eq!(
+            parse_topic_filter(b"/+/+/").unwrap(),
+            [
+                MatchState::Root,
+                MatchState::SingleLevel,
+                MatchState::SingleLevel
+            ]
+        );
+
+        assert_eq!(
+            parse_topic_filter(b"/topic/#").unwrap(),
+            [
+                MatchState::Root,
+                MatchState::Topic("topic"),
+                MatchState::MultiLevel
+            ]
+        );
+
+        assert!(parse_topic_filter(b"/topic/#/topic").is_err());
+
+        assert_eq!(
+            parse_topic_filter(b"/topic/Test/#").unwrap(),
+            [
+                MatchState::Root,
+                MatchState::Topic("topic"),
+                MatchState::Topic("Test"),
+                MatchState::MultiLevel
+            ]
+        );
+        assert_eq!(
+            parse_topic_filter(b"/topic/+/#").unwrap(),
+            [
+                MatchState::Root,
+                MatchState::Topic("topic"),
+                MatchState::SingleLevel,
+                MatchState::MultiLevel
+            ]
+        );
+        assert_eq!(
+            parse_topic_filter(b"/+/topic/#").unwrap(),
+            [
+                MatchState::Root,
+                MatchState::SingleLevel,
+                MatchState::Topic("topic"),
+                MatchState::MultiLevel
+            ]
+        );
+        assert_eq!(
+            parse_topic_filter(b"/+/+/#").unwrap(),
+            [
+                MatchState::Root,
+                MatchState::SingleLevel,
+                MatchState::SingleLevel,
+                MatchState::MultiLevel
+            ]
+        );
+
+        assert_eq!(
+            parse_topic_filter(b"$topic/").unwrap(),
+            [MatchState::Dollar("topic")]
+        );
+        assert_eq!(
+            parse_topic_filter(b"$topic/Test/").unwrap(),
+            [MatchState::Dollar("topic"), MatchState::Topic("Test")]
+        );
+        assert_eq!(
+            parse_topic_filter(b"$topic/+/").unwrap(),
+            [MatchState::Dollar("topic"), MatchState::SingleLevel]
+        );
+        assert!(parse_topic_filter(b"$+/topic/").is_err());
+        assert!(parse_topic_filter(b"$+/+/").is_err());
+
+        assert_eq!(
+            parse_topic_filter(b"$topic/#").unwrap(),
+            [MatchState::Dollar("topic"), MatchState::MultiLevel]
+        );
+        assert_eq!(
+            parse_topic_filter(b"$topic/Test/#").unwrap(),
+            [
+                MatchState::Dollar("topic"),
+                MatchState::Topic("Test"),
+                MatchState::MultiLevel
+            ]
+        );
+        assert_eq!(
+            parse_topic_filter(b"$topic/+/#").unwrap(),
+            [
+                MatchState::Dollar("topic"),
+                MatchState::SingleLevel,
+                MatchState::MultiLevel
+            ]
+        );
+        assert!(parse_topic_filter(b"$+/topic/#").is_err());
+        assert!(parse_topic_filter(b"$+/+/#").is_err());
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::path::Path;
 
-use anyhow::{anyhow, Error, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use serde::{Deserialize, Serialize};
 use sled::{Db, IVec, Subscriber, Tree};
 use tokio::sync::broadcast;
@@ -14,6 +14,7 @@ use tracing::{debug, instrument, trace, warn};
 use path::TopicPath;
 
 use crate::mqtt::proto::types::{Publish, QoS};
+use crate::mqtt::topic::path::{parse_topic_filter, MatchState};
 
 mod path;
 
@@ -124,10 +125,33 @@ impl Topics {
             .map(|t| (t.name.to_owned(), t.log.watch_prefix(vec![])))
             .collect())
     }
-    /*
-    pub(crate) fn match_filter(topic_name: &str, filter: &str) -> bool {
-        false
-    }*/
+
+    pub(crate) fn match_filter(topic_filter: &str, topic_name: &str) -> Result<bool> {
+        let mut topic_filter = parse_topic_filter(topic_filter.as_bytes()).context(
+            "parse topic \
+        filter",
+        )?;
+        let mut topic_name = parse_topic_filter(topic_name.as_bytes()).context(
+            "parse topic \
+        name",
+        )?;
+
+        if let Some(mut filter_state) = topic_filter.pop_front() {
+            while let Some(name_state) = topic_name.pop_front() {
+                match (name_state, filter_state) {
+                    (MatchState::Root, MatchState::Root)
+                    | (MatchState::Root, MatchState::SingleLevel) => {
+                        filter_state = topic_filter.pop_front()
+                    }
+                    (MatchState::Root, MatchState::MultiLevel) => return Ok(true),
+
+                    _ => unreachable!(),
+                }
+            }
+        }
+
+        Ok(true)
+    }
 }
 
 impl Drop for Topics {
@@ -167,7 +191,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_topicmessage_ser() {
+    fn test_topicmessage() {
         let m = PubMessage {
             retain: false,
             qos: QoS::AtMostOnce,
