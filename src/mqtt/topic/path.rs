@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while};
 use nom::character::is_alphanumeric;
-use nom::combinator::opt;
+use nom::combinator::{eof, opt};
 use nom::multi::many0;
 use nom::sequence::{terminated, tuple};
 use nom::IResult;
@@ -262,12 +262,13 @@ impl TopicFilter {
     }
 
     fn parse(topic_filter: &[u8]) -> IResult<&[u8], (Option<&[u8]>, Vec<&[u8]>, Option<&[u8]>)> {
-        let separator = tag("/");
+        let root = tag("/");
         let multi_level = tag("#");
         // let single_level = tag("+");
         let hidden = tag("$");
+        let f = eof;
 
-        let prefix = opt(alt((separator, hidden)));
+        let prefix = opt(alt((root, eof)));
         let tokens = many0(terminated(take_until("/"), opt(tag("/"))));
         let suffix = opt(multi_level);
 
@@ -286,7 +287,7 @@ mod tests {
 
     #[test]
     fn test_nom_parser() {
-        assert_eq!(
+        /*        assert_eq!(
             Some((b"/".as_ref(), MatchState::Dollar("topic1"))),
             TopicFilter::parse_dollar(b"$topic1/").ok()
         );
@@ -294,8 +295,17 @@ mod tests {
             Some((b"".as_ref(), MatchState::Dollar("topic1"))),
             TopicFilter::parse_dollar(b"$topic1").ok()
         );
-        println!("{:?}", TopicFilter::parse_dollar(b"$topic1"));
-        println!("{:?}", TopicFilter::parse_dollar(b"topic1"));
+        assert_eq!(
+            Some((b"".as_ref(), MatchState::Dollar("topic1"))),
+            TopicFilter::parse_dollar(b"$topic1").ok()
+        );
+        assert!(TopicFilter::parse_dollar(b"topic1").is_err());
+        /*
+        assert_eq!(
+            Some((b"topic1".as_ref(), MatchState::Root)),
+            TopicFilter::parse_dollar(b"/topic1").ok()
+        );*/
+        assert!(TopicFilter::parse_dollar(b"topic1").is_err());
 
         println!("{:?}", TopicFilter::parse_root(b"/topic1"));
         println!("{:?}", TopicFilter::parse_root(b"topic1"));
@@ -304,14 +314,23 @@ mod tests {
         println!(
             "{:?}",
             TopicFilter::parse_level(b"/topic1/+/topic2/topic3/")
-        );
-        println!("{:?}", TopicFilter::parse_level(b"topic1/topic2/topic3"));
-        println!("{:?}", TopicFilter::parse_level(b"$topic1/topic2/topic3"));
+        );*/
+        /*        println!("{:?}", TopicFilter::parse_level(b"topic1/topic2/topic3"));
+        println!("{:?}", TopicFilter::parse_level(b"$topic1/topic2/topic3"));*/
 
-        println!("{:?}", TopicFilter::parse(b"/topic1/topic2/topic3/#"));
-        println!("{:?}", TopicFilter::parse(b"/topic1/+/topic2/topic3/"));
-        println!("{:?}", TopicFilter::parse(b"topic1/topic2/topic3"));
-        println!("{:?}", TopicFilter::parse(b"$topic1/topic2/topic3"));
+        println!(
+            "{:?}",
+            TopicFilter::parse(b"/topic1/topic2/topic3/#").unwrap()
+        );
+        println!(
+            "{:?}",
+            TopicFilter::parse(b"/topic1/+/topic2/topic3/").unwrap()
+        );
+        println!("{:?}", TopicFilter::parse(b"topic1/topic2/topic3").unwrap());
+        println!(
+            "{:?}",
+            TopicFilter::parse(b"$topic1/topic2/topic3").unwrap()
+        );
     }
 
     #[test]

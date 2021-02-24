@@ -256,7 +256,7 @@ impl Session {
                 match res {
                     Ok(topic_name) => {
                         debug!("new topic event: {}", topic_name);
-                        self.topic_filters.iter().for_each(|(k, v)| {})
+                        self.topic_filters.iter().for_each(|(_k, _v)| {})
                     }
                     Err(err) => warn!(cause=?err, "new topic event recv error")
                 }
