@@ -14,8 +14,10 @@ use tracing::{debug, instrument, trace, warn};
 use path::TopicPath;
 
 use crate::mqtt::proto::types::{Publish, QoS};
-use crate::mqtt::topic::path::{parse_topic_filter, MatchState};
+use crate::mqtt::topic::parser::{parse, Token};
 
+mod filter;
+mod parser;
 mod path;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -127,28 +129,27 @@ impl Topics {
     }
 
     pub(crate) fn match_filter(topic_filter: &str, topic_name: &str) -> Result<bool> {
-        let mut topic_filter = parse_topic_filter(topic_filter.as_bytes()).context(
+        let mut topic_filter = parse(topic_filter).context(
             "parse topic \
         filter",
         )?;
-        let mut topic_name = parse_topic_filter(topic_name.as_bytes()).context(
+        let mut topic_name = parse(topic_name).context(
             "parse topic \
         name",
         )?;
 
-        if let Some(mut filter_state) = topic_filter.pop_front() {
+        /*if let Some(mut filter_state) = topic_filter.pop_front() {
             while let Some(name_state) = topic_name.pop_front() {
                 match (name_state, filter_state) {
-                    (MatchState::Root, MatchState::Root)
-                    | (MatchState::Root, MatchState::SingleLevel) => {
+                    (Token::Root, Token::Root) | (Token::Root, Token::SingleLevel) => {
                         filter_state = topic_filter.pop_front()
                     }
-                    (MatchState::Root, MatchState::MultiLevel) => return Ok(true),
+                    (Token::Root, Token::MultiLevel) => return Ok(true),
 
                     _ => unreachable!(),
                 }
             }
-        }
+        }*/
 
         Ok(true)
     }
