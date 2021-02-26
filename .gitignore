@@ -3,3 +3,4 @@ Cargo.lock
 /.idea/*
 /logs/*
 /data/
+/nohup.out

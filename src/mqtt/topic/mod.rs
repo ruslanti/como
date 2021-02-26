@@ -1,9 +1,8 @@
 use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::Debug;
-use std::path::Path;
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{anyhow, Error, Result};
 use serde::{Deserialize, Serialize};
 use sled::{Db, IVec, Subscriber, Tree};
 use tokio::sync::broadcast;
@@ -11,10 +10,9 @@ use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::RwLock;
 use tracing::{debug, instrument, trace, warn};
 
-use path::TopicPath;
-
 use crate::mqtt::proto::types::{Publish, QoS};
-use crate::mqtt::topic::parser::{parse, Token};
+use crate::mqtt::topic::filter::{Status, TopicFilter};
+use crate::mqtt::topic::path::TopicNode;
 
 mod filter;
 mod parser;
@@ -35,16 +33,16 @@ struct Topic {
 
 pub struct Topics {
     db: Db,
-    nodes: RwLock<TopicPath<Topic>>,
+    nodes: RwLock<TopicNode<Topic>>,
     new_topic_event: Sender<String>,
 }
 
 impl Topics {
-    pub(crate) fn new(path: impl AsRef<Path> + Debug) -> Result<Self> {
+    pub(crate) fn new(path: &str) -> Result<Self> {
         debug!("open topics db: {:?}", path);
         let db = sled::open(path)?;
 
-        let mut nodes = TopicPath::new();
+        let mut nodes = TopicNode::new();
 
         for name in db.tree_names().iter().filter_map(|tree_name| {
             match std::str::from_utf8(tree_name.as_ref()) {
@@ -59,7 +57,7 @@ impl Topics {
             debug!("init topic: {:?}", name);
             let log = db.open_tree(name)?;
             //let name = name.borrow();
-            nodes.get(name).map(|topic| {
+            nodes.get(name.parse()?).map(|topic| {
                 topic.get_or_insert(Topic {
                     name: name.to_string(),
                     log,
@@ -84,7 +82,7 @@ impl Topics {
     pub(crate) async fn publish(&self, msg: Publish) -> Result<()> {
         let topic_name = std::str::from_utf8(&msg.topic_name[..])?;
         let mut nodes = self.nodes.write().await;
-        let topic = nodes.get(topic_name)?;
+        let topic = nodes.get(topic_name.parse()?)?;
 
         if let None = *topic {
             //new topic event
@@ -118,40 +116,19 @@ impl Topics {
 
     #[instrument(skip(self))]
     pub(crate) async fn subscribe(&self, topic_filter: &str) -> Result<Vec<(String, Subscriber)>> {
-        Ok(self
-            .nodes
-            .read()
-            .await
-            .filter(topic_filter)?
+        let node = self.nodes.read().await;
+        let topic_filter = topic_filter.parse()?;
+        Ok(node
+            .filter(topic_filter)
             .into_iter()
             .map(|t| (t.name.to_owned(), t.log.watch_prefix(vec![])))
             .collect())
     }
 
-    pub(crate) fn match_filter(topic_filter: &str, topic_name: &str) -> Result<bool> {
-        let mut topic_filter = parse(topic_filter).context(
-            "parse topic \
-        filter",
-        )?;
-        let mut topic_name = parse(topic_name).context(
-            "parse topic \
-        name",
-        )?;
-
-        /*if let Some(mut filter_state) = topic_filter.pop_front() {
-            while let Some(name_state) = topic_name.pop_front() {
-                match (name_state, filter_state) {
-                    (Token::Root, Token::Root) | (Token::Root, Token::SingleLevel) => {
-                        filter_state = topic_filter.pop_front()
-                    }
-                    (Token::Root, Token::MultiLevel) => return Ok(true),
-
-                    _ => unreachable!(),
-                }
-            }
-        }*/
-
-        Ok(true)
+    pub(crate) fn match_filter(topic_name: &str, topic_filter: &str) -> Result<bool> {
+        let topic_filter = topic_filter.parse::<TopicFilter>()?;
+        let topic_name = topic_name.parse()?;
+        Ok(topic_filter.matches(topic_name) == Status::Match)
     }
 }
 

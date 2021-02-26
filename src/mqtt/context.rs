@@ -22,8 +22,8 @@ pub(crate) struct AppContext {
 
 impl AppContext {
     pub fn new(config: Arc<Settings>) -> Result<Self> {
-        let sessions_db_path = config.connection.db_path.to_owned();
-        let topics_db_path = config.topic.db_path.to_owned();
+        let sessions_db_path = config.connection.db_path.as_str();
+        let topics_db_path = config.topic.db_path.as_str();
         let db = sled::open(sessions_db_path)?;
         let sessions = db.open_tree("sessions")?;
         let subscriptions = db.open_tree("subscriptions")?;
@@ -31,7 +31,7 @@ impl AppContext {
             db,
             sessions_db: sessions,
             subscriptions_db: subscriptions,
-            config,
+            config: config.clone(),
             topic_manager: Arc::new(Topics::new(topics_db_path)?),
         })
     }
