@@ -1,3 +1,4 @@
+pub mod client;
 pub mod v5;
 
 #[cfg(test)]

@@ -188,20 +188,6 @@ impl ConnectionHandler {
         Ok(())
     }
 }
-/*
-#[instrument(skip(sink, response_rx), err)]
-async fn send<S>(mut sink: S, mut response_rx: Receiver<ControlPacket>) -> Result<()>
-where
-    S: Sink<ControlPacket> + Unpin,
-{
-    while let Some(msg) = response_rx.recv().await {
-        trace!("{:?}", msg);
-        if let Err(_err) = sink.send(msg).await {
-            bail!("socket send error");
-        }
-    }
-    Ok(())
-}*/
 
 impl Drop for ConnectionHandler {
     fn drop(&mut self) {
