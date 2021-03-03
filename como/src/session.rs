@@ -27,7 +27,7 @@ use como_mqtt::v5::types::{
 };
 
 use crate::exactly_once::{exactly_once_client, exactly_once_server};
-use crate::settings::ConnectionSettings;
+use crate::settings::Connection;
 use crate::topic::{PubMessage, Topics};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,7 +80,7 @@ pub struct Session {
     properties: ConnectProperties,
     will: Option<Will>,
     expire_interval: Duration,
-    config: ConnectionSettings,
+    config: Connection,
     server_flows: HashMap<u16, Sender<PublishEvent>>,
     client_flows: HashMap<u16, Sender<PublishEvent>>,
     topics: Arc<Topics>,
@@ -104,7 +104,7 @@ impl Session {
         peer: SocketAddr,
         properties: ConnectProperties,
         will: Option<Will>,
-        config: ConnectionSettings,
+        config: Connection,
         topic_manager: Arc<Topics>,
         sessions_db: Tree,
         subscriptions_db: Tree,

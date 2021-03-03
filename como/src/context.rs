@@ -24,7 +24,7 @@ pub struct AppContext {
 impl AppContext {
     pub fn new(config: Arc<Settings>) -> Result<Self> {
         let sessions_db_path = config.connection.db_path.as_str();
-        let topics_db_path = config.topic.db_path.as_str();
+        let topics_db_path = config.topics.db_path.as_str();
         let db = sled::open(sessions_db_path)?;
         let sessions = db.open_tree("sessions")?;
         let subscriptions = db.open_tree("subscriptions")?;

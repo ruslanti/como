@@ -5,18 +5,16 @@ use como_mqtt::v5::types::QoS;
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
-pub struct ServiceSettings {
+pub struct Transport {
     pub bind: String,
     pub port: u16,
     pub max_connections: usize,
-    #[cfg(feature = "tls")]
-    pub tls: Option<TlsSettings>,
+    pub tls: Option<Tls>,
 }
 
-#[cfg(feature = "tls")]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct TlsSettings {
+pub struct Tls {
     pub bind: String,
     pub port: u16,
     pub cert: String,
@@ -25,7 +23,7 @@ pub struct TlsSettings {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct ConnectionSettings {
+pub struct Connection {
     pub idle_keep_alive: u16,
     pub server_keep_alive: Option<u16>,
     pub session_expire_interval: Option<u32>,
@@ -39,37 +37,37 @@ pub struct ConnectionSettings {
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
-pub struct LogSettings {
+pub struct Logger {
     pub file: Option<String>,
     pub level: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
-pub struct TopicSettings {
+pub struct Topics {
     pub db_path: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub topic: TopicSettings,
-    pub service: ServiceSettings,
-    pub connection: ConnectionSettings,
-    pub log: LogSettings,
+    pub topics: Topics,
+    pub service: Transport,
+    pub connection: Connection,
+    pub log: Logger,
 }
 
-impl Default for TopicSettings {
+impl Default for Topics {
     fn default() -> Self {
-        TopicSettings {
+        Topics {
             db_path: "data/topics".to_string(),
         }
     }
 }
 
-impl Default for ServiceSettings {
+impl Default for Transport {
     fn default() -> Self {
-        ServiceSettings {
+        Transport {
             bind: String::from("127.0.0.1"),
             port: 1883,
             max_connections: 255,
@@ -78,9 +76,9 @@ impl Default for ServiceSettings {
     }
 }
 
-impl Default for TlsSettings {
+impl Default for Tls {
     fn default() -> Self {
-        TlsSettings {
+        Tls {
             bind: String::from("127.0.0.1"),
             port: 8883,
             cert: "".to_string(),
@@ -89,9 +87,9 @@ impl Default for TlsSettings {
     }
 }
 
-impl Default for ConnectionSettings {
+impl Default for Connection {
     fn default() -> Self {
-        ConnectionSettings {
+        Connection {
             idle_keep_alive: 400,
             server_keep_alive: None,
             session_expire_interval: None,
@@ -105,9 +103,9 @@ impl Default for ConnectionSettings {
     }
 }
 
-impl Default for LogSettings {
+impl Default for Logger {
     fn default() -> Self {
-        LogSettings {
+        Logger {
             file: None,
             level: "debug".to_string(),
         }
@@ -117,7 +115,7 @@ impl Default for LogSettings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            topic: Default::default(),
+            topics: Default::default(),
             service: Default::default(),
             connection: Default::default(),
             log: Default::default(),

@@ -2,6 +2,10 @@
 level = "trace"
 #file = "como.log"
 
+#[service.tls]
+#bind = "127.0.0.1"
+#port = 4883
+
 [connection]
 maximum_qos = 2
 session_expire_interval = 60

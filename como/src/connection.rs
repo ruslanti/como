@@ -18,7 +18,7 @@ use como_mqtt::v5::types::{Auth, Connect, ControlPacket, Disconnect, MQTTCodec, 
 
 use crate::context::AppContext;
 use crate::session::Session;
-use crate::settings::ConnectionSettings;
+use crate::settings::Connection;
 use crate::shutdown::Shutdown;
 
 #[derive(Debug)]
@@ -29,7 +29,7 @@ pub struct ConnectionHandler {
     keep_alive: Duration,
     context: Arc<AppContext>,
     session: Option<Session>,
-    config: ConnectionSettings,
+    config: Connection,
 }
 
 impl ConnectionHandler {
@@ -38,8 +38,8 @@ impl ConnectionHandler {
         limit_connections: Arc<Semaphore>,
         shutdown_complete: mpsc::Sender<()>,
         context: Arc<AppContext>,
-        config: ConnectionSettings,
     ) -> Self {
+        let config = context.config.connection.to_owned();
         ConnectionHandler {
             peer,
             limit_connections,

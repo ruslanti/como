@@ -407,6 +407,7 @@ impl EncodedSize for SubAckProperties {
     }
 }
 
+#[derive(Clone)]
 pub struct PropertiesBuilder {
     payload_format_indicator: Option<bool>,
     message_expire_interval: Option<u32>,

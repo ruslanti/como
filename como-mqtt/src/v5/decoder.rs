@@ -1,18 +1,17 @@
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 
 use anyhow::{anyhow, ensure, Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::Decoder;
 use tracing::{instrument, trace};
 
-use crate::v5::auth::decode_auth;
 use crate::v5::connack::decode_connack;
 use crate::v5::connect::decode_connect;
 use crate::v5::disconnect::decode_disconnect;
 use crate::v5::publish::decode_publish;
 use crate::v5::pubres::{decode_puback, decode_pubcomp, decode_pubrec, decode_pubrel};
 use crate::v5::subscribe::decode_subscribe;
-use crate::v5::types::{ControlPacket, MQTTCodec, MqttString, PacketPart, PacketType};
+use crate::v5::types::{Auth, ControlPacket, MQTTCodec, MqttString, PacketPart, PacketType};
 use crate::v5::unsubscribe::decode_unsubscribe;
 
 const MIN_FIXED_HEADER_LEN: usize = 2;
@@ -68,7 +67,9 @@ impl Decoder for MQTTCodec {
                     PacketType::PINGREQ => Ok(Some(ControlPacket::PingReq)),
                     PacketType::PINGRESP => Ok(Some(ControlPacket::PingResp)),
                     PacketType::DISCONNECT => decode_disconnect(packet),
-                    PacketType::AUTH => decode_auth(packet),
+                    PacketType::AUTH => {
+                        Auth::try_from(packet).map(|a| Some(ControlPacket::Auth(a)))
+                    }
                 }
             }
         }
