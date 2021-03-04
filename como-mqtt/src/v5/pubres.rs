@@ -5,7 +5,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
-use crate::v5::encoder::{encode_utf8_string, encode_variable_integer, RemainingLength};
+use crate::v5::encoder::{encode_utf8_string, RemainingLength};
 use crate::v5::property::{PropertiesBuilder, PropertiesSize, Property, ResponseProperties};
 use crate::v5::types::{ControlPacket, MQTTCodec, PacketType, ReasonCode, Response};
 

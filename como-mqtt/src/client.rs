@@ -1,12 +1,15 @@
 use std::net::SocketAddr;
 
-use anyhow::Result;
-use futures::SinkExt;
+use anyhow::{anyhow, Error, Result};
+use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpSocket, TcpStream};
+use tokio::time::error::Elapsed;
+use tokio::time::timeout;
+use tokio::time::Duration;
 use tokio_util::codec::Framed;
 
 use crate::v5::property::PropertiesBuilder;
-use crate::v5::types::{Connect, ControlPacket, MQTTCodec, MqttString};
+use crate::v5::types::{ConnAck, Connect, ControlPacket, MQTTCodec, MqttString};
 
 pub struct Client {
     stream: Framed<TcpStream, MQTTCodec>,
@@ -23,7 +26,7 @@ pub struct ClientBuilder<'a> {
 }
 
 impl Client {
-    pub async fn connect(&mut self, clean_start: bool) -> Result<()> {
+    pub async fn connect(&mut self, clean_start: bool) -> Result<ConnAck> {
         let connect = Connect {
             clean_start_flag: clean_start,
             keep_alive: self.keep_alive,
@@ -33,8 +36,17 @@ impl Client {
             password: None,
             will: None,
         };
-        self.stream.send(ControlPacket::Connect(connect)).await
-        //let res = self.stream.next().await
+        println!("send {:?}", connect);
+        self.stream.send(ControlPacket::Connect(connect)).await;
+        match timeout(Duration::from_millis(100), self.stream.next()).await {
+            Ok(Some(Ok(result))) => match result {
+                ControlPacket::ConnAck(ack) => Ok(ack),
+                _ => Err(anyhow!("unexpected message")),
+            },
+            Ok(Some(Err(err))) => Err(anyhow!("error")),
+            Ok(None) => Err(anyhow!("disconnected")),
+            Err(elapsed) => Err(anyhow!("received response timeout")),
+        }
     }
 
     pub async fn disconnect() -> Result<()> {

@@ -1,11 +1,12 @@
 use std::convert::TryInto;
+use std::mem::size_of_val;
 
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
-use crate::v5::encoder::{encode_utf8_string, encode_variable_integer};
+use crate::v5::encoder::encode_utf8_string;
 use crate::v5::property::{PropertiesBuilder, PropertiesSize, Property, WillProperties};
 use crate::v5::types::{MQTTCodec, Will};
 
@@ -67,7 +68,18 @@ impl Encoder<Will> for MQTTCodec {
 
 impl PropertiesSize for WillProperties {
     fn size(&self) -> usize {
-        unimplemented!()
+        let mut len = 4; //will_delay_interval
+        len += check_size_of!(self, payload_format_indicator);
+        len += check_size_of!(self, message_expire_interval);
+        len += check_size_of_string!(self, content_type);
+        len += check_size_of_string!(self, response_topic);
+        len += check_size_of_string!(self, correlation_data);
+        len += self
+            .user_properties
+            .iter()
+            .map(|(x, y)| 5 + x.len() + y.len())
+            .sum::<usize>();
+        len
     }
 }
 

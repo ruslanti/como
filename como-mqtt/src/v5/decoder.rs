@@ -1,6 +1,6 @@
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryFrom;
 
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, ensure, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::Decoder;
 use tracing::{instrument, trace};
@@ -29,7 +29,7 @@ impl Decoder for MQTTCodec {
                     // trace!(?self.part, "src buffer may not have entire fixed header");
                     return Ok(None);
                 }
-                let packet_type: PacketType = reader.get_u8().try_into()?;
+                let packet_type = PacketType::try_from(reader.get_u8())?;
                 let remaining = decode_variable_integer(reader)? as usize;
                 reader.reserve(remaining);
 
@@ -108,9 +108,9 @@ pub fn decode_utf8_string(reader: &mut Bytes) -> Result<Option<MqttString>> {
                 Ok(None)
             }
         } else {
-            Err(anyhow!("end of stream")).context("decode_utf8_string")
+            Err(anyhow!("end of stream"))
         }
     } else {
-        Err(anyhow!("end of stream")).context("decode_utf8_string")
+        Err(anyhow!("end of stream"))
     }
 }

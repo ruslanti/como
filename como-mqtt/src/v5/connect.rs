@@ -1,12 +1,11 @@
 use std::convert::TryInto;
 use std::mem::size_of_val;
 
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
-use crate::v5::encoder;
 use crate::v5::encoder::{encode_utf8_string, RemainingLength};
 use crate::v5::property::{ConnectProperties, PropertiesBuilder, PropertiesSize, Property};
 use crate::v5::types::{Connect, ControlPacket, MQTTCodec, Will, MQTT, VERSION};
@@ -33,15 +32,23 @@ pub fn decode_connect(mut reader: Bytes) -> Result<Option<ControlPacket>> {
 
     let keep_alive = reader.get_u16();
 
-    let properties_length = decode_variable_integer(&mut reader)? as usize;
-    let properties = decode_connect_properties(reader.split_to(properties_length))?;
+    let properties_length = decode_variable_integer(&mut reader)
+        .context("connect properties length decode error")? as usize;
+    let properties = decode_connect_properties(reader.split_to(properties_length))
+        .context("connect properties decode error")?;
 
-    let client_identifier = decode_utf8_string(&mut reader)?;
+    let client_identifier =
+        decode_utf8_string(&mut reader).context("client_identifier decode error")?;
 
     let will = if will_flag {
-        let will_properties_length = decode_variable_integer(&mut reader)? as usize;
-        let properties = decode_will_properties(reader.split_to(will_properties_length))?;
-        let topic = decode_utf8_string(&mut reader)?.unwrap();
+        let will_properties_length = decode_variable_integer(&mut reader)
+            .context("will properties length decode error")?
+            as usize;
+        let properties = decode_will_properties(reader.split_to(will_properties_length))
+            .context("will properties decode error")?;
+        let topic = decode_utf8_string(&mut reader)
+            .context("will topic decode error")?
+            .ok_or(anyhow!("will topic is missing"))?;
         let payload = reader;
         Some(Will {
             qos: will_qos_flag,
@@ -169,7 +176,9 @@ impl Encoder<ConnectProperties> for MQTTCodec {
 
 impl RemainingLength for Connect {
     fn remaining_length(&self) -> usize {
-        10 + self.properties.size()
+        let properties_len = self.properties.size();
+        10 + properties_len.size()
+            + properties_len
             + self
                 .client_identifier
                 .as_ref()
@@ -191,7 +200,6 @@ impl Encoder<Connect> for MQTTCodec {
         writer.put_u16(msg.keep_alive);
         self.encode(msg.properties, writer)?;
         self.encode(msg.client_identifier.unwrap_or(Bytes::new()), writer)?;
-
         if let Some(will) = msg.will {
             self.encode(will, writer)?;
         }

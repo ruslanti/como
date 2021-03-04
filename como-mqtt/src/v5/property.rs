@@ -463,6 +463,13 @@ impl PropertiesBuilder {
     pub fn subscription_identifier(mut self, value: u32) -> Result<Self> {
         check_and_set!(self, subscription_identifier, value)
     }
+    pub fn assigned_client_identifier(mut self, value: Option<MqttString>) -> Result<Self> {
+        if let Some(v) = value {
+            check_and_set!(self, assigned_client_identifier, v)
+        } else {
+            Err(anyhow!("empty assigned client identifier"))
+        }
+    }
 
     pub fn will(self) -> WillProperties {
         WillProperties {

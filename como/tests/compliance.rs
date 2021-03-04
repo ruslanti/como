@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use tokio::signal;
 use tokio::time::Duration;
-use tracing::Level;
 
 use como::service;
 use como::settings::Settings;
@@ -30,6 +28,7 @@ async fn basic_connect_clean_session() {
         .unwrap();
 
     let res = client.connect(true).await.unwrap();
+    println!("{:?}", res);
 
     tokio::time::sleep(Duration::from_millis(1000)).await;
 }

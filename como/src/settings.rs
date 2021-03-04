@@ -42,10 +42,11 @@ pub struct Logger {
     pub level: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Topics {
-    pub db_path: String,
+    pub temporary: bool,
+    pub db_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,7 +61,8 @@ pub struct Settings {
 impl Default for Topics {
     fn default() -> Self {
         Topics {
-            db_path: "data/topics".to_string(),
+            temporary: true,
+            db_path: None,
         }
     }
 }

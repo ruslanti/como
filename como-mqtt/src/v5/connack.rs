@@ -6,7 +6,6 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
-use crate::v5::encoder;
 use crate::v5::encoder::encode_utf8_string;
 use crate::v5::encoder::RemainingLength;
 use crate::v5::property::*;
@@ -51,7 +50,9 @@ pub fn decode_connack_properties(mut reader: Bytes) -> Result<ConnAckProperties>
                 end_of_stream!(reader.remaining() < 4, "maximum packet size");
                 builder = builder.maximum_packet_size(reader.get_u32())?;
             }
-            Property::AssignedClientIdentifier => unimplemented!(),
+            Property::AssignedClientIdentifier => {
+                builder = builder.assigned_client_identifier(decode_utf8_string(&mut reader)?)?;
+            }
             Property::TopicAliasMaximum => {
                 end_of_stream!(reader.remaining() < 2, "topic alias maximum");
                 builder = builder.topic_alias_maximum(reader.get_u16())?;

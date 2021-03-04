@@ -1,10 +1,7 @@
-use std::io::Error;
-
 use anyhow::{anyhow, ensure, Result};
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
-use crate::v5::property;
 use crate::v5::property::PropertiesSize;
 use crate::v5::types::{ControlPacket, MQTTCodec, MqttString, PacketType};
 
