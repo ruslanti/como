@@ -1,22 +1,17 @@
 use std::borrow::Borrow;
-use std::future::Future;
 use std::io::Read;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use futures::TryFutureExt;
 use native_tls::Identity;
 use native_tls::TlsAcceptor;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::time::{sleep, Duration};
-use tracing::{error, field, info, instrument};
+use tracing::{error, info, instrument};
 
 use crate::connection::ConnectionHandler;
 use crate::context::AppContext;
-use crate::service::Service;
-use crate::settings::Settings;
 use crate::shutdown::Shutdown;
 
 pub(crate) struct TlsTransport {

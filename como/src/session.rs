@@ -17,13 +17,12 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::Duration;
 use tracing::{debug, error, field, info, instrument, trace, warn};
 
-use como_mqtt::v5::encoder::EncodedSize;
 use como_mqtt::v5::property::{
-    ConnAckProperties, ConnectProperties, PubResProperties, PublishProperties,
+    ConnAckProperties, ConnectProperties, PublishProperties, ResponseProperties,
 };
 use como_mqtt::v5::types::{
-    ConnAck, Connect, ControlPacket, Disconnect, MqttString, PacketType, PubResp, Publish, QoS,
-    ReasonCode, SubAck, Subscribe, SubscriptionOptions, UnSubscribe, Will,
+    ConnAck, Connect, ControlPacket, Disconnect, MqttString, PacketType, Publish, QoS, ReasonCode,
+    Response, SubAck, Subscribe, SubscriptionOptions, UnSubscribe, Will,
 };
 
 use crate::exactly_once::{exactly_once_client, exactly_once_server};
@@ -53,9 +52,9 @@ pub enum SessionEvent {
 #[derive(Debug, Eq, PartialEq)]
 pub enum PublishEvent {
     Publish(Publish),
-    PubRec(PubResp),
-    PubRel(PubResp),
-    PubComp(PubResp),
+    PubRec(Response),
+    PubRel(Response),
+    PubComp(Response),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -178,7 +177,7 @@ impl Session {
                 Some(id)
             }
         };
-        let publish = ControlPacket::Publish(Publish {
+        let publish = Publish {
             dup: false,
             qos,
             retain: msg.retain,
@@ -186,16 +185,19 @@ impl Session {
             packet_identifier,
             properties: PublishProperties::default(),
             payload: Bytes::from(msg.payload),
-        });
+        };
 
         if let Some(maximum_packet_size) = self.properties.maximum_packet_size {
-            if publish.encoded_size() > maximum_packet_size as usize {
+            if publish.size() > maximum_packet_size as usize {
                 warn!("exceed maximum_packet_size: {:?}", publish);
                 return Ok(());
             }
         }
 
-        self.response_tx.send(publish).await.map_err(Error::msg)?;
+        self.response_tx
+            .send(ControlPacket::Publish(publish))
+            .await
+            .map_err(Error::msg)?;
 
         if QoS::ExactlyOnce == qos {
             let (tx, rx) = mpsc::channel(1);
@@ -406,11 +408,11 @@ impl Session {
                 if let Some(packet_identifier) = msg.packet_identifier {
                     //TODO handler error
                     self.topics.publish(msg).await?;
-                    let ack = ControlPacket::PubAck(PubResp {
+                    let ack = ControlPacket::PubAck(Response {
                         packet_type: PacketType::PUBACK,
                         packet_identifier,
                         reason_code: ReasonCode::Success,
-                        properties: PubResProperties {
+                        properties: ResponseProperties {
                             reason_string: None,
                             user_properties: vec![],
                         },
@@ -470,13 +472,13 @@ impl Session {
     }
 
     #[instrument(skip(self), err)]
-    async fn puback(&self, msg: PubResp) -> Result<Option<ControlPacket>> {
+    async fn puback(&self, msg: Response) -> Result<Option<ControlPacket>> {
         trace!("{:?}", msg);
         Ok(None)
     }
 
     #[instrument(skip(self), err)]
-    async fn pubrel(&self, msg: PubResp) -> Result<Option<ControlPacket>> {
+    async fn pubrel(&self, msg: Response) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.server_flows.get(&msg.packet_identifier) {
             tx.clone()
                 .send(PublishEvent::PubRel(msg))
@@ -493,7 +495,7 @@ impl Session {
     }
 
     #[instrument(skip(self), err)]
-    async fn pubrec(&self, msg: PubResp) -> Result<Option<ControlPacket>> {
+    async fn pubrec(&self, msg: Response) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.client_flows.get(&msg.packet_identifier) {
             tx.clone()
                 .send(PublishEvent::PubRec(msg))
@@ -510,7 +512,7 @@ impl Session {
     }
 
     #[instrument(skip(self), err)]
-    async fn pubcomp(&self, msg: PubResp) -> Result<Option<ControlPacket>> {
+    async fn pubcomp(&self, msg: Response) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.client_flows.get(&msg.packet_identifier) {
             tx.clone()
                 .send(PublishEvent::PubComp(msg))

@@ -1,11 +1,12 @@
 use std::convert::{TryFrom, TryInto};
 
 use anyhow::{anyhow, bail, ensure, Result};
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
+use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::property::{AuthProperties, PropertiesBuilder, Property};
-use crate::v5::types::Auth;
+use crate::v5::types::{Auth, MQTTCodec};
 
 impl TryFrom<Bytes> for Auth {
     type Error = anyhow::Error;
@@ -54,5 +55,13 @@ impl TryFrom<Bytes> for AuthProperties {
             }
         }
         Ok(builder.auth())
+    }
+}
+
+impl Encoder<Auth> for MQTTCodec {
+    type Error = anyhow::Error;
+
+    fn encode(&mut self, _msg: Auth, _writer: &mut BytesMut) -> Result<(), Self::Error> {
+        unimplemented!()
     }
 }

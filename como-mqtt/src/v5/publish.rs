@@ -1,12 +1,16 @@
 use std::convert::TryInto;
+use std::mem::size_of_val;
 
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
-use crate::v5::encoder::{encode_utf8_string, encode_variable_integer};
-use crate::v5::property::{PropertiesBuilder, Property, PublishProperties};
-use crate::v5::types::{ControlPacket, Publish, QoS};
+use crate::v5::encoder::encode_utf8_string;
+use crate::v5::encoder::encode_variable_integer;
+use crate::v5::encoder::RemainingLength;
+use crate::v5::property::{PropertiesBuilder, PropertiesSize, Property, PublishProperties};
+use crate::v5::types::{ControlPacket, MQTTCodec, Publish, QoS};
 
 pub fn decode_publish(
     dup: bool,
@@ -81,31 +85,97 @@ pub fn decode_publish_properties(mut reader: Bytes) -> Result<PublishProperties>
     Ok(builder.publish())
 }
 
-pub fn encode_publish_properties(
-    writer: &mut BytesMut,
-    properties: PublishProperties,
-) -> Result<()> {
-    encode_property_u8!(
-        writer,
-        PayloadFormatIndicator,
-        properties.payload_format_indicator.map(|b| b as u8)
-    );
-    encode_property_u32!(
-        writer,
-        MessageExpireInterval,
-        properties.message_expire_interval
-    );
-    encode_property_u16!(writer, TopicAlias, properties.topic_alias);
-    encode_property_string!(writer, ResponseTopic, properties.response_topic);
-    if properties.correlation_data.is_some() {
-        unimplemented!()
+impl Encoder<Publish> for MQTTCodec {
+    type Error = anyhow::Error;
+
+    fn encode(&mut self, msg: Publish, writer: &mut BytesMut) -> Result<(), Self::Error> {
+        self.encode(msg.topic_name, writer)?;
+        if let Some(packet_identifier) = msg.packet_identifier {
+            writer.put_u16(packet_identifier); // packet identifier
+        };
+        self.encode(msg.properties, writer)?;
+        self.encode(msg.payload, writer)
     }
-    encode_property_user_properties!(writer, UserProperty, properties.user_properties);
-    encode_property_variable_integer!(
-        writer,
-        SubscriptionIdentifier,
-        properties.subscription_identifier
-    );
-    encode_property_string!(writer, ContentType, properties.content_type);
-    Ok(())
+}
+
+impl Publish {
+    pub fn size(&self) -> usize {
+        let len = self.remaining_length();
+        1 + len.size() + len
+    }
+}
+
+impl RemainingLength for Publish {
+    fn remaining_length(&self) -> usize {
+        let packet_identifier_len = if self.packet_identifier.is_some() {
+            2
+        } else {
+            0
+        };
+        let properties_length = self.properties.size(); // properties
+
+        self.topic_name.len()
+            + 2
+            + packet_identifier_len
+            + properties_length.size()
+            + properties_length
+            + self.payload.len()
+            + 2
+    }
+}
+
+impl PropertiesSize for PublishProperties {
+    fn size(&self) -> usize {
+        let mut len = check_size_of!(self, payload_format_indicator);
+        len += check_size_of!(self, message_expire_interval);
+        len += check_size_of!(self, topic_alias);
+        len += check_size_of_string!(self, response_topic);
+        len += check_size_of!(self, correlation_data);
+        len += self
+            .user_properties
+            .iter()
+            .map(|(x, y)| 5 + x.len() + y.len())
+            .sum::<usize>();
+        if let Some(id) = self.subscription_identifier {
+            len += (id as usize).size();
+        };
+        len += check_size_of_string!(self, content_type);
+        len
+    }
+}
+
+impl Encoder<PublishProperties> for MQTTCodec {
+    type Error = anyhow::Error;
+
+    fn encode(
+        &mut self,
+        properties: PublishProperties,
+        writer: &mut BytesMut,
+    ) -> Result<(), Self::Error> {
+        self.encode(properties.size(), writer)?;
+        // properties length
+        encode_property_u8!(
+            writer,
+            PayloadFormatIndicator,
+            properties.payload_format_indicator.map(|b| b as u8)
+        );
+        encode_property_u32!(
+            writer,
+            MessageExpireInterval,
+            properties.message_expire_interval
+        );
+        encode_property_u16!(writer, TopicAlias, properties.topic_alias);
+        encode_property_string!(writer, ResponseTopic, properties.response_topic);
+        if properties.correlation_data.is_some() {
+            unimplemented!()
+        }
+        encode_property_user_properties!(writer, UserProperty, properties.user_properties);
+        encode_property_variable_integer!(
+            writer,
+            SubscriptionIdentifier,
+            properties.subscription_identifier
+        );
+        encode_property_string!(writer, ContentType, properties.content_type);
+        Ok(())
+    }
 }

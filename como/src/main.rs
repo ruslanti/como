@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::convert::TryInto;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -5,22 +7,13 @@ use anyhow::Result;
 use tokio::signal;
 use tracing::{debug, Level};
 
-use crate::context::AppContext;
-use crate::settings::Settings;
+use como::service;
+use como::settings::Settings;
 
 /*use std::thread;
 use std::time::Duration;
 use tracing_subscriber::prelude::*;
  */
-mod connection;
-mod context;
-mod exactly_once;
-mod service;
-mod session;
-mod settings;
-mod shutdown;
-mod tls_service;
-mod topic;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -71,7 +64,5 @@ async fn main() -> Result<()> {
 
     debug!("{:?}", settings);
 
-    let context = Arc::new(AppContext::new(settings.clone())?);
-
-    service::run(context, signal::ctrl_c()).await
+    service::run(settings, signal::ctrl_c()).await
 }

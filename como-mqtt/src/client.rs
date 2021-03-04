@@ -8,14 +8,14 @@ use tokio_util::codec::Framed;
 use crate::v5::property::PropertiesBuilder;
 use crate::v5::types::{Connect, ControlPacket, MQTTCodec, MqttString};
 
-struct Client {
+pub struct Client {
     stream: Framed<TcpStream, MQTTCodec>,
     client_id: Option<MqttString>,
     keep_alive: u16,
     properties_builder: PropertiesBuilder,
 }
 
-struct ClientBuilder<'a> {
+pub struct ClientBuilder<'a> {
     address: &'a str,
     client_id: Option<MqttString>,
     keep_alive: Option<u16>,
@@ -23,7 +23,7 @@ struct ClientBuilder<'a> {
 }
 
 impl Client {
-    async fn connect(&mut self, clean_start: bool) -> Result<()> {
+    pub async fn connect(&mut self, clean_start: bool) -> Result<()> {
         let connect = Connect {
             clean_start_flag: clean_start,
             keep_alive: self.keep_alive,
@@ -37,15 +37,15 @@ impl Client {
         //let res = self.stream.next().await
     }
 
-    async fn disconnect() -> Result<()> {
+    pub async fn disconnect() -> Result<()> {
         Ok(())
     }
 
-    async fn publish() -> Result<()> {
+    pub async fn publish() -> Result<()> {
         Ok(())
     }
 
-    async fn subscribe() -> Result<()> {
+    pub async fn subscribe() -> Result<()> {
         Ok(())
     }
 }

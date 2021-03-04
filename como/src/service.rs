@@ -2,13 +2,11 @@ use std::borrow::Borrow;
 use std::future::Future;
 use std::sync::Arc;
 
-use anyhow::{Error, Result};
-use futures::TryFutureExt;
-use tokio::io::{AsyncRead, AsyncWrite};
+use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::time::{sleep, Duration};
-use tracing::{error, field, info, instrument};
+use tracing::{error, info, instrument};
 
 use crate::connection::ConnectionHandler;
 use crate::context::AppContext;
@@ -30,12 +28,13 @@ struct TcpTransport {
     context: Arc<AppContext>,
 }
 
-pub async fn run(context: Arc<AppContext>, shutdown: impl Future) -> Result<()> {
-    let config = context.config.clone();
+pub async fn run(settings: Arc<Settings>, shutdown: impl Future) -> Result<()> {
+    let limit_connections = Arc::new(Semaphore::new(settings.service.max_connections));
+
+    let context = Arc::new(AppContext::new(settings)?);
 
     let (notify_shutdown, _) = broadcast::channel(1);
     let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel(1);
-    let limit_connections = Arc::new(Semaphore::new(config.service.max_connections));
 
     // Bind a TCP listener
     let mut tcp_transport = TcpTransport::new(
