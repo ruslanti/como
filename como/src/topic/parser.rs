@@ -278,7 +278,7 @@ mod tests {
             parse_topic_filter("topic/Test/").unwrap(),
             [
                 MatchToken::Token(Token::Topic("topic".as_bytes().to_vec())),
-                MatchToken::Token(Token::Topic("Test".as_bytes().to_vec().as_bytes().to_vec()))
+                MatchToken::Token(Token::Topic("Test".as_bytes().to_vec()))
             ]
         );
         assert_eq!(
@@ -313,7 +313,7 @@ mod tests {
             parse_topic_filter("topic/Test/#").unwrap(),
             [
                 MatchToken::Token(Token::Topic("topic".as_bytes().to_vec())),
-                MatchToken::Token(Token::Topic("Test".as_bytes().to_vec().as_bytes().to_vec())),
+                MatchToken::Token(Token::Topic("Test".as_bytes().to_vec())),
                 MatchToken::MultiLevel
             ]
         );
@@ -354,7 +354,7 @@ mod tests {
             [
                 MatchToken::Token(Token::Root),
                 MatchToken::Token(Token::Topic("topic".as_bytes().to_vec())),
-                MatchToken::Token(Token::Topic("Test".as_bytes().to_vec().as_bytes().to_vec()))
+                MatchToken::Token(Token::Topic("Test".as_bytes().to_vec()))
             ]
         );
         assert_eq!(
@@ -398,7 +398,7 @@ mod tests {
             [
                 MatchToken::Token(Token::Root),
                 MatchToken::Token(Token::Topic("topic".as_bytes().to_vec())),
-                MatchToken::Token(Token::Topic("Test".as_bytes().to_vec().as_bytes().to_vec())),
+                MatchToken::Token(Token::Topic("Test".as_bytes().to_vec())),
                 MatchToken::MultiLevel
             ]
         );
@@ -440,7 +440,7 @@ mod tests {
             parse_topic_filter("$topic/Test/").unwrap(),
             [
                 MatchToken::Token(Token::Dollar("topic".as_bytes().to_vec())),
-                MatchToken::Token(Token::Topic("Test".as_bytes().to_vec().as_bytes().to_vec()))
+                MatchToken::Token(Token::Topic("Test".as_bytes().to_vec()))
             ]
         );
         assert_eq!(

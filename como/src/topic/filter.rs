@@ -23,10 +23,6 @@ struct TopicMatcher {
 }
 
 impl TopicFilter {
-    /*    pub fn new(pattern: &str) -> Result<TopicFilter> {
-        pattern.parse()
-    }*/
-
     pub fn matches(&self, topic_name: TopicName) -> Status {
         self.matcher.matches(topic_name)
     }
@@ -82,14 +78,14 @@ mod tests {
 
     #[test]
     fn test_topic_match() {
-        let topic_filter = TopicFilter::new("").unwrap();
+        let topic_filter: TopicFilter = "".parse().unwrap();
         assert_eq!(Status::Match, topic_filter.matches("".parse().unwrap()));
         assert_eq!(
             Status::NoMatch,
             topic_filter.matches("test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("topic").unwrap();
+        let topic_filter: TopicFilter = "topic".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("topic".parse().unwrap()),
@@ -99,7 +95,7 @@ mod tests {
             topic_filter.matches("test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("/topic").unwrap();
+        let topic_filter: TopicFilter = "/topic".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("/topic".parse().unwrap()),
@@ -113,7 +109,7 @@ mod tests {
             topic_filter.matches("/test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("/topic/test").unwrap();
+        let topic_filter: TopicFilter = "/topic/test".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("/topic/test".parse().unwrap()),
@@ -127,7 +123,7 @@ mod tests {
             topic_filter.matches("/test/test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("$topic/test").unwrap();
+        let topic_filter: TopicFilter = "$topic/test".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("$topic/test".parse().unwrap()),
@@ -140,7 +136,7 @@ mod tests {
 
     #[test]
     fn test_topic_single_match() {
-        let topic_filter = TopicFilter::new("+").unwrap();
+        let topic_filter: TopicFilter = "+".parse().unwrap();
         assert_eq!(
             Status::PartialMatch,
             topic_filter.matches("".parse().unwrap())
@@ -151,7 +147,7 @@ mod tests {
             topic_filter.matches("$test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("/+").unwrap();
+        let topic_filter: TopicFilter = "/+".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("/topic".parse().unwrap()),
@@ -169,7 +165,7 @@ mod tests {
             topic_filter.matches("/test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("/topic/+").unwrap();
+        let topic_filter: TopicFilter = "/topic/+".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("/topic/test".parse().unwrap()),
@@ -187,7 +183,7 @@ mod tests {
             topic_filter.matches("/test/test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("/+/+").unwrap();
+        let topic_filter: TopicFilter = "/+/+".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("/topic/test".parse().unwrap()),
@@ -209,7 +205,7 @@ mod tests {
             topic_filter.matches("$topic/test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("$topic/+").unwrap();
+        let topic_filter: TopicFilter = "$topic/+".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("$topic/test".parse().unwrap()),
@@ -222,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_topic_multi_match() {
-        let topic_filter = TopicFilter::new("#").unwrap();
+        let topic_filter: TopicFilter = "#".parse().unwrap();
         assert_eq!(Status::Match, topic_filter.matches("".parse().unwrap()));
         assert_eq!(Status::Match, topic_filter.matches("test".parse().unwrap()));
         assert_eq!(
@@ -238,7 +234,7 @@ mod tests {
             topic_filter.matches("topic/test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("/#").unwrap();
+        let topic_filter: TopicFilter = "/#".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("/topic".parse().unwrap()),
@@ -252,13 +248,13 @@ mod tests {
             topic_filter.matches("/test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("topic/#").unwrap();
+        let topic_filter: TopicFilter = "topic/#".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("topic".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("/topic/#").unwrap();
+        let topic_filter: TopicFilter = "/topic/#".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("/topic".parse().unwrap()),
@@ -280,7 +276,7 @@ mod tests {
             topic_filter.matches("/test/test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("+/topic02/#").unwrap();
+        let topic_filter: TopicFilter = "+/topic02/#".parse().unwrap();
         assert_eq!(
             Status::NoMatch,
             topic_filter.matches("/topic/test".parse().unwrap()),
@@ -310,7 +306,7 @@ mod tests {
             topic_filter.matches("/test/test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("/#").unwrap();
+        let topic_filter: TopicFilter = "/#".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("/topic/test".parse().unwrap()),
@@ -324,7 +320,7 @@ mod tests {
             topic_filter.matches("/test/test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("$topic/#").unwrap();
+        let topic_filter: TopicFilter = "$topic/#".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("$topic/test".parse().unwrap()),
@@ -338,7 +334,7 @@ mod tests {
             topic_filter.matches("$test/test".parse().unwrap()),
         );
 
-        let topic_filter = TopicFilter::new("$topic/#").unwrap();
+        let topic_filter: TopicFilter = "$topic/#".parse().unwrap();
         assert_eq!(
             Status::Match,
             topic_filter.matches("$topic/test".parse().unwrap()),
