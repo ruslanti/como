@@ -1,10 +1,8 @@
 use std::convert::{TryFrom, TryInto};
-use std::mem::size_of_val;
 
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 
-use crate::v5::encoder::EncodedSize;
 use crate::v5::types::{MqttString, QoS};
 
 macro_rules! check_and_set {
@@ -97,6 +95,10 @@ macro_rules! encode_property_user_properties {
             encode_utf8_string($writer, second)?;
         }
     };
+}
+
+pub trait PropertiesSize {
+    fn size(&self) -> usize;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -223,6 +225,39 @@ pub struct PublishProperties {
     pub content_type: Option<MqttString>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct ResponseProperties {
+    pub reason_string: Option<MqttString>,
+    pub user_properties: Vec<(MqttString, MqttString)>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct DisconnectProperties {
+    pub session_expire_interval: Option<u32>,
+    pub reason_string: Option<MqttString>,
+    pub user_properties: Vec<(MqttString, MqttString)>,
+    pub server_reference: Option<MqttString>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct SubscribeProperties {
+    pub subscription_identifier: Option<u32>,
+    pub user_properties: Vec<(MqttString, MqttString)>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct UnSubscribeProperties {
+    pub user_properties: Vec<(MqttString, MqttString)>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct AuthProperties {
+    pub authentication_method: Option<MqttString>,
+    pub authentication_data: Option<Bytes>,
+    pub reason_string: Option<MqttString>,
+    pub user_properties: Vec<(MqttString, MqttString)>,
+}
+
 impl Default for ConnAckProperties {
     fn default() -> Self {
         ConnAckProperties {
@@ -262,27 +297,13 @@ impl Default for PublishProperties {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub struct PubResProperties {
-    pub reason_string: Option<MqttString>,
-    pub user_properties: Vec<(MqttString, MqttString)>,
-}
-
-impl Default for PubResProperties {
+impl Default for ResponseProperties {
     fn default() -> Self {
-        PubResProperties {
+        ResponseProperties {
             reason_string: None,
             user_properties: vec![],
         }
     }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct DisconnectProperties {
-    pub session_expire_interval: Option<u32>,
-    pub reason_string: Option<MqttString>,
-    pub user_properties: Vec<(MqttString, MqttString)>,
-    pub server_reference: Option<MqttString>,
 }
 
 impl Default for DisconnectProperties {
@@ -296,117 +317,7 @@ impl Default for DisconnectProperties {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub struct SubscribeProperties {
-    pub subscription_identifier: Option<u32>,
-    pub user_properties: Vec<(MqttString, MqttString)>,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct SubAckProperties {
-    pub reason_string: Option<MqttString>,
-    pub user_properties: Vec<(MqttString, MqttString)>,
-}
-
-impl Default for SubAckProperties {
-    fn default() -> Self {
-        SubAckProperties {
-            reason_string: None,
-            user_properties: vec![],
-        }
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct UnSubscribeProperties {
-    pub user_properties: Vec<(MqttString, MqttString)>,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct AuthProperties {
-    pub authentication_method: Option<MqttString>,
-    pub authentication_data: Option<Bytes>,
-    pub reason_string: Option<MqttString>,
-    pub user_properties: Vec<(MqttString, MqttString)>,
-}
-
-impl EncodedSize for PublishProperties {
-    fn encoded_size(&self) -> usize {
-        let mut len = check_size_of!(self, payload_format_indicator);
-        len += check_size_of!(self, message_expire_interval);
-        len += check_size_of!(self, topic_alias);
-        len += check_size_of_string!(self, response_topic);
-        len += check_size_of!(self, correlation_data);
-        len += self
-            .user_properties
-            .iter()
-            .map(|(x, y)| 5 + x.len() + y.len())
-            .sum::<usize>();
-        if let Some(id) = self.subscription_identifier {
-            len += (id as usize).encoded_size();
-        };
-        len += check_size_of_string!(self, content_type);
-        len
-    }
-}
-
-impl EncodedSize for ConnAckProperties {
-    fn encoded_size(&self) -> usize {
-        let mut len = check_size_of!(self, session_expire_interval);
-        len += check_size_of!(self, receive_maximum);
-        len += check_size_of!(self, maximum_qos);
-        len += check_size_of!(self, retain_available);
-        len += check_size_of!(self, maximum_packet_size);
-        len += check_size_of_string!(self, assigned_client_identifier);
-        len += check_size_of!(self, topic_alias_maximum);
-        len += check_size_of_string!(self, reason_string);
-        len += self
-            .user_properties
-            .iter()
-            .map(|(x, y)| 5 + x.len() + y.len())
-            .sum::<usize>();
-        len
-    }
-}
-
-impl EncodedSize for PubResProperties {
-    fn encoded_size(&self) -> usize {
-        let mut len = check_size_of_string!(self, reason_string);
-        len += self
-            .user_properties
-            .iter()
-            .map(|(x, y)| 5 + x.len() + y.len())
-            .sum::<usize>();
-        len
-    }
-}
-
-impl EncodedSize for DisconnectProperties {
-    fn encoded_size(&self) -> usize {
-        let mut len = check_size_of!(self, session_expire_interval);
-        len += check_size_of_string!(self, reason_string);
-        len += self
-            .user_properties
-            .iter()
-            .map(|(x, y)| 5 + x.len() + y.len())
-            .sum::<usize>();
-        len += check_size_of_string!(self, server_reference);
-        len
-    }
-}
-
-impl EncodedSize for SubAckProperties {
-    fn encoded_size(&self) -> usize {
-        let mut len = check_size_of_string!(self, reason_string);
-        len += self
-            .user_properties
-            .iter()
-            .map(|(x, y)| 5 + x.len() + y.len())
-            .sum::<usize>();
-        len
-    }
-}
-
+#[derive(Clone)]
 pub struct PropertiesBuilder {
     payload_format_indicator: Option<bool>,
     message_expire_interval: Option<u32>,
@@ -552,6 +463,13 @@ impl PropertiesBuilder {
     pub fn subscription_identifier(mut self, value: u32) -> Result<Self> {
         check_and_set!(self, subscription_identifier, value)
     }
+    pub fn assigned_client_identifier(mut self, value: Option<MqttString>) -> Result<Self> {
+        if let Some(v) = value {
+            check_and_set!(self, assigned_client_identifier, v)
+        } else {
+            Err(anyhow!("empty assigned client identifier"))
+        }
+    }
 
     pub fn will(self) -> WillProperties {
         WillProperties {
@@ -613,8 +531,8 @@ impl PropertiesBuilder {
         }
     }
 
-    pub fn pubres(self) -> PubResProperties {
-        PubResProperties {
+    pub fn pubres(self) -> ResponseProperties {
+        ResponseProperties {
             reason_string: self.reason_string,
             user_properties: self.user_properties,
         }
@@ -741,6 +659,6 @@ mod tests {
         builder = builder.session_expire_interval(20).unwrap();
         builder = builder.user_properties((Bytes::from("username"), Bytes::from("admin")));
         builder = builder.user_properties((Bytes::from("password"), Bytes::from("123456")));
-        assert_eq!(42, builder.connack().encoded_size());
+        assert_eq!(42, builder.connack().size());
     }
 }

@@ -18,18 +18,18 @@ use como_mqtt::v5::types::{Auth, Connect, ControlPacket, Disconnect, MQTTCodec, 
 
 use crate::context::AppContext;
 use crate::session::Session;
-use crate::settings::ConnectionSettings;
+use crate::settings::Connection;
 use crate::shutdown::Shutdown;
 
 #[derive(Debug)]
 pub struct ConnectionHandler {
-    peer: SocketAddr,
+    pub(crate) peer: SocketAddr,
     limit_connections: Arc<Semaphore>,
     shutdown_complete: mpsc::Sender<()>,
     keep_alive: Duration,
     context: Arc<AppContext>,
     session: Option<Session>,
-    config: ConnectionSettings,
+    config: Connection,
 }
 
 impl ConnectionHandler {
@@ -38,8 +38,8 @@ impl ConnectionHandler {
         limit_connections: Arc<Semaphore>,
         shutdown_complete: mpsc::Sender<()>,
         context: Arc<AppContext>,
-        config: ConnectionSettings,
     ) -> Self {
+        let config = context.config.connection.to_owned();
         ConnectionHandler {
             peer,
             limit_connections,
@@ -75,8 +75,8 @@ impl ConnectionHandler {
             .config
             .server_keep_alive
             .or(client_keep_alive)
-            .map(|d| Duration::from_secs(d as u64))
-            .unwrap_or(self.keep_alive);
+            .map(|d| Duration::from_secs(d as u64).add(Duration::from_millis(100)))
+            .unwrap_or(Duration::from_micros(u64::MAX));
         trace!("keep_alive: {:?}", self.keep_alive);
 
         let session = self.context.make_session(
@@ -110,6 +110,13 @@ impl ConnectionHandler {
                 Err(anyhow!("unacceptable event").context(context))
             }
             (Some(_), ControlPacket::PingReq) => Ok(Some(ControlPacket::PingResp)),
+            (Some(session), ControlPacket::Disconnect(disconnect)) => {
+                session
+                    .handle_msg(ControlPacket::Disconnect(disconnect))
+                    .await?;
+                self.keep_alive = Duration::from_millis(0); // close socket and session
+                Ok(None)
+            }
             (Some(session), msg) => session.handle_msg(msg).await,
         }
     }
@@ -139,7 +146,7 @@ impl ConnectionHandler {
         conn_tx.send(disc).await.map_err(Error::msg)
     }
 
-    #[instrument(skip(self, socket, shutdown), fields(peer = field::display(& self.peer)), err)]
+    #[instrument(skip(self, socket, shutdown), fields(peer = field::display(& self.peer)))]
     pub async fn client<S>(&mut self, socket: S, mut shutdown: Shutdown) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -149,21 +156,26 @@ impl ConnectionHandler {
         let (response_tx, mut response_rx) = mpsc::channel::<ControlPacket>(32);
 
         while !shutdown.is_shutdown() {
-            let duration = self.keep_alive.add(Duration::from_millis(100));
             // While reading a request frame, also listen for the shutdown signal.
-            trace!("select with timeout {} ms", duration.as_millis());
+            //trace!("select with timeout {} ms", duration.as_millis());
             tokio::select! {
-                res = timeout(duration, stream.next()) => {
-                    if let Some(res) = res? {
-                        let p = res?;
-                        debug!("received {:?}", p);
-                        if let Some(msg) = self.recv(p, response_tx.borrow()).await? {
-                            debug!("sending {:?}", msg);
-                            sink.send(msg).await.context("socket send error")?
-                        }
-                    } else {
-                        debug!("Disconnected");
-                        break;
+                res = timeout(self.keep_alive, stream.next()) => {
+                    match res {
+                        Ok(res) => {
+                            if let Some(res) = res {
+                                let p = res?;
+                                debug!("received {:?}", p);
+                                if let Some(msg) = self.recv(p, response_tx.borrow()).await? {
+                                    debug!("sending {:?}", msg);
+                                    sink.send(msg).await.context("socket send error")?
+                                }
+                            } else {
+                                debug!("Client disconnected");
+                                break;
+                            }
+                        },
+                        Err(_) if self.keep_alive.as_micros() == 0 => break,
+                        Err(elapsed) => return Err(anyhow!(elapsed))
                     }
                 }
                 res = response_rx.recv() => {

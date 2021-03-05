@@ -2,11 +2,14 @@ use std::convert::TryInto;
 
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
-use crate::v5::encoder::encode_utf8_string;
-use crate::v5::property::{PropertiesBuilder, Property, SubAckProperties, SubscribeProperties};
-use crate::v5::types::{ControlPacket, MqttString, QoS, Retain, Subscribe, SubscriptionOptions};
+use crate::v5::encoder::RemainingLength;
+use crate::v5::property::{PropertiesBuilder, PropertiesSize, Property, SubscribeProperties};
+use crate::v5::types::{
+    ControlPacket, MQTTCodec, MqttString, QoS, Retain, SubAck, Subscribe, SubscriptionOptions,
+};
 
 pub fn decode_subscribe(mut reader: Bytes) -> Result<Option<ControlPacket>> {
     end_of_stream!(reader.remaining() < 2, "subscribe packet identifier");
@@ -73,8 +76,42 @@ pub fn decode_subscribe_payload(
     Ok(topic_filter)
 }
 
-pub fn encode_suback_properties(writer: &mut BytesMut, properties: SubAckProperties) -> Result<()> {
-    encode_property_string!(writer, ReasonString, properties.reason_string);
-    encode_property_user_properties!(writer, UserProperty, properties.user_properties);
-    Ok(())
+impl RemainingLength for Subscribe {
+    fn remaining_length(&self) -> usize {
+        unimplemented!()
+    }
+}
+
+impl Encoder<Subscribe> for MQTTCodec {
+    type Error = anyhow::Error;
+
+    fn encode(&mut self, _item: Subscribe, _dst: &mut BytesMut) -> Result<(), Self::Error> {
+        unimplemented!()
+    }
+}
+
+impl RemainingLength for SubAck {
+    fn remaining_length(&self) -> usize {
+        let properties_length = self.properties.size();
+        2 + properties_length.size()
+            + properties_length
+            + self
+                .reason_codes
+                .iter()
+                .map(|_r| std::mem::size_of::<u8>())
+                .sum::<usize>()
+    }
+}
+
+impl Encoder<SubAck> for MQTTCodec {
+    type Error = anyhow::Error;
+
+    fn encode(&mut self, msg: SubAck, writer: &mut BytesMut) -> Result<(), Self::Error> {
+        writer.put_u16(msg.packet_identifier);
+        self.encode(msg.properties, writer)?;
+        for reason_code in msg.reason_codes.into_iter() {
+            writer.put_u8(reason_code.into())
+        }
+        Ok(())
+    }
 }

@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -5,59 +6,73 @@ use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::time::{sleep, Duration};
-#[cfg(feature = "tls")]
-use tokio_native_tls::TlsAcceptor;
-use tracing::{error, field, info, instrument};
+use tracing::{error, info, instrument, warn};
 
 use crate::connection::ConnectionHandler;
 use crate::context::AppContext;
 use crate::settings::Settings;
 use crate::shutdown::Shutdown;
+use crate::tls_service::TlsTransport;
 
 #[derive(Debug)]
-struct Service {
-    listener: TcpListener,
-    #[cfg(feature = "tls")]
-    acceptor: Option<Arc<TlsAcceptor>>,
-    limit_connections: Arc<Semaphore>,
+pub struct Service {
     notify_shutdown: broadcast::Sender<()>,
     shutdown_complete_rx: mpsc::Receiver<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
-    config: Arc<Settings>,
+}
+
+struct TcpTransport {
+    limit_connections: Arc<Semaphore>,
+    notify_shutdown: broadcast::Sender<()>,
+    shutdown_complete_tx: mpsc::Sender<()>,
     context: Arc<AppContext>,
 }
 
-pub async fn run(
-    listener: TcpListener,
-    acceptor: Option<Arc<TlsAcceptor>>,
-    config: Arc<Settings>,
-    shutdown: impl Future,
-    context: Arc<AppContext>,
-) -> Result<()> {
+pub async fn run(settings: Arc<Settings>, shutdown: impl Future) -> Result<()> {
+    let limit_connections = Arc::new(Semaphore::new(settings.service.max_connections));
+
+    let context = Arc::new(AppContext::new(settings)?);
+
     let (notify_shutdown, _) = broadcast::channel(1);
     let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel(1);
 
+    // Bind a TCP listener
+    let mut tcp_transport = TcpTransport::new(
+        limit_connections.clone(),
+        notify_shutdown.clone(),
+        shutdown_complete_tx.clone(),
+        context.clone(),
+    );
+
+    let use_tls = context.config.service.tls.is_some();
+    let mut tls_transport = TlsTransport::new(
+        limit_connections.clone(),
+        notify_shutdown.clone(),
+        shutdown_complete_tx.clone(),
+        context.clone(),
+    );
+
     // Initialize the listener state
-    let mut service = Service {
-        listener,
-        acceptor,
-        limit_connections: Arc::new(Semaphore::new(config.service.max_connections)),
+    let service = Service {
         notify_shutdown,
         shutdown_complete_rx,
         shutdown_complete_tx,
-        config,
-        context,
     };
 
     tokio::select! {
-        res = service.listen() => {
+        res = tcp_transport.listen() => {
             if let Err(err) = res {
                 error!(cause = ?err, "failed to accept");
             }
         }
+        res = tls_transport.listen(), if use_tls => {
+            if let Err(err) = res {
+                error!(cause = ?err, "failed to accept tls");
+            }
+        }
         _ = shutdown => {
             // The shutdown signal has been received.
-            info!("shutting down {}", service.listener.local_addr().unwrap());
+            info!("shutting down signal");
         }
     }
 
@@ -68,6 +83,9 @@ pub async fn run(
         ..
     } = service;
 
+    drop(tcp_transport);
+    drop(tls_transport);
+
     drop(notify_shutdown); // notify with shutdown
     drop(shutdown_complete_tx); // notify shutdown complete
 
@@ -76,49 +94,60 @@ pub async fn run(
     Ok(())
 }
 
-impl Service {
-    #[instrument(skip(self), fields(addr = field::display(& self.listener.local_addr().unwrap())),
-    err)]
+impl TcpTransport {
+    pub fn new(
+        limit_connections: Arc<Semaphore>,
+        notify_shutdown: broadcast::Sender<()>,
+        shutdown_complete_tx: mpsc::Sender<()>,
+        context: Arc<AppContext>,
+    ) -> Self {
+        TcpTransport {
+            limit_connections,
+            notify_shutdown,
+            shutdown_complete_tx,
+            context,
+        }
+    }
+
+    #[instrument(skip(self), err)]
     async fn listen(&mut self) -> Result<()> {
-        info!("accepting inbound connections");
+        let address = format!(
+            "{}:{}",
+            self.context.config.service.bind, self.context.config.service.port
+        );
+        info!("accepting inbound connections: {}", address);
+        let listener = TcpListener::bind(&address).await?;
+
         loop {
             self.limit_connections.acquire().await?.forget();
 
-            let stream = self.accept().await?;
+            let stream = Self::accept(listener.borrow()).await?;
 
             let mut handler = ConnectionHandler::new(
                 stream.peer_addr()?,
                 self.limit_connections.clone(),
                 self.shutdown_complete_tx.clone(),
                 self.context.clone(),
-                self.config.connection.to_owned(),
             );
 
             let shutdown = Shutdown::new(self.notify_shutdown.subscribe());
 
-            if let Some(acceptor) = self.acceptor.as_ref() {
-                let stream = acceptor.accept(stream).await?;
-                tokio::spawn(async move {
-                    if let Err(err) = handler.client(stream, shutdown).await {
-                        error!(cause = ?err, "connection error");
-                    }
-                });
-            } else {
-                tokio::spawn(async move {
-                    if let Err(err) = handler.client(stream, shutdown).await {
-                        error!(cause = ?err, "connection error");
-                    }
-                });
-            }
+            tokio::spawn(async move {
+                if let Err(err) = handler.client(stream, shutdown).await {
+                    warn!(cause = ?err, "connection {} error", handler.peer);
+                } else {
+                    info!("connection {} closed", handler.peer)
+                }
+            });
         }
     }
 
-    #[instrument(skip(self), err)]
-    async fn accept(&mut self) -> Result<TcpStream> {
+    #[instrument(skip(listener), err)]
+    async fn accept(listener: &TcpListener) -> Result<TcpStream> {
         let mut backoff = 1;
 
         loop {
-            match self.listener.accept().await {
+            match listener.accept().await {
                 Ok((socket, address)) => {
                     info!("inbound connection: {:?} ", address);
                     return Ok(socket);
@@ -131,7 +160,6 @@ impl Service {
                 }
             }
             sleep(Duration::from_secs(backoff)).await;
-            //time::delay_for(Duration::from_secs(backoff)).await;
             // Double the back off
             backoff *= 2;
         }

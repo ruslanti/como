@@ -10,7 +10,6 @@ mqtt = ["como-mqtt"]
 tls = ["native-tls", "tokio-native-tls"]
 prometheus = ["opentelemetry", "opentelemetry-prometheus"]
 
-
 [dependencies]
 como-mqtt = { path = "../como-mqtt", optional = true }
 tokio = { version = "1.2.0", features = ["rt-multi-thread", "net", "signal", "sync", "time", "macros"] }
@@ -36,3 +35,4 @@ uuid = { version = "0.8.2", features = ["v4"] }
 sled = "0.34.6"
 nom = "6.1.2"
 opentelemetry-prometheus = { version = "0.5.0", optional = true }
+rand = "0.8.3"

@@ -2,13 +2,14 @@ use std::convert::TryInto;
 
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
-use crate::v5::encoder::encode_utf8_string;
-use crate::v5::property::{PropertiesBuilder, Property, PubResProperties};
-use crate::v5::types::{ControlPacket, PacketType, PubResp, ReasonCode};
+use crate::v5::encoder::{encode_utf8_string, RemainingLength};
+use crate::v5::property::{PropertiesBuilder, PropertiesSize, Property, ResponseProperties};
+use crate::v5::types::{ControlPacket, MQTTCodec, PacketType, ReasonCode, Response};
 
-pub fn decode_pubres(mut reader: Bytes) -> Result<(u16, ReasonCode, PubResProperties)> {
+pub fn decode_pubres(mut reader: Bytes) -> Result<(u16, ReasonCode, ResponseProperties)> {
     end_of_stream!(reader.remaining() < 2, "pubres variable header");
     let packet_identifier = reader.get_u16();
     let (reason_code, properties_length) = if reader.has_remaining() {
@@ -25,7 +26,7 @@ pub fn decode_pubres(mut reader: Bytes) -> Result<(u16, ReasonCode, PubResProper
 
 pub fn decode_puback(reader: Bytes) -> Result<Option<ControlPacket>> {
     let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
-    Ok(Some(ControlPacket::PubAck(PubResp {
+    Ok(Some(ControlPacket::PubAck(Response {
         packet_type: PacketType::PUBACK,
         packet_identifier,
         reason_code,
@@ -35,7 +36,7 @@ pub fn decode_puback(reader: Bytes) -> Result<Option<ControlPacket>> {
 
 pub fn decode_pubrec(reader: Bytes) -> Result<Option<ControlPacket>> {
     let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
-    Ok(Some(ControlPacket::PubRec(PubResp {
+    Ok(Some(ControlPacket::PubRec(Response {
         packet_type: PacketType::PUBREC,
         packet_identifier,
         reason_code,
@@ -45,7 +46,7 @@ pub fn decode_pubrec(reader: Bytes) -> Result<Option<ControlPacket>> {
 
 pub fn decode_pubrel(reader: Bytes) -> Result<Option<ControlPacket>> {
     let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
-    Ok(Some(ControlPacket::PubRel(PubResp {
+    Ok(Some(ControlPacket::PubRel(Response {
         packet_type: PacketType::PUBREL,
         packet_identifier,
         reason_code,
@@ -55,7 +56,7 @@ pub fn decode_pubrel(reader: Bytes) -> Result<Option<ControlPacket>> {
 
 pub fn decode_pubcomp(reader: Bytes) -> Result<Option<ControlPacket>> {
     let (packet_identifier, reason_code, properties) = decode_pubres(reader)?;
-    Ok(Some(ControlPacket::PubComp(PubResp {
+    Ok(Some(ControlPacket::PubComp(Response {
         packet_type: PacketType::PUBCOMP,
         packet_identifier,
         reason_code,
@@ -63,7 +64,7 @@ pub fn decode_pubcomp(reader: Bytes) -> Result<Option<ControlPacket>> {
     })))
 }
 
-pub fn decode_pubres_properties(mut reader: Bytes) -> Result<PubResProperties> {
+pub fn decode_pubres_properties(mut reader: Bytes) -> Result<ResponseProperties> {
     let mut builder = PropertiesBuilder::new();
     while reader.has_remaining() {
         let id = decode_variable_integer(&mut reader)?;
@@ -86,8 +87,47 @@ pub fn decode_pubres_properties(mut reader: Bytes) -> Result<PubResProperties> {
     Ok(builder.pubres())
 }
 
-pub fn encode_pubres_properties(writer: &mut BytesMut, properties: PubResProperties) -> Result<()> {
-    encode_property_string!(writer, ReasonString, properties.reason_string);
-    encode_property_user_properties!(writer, UserProperty, properties.user_properties);
-    Ok(())
+impl Encoder<Response> for MQTTCodec {
+    type Error = anyhow::Error;
+
+    fn encode(&mut self, msg: Response, writer: &mut BytesMut) -> Result<(), Self::Error> {
+        writer.put_u16(msg.packet_identifier); // packet identifier
+        writer.put_u8(msg.reason_code.into());
+        self.encode(msg.properties, writer)
+    }
+}
+
+impl RemainingLength for Response {
+    fn remaining_length(&self) -> usize {
+        let properties_length = self.properties.size();
+        3 + properties_length.size() + properties_length
+    }
+}
+
+impl PropertiesSize for ResponseProperties {
+    fn size(&self) -> usize {
+        let mut len = check_size_of_string!(self, reason_string);
+        len += self
+            .user_properties
+            .iter()
+            .map(|(x, y)| 5 + x.len() + y.len())
+            .sum::<usize>();
+        len
+    }
+}
+
+impl Encoder<ResponseProperties> for MQTTCodec {
+    type Error = anyhow::Error;
+
+    fn encode(
+        &mut self,
+        properties: ResponseProperties,
+        writer: &mut BytesMut,
+    ) -> Result<(), Self::Error> {
+        self.encode(properties.size(), writer)?;
+        // properties length
+        encode_property_string!(writer, ReasonString, properties.reason_string);
+        encode_property_user_properties!(writer, UserProperty, properties.user_properties);
+        Ok(())
+    }
 }

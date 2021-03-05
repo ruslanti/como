@@ -7,9 +7,8 @@ use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::v5::property::{
-    AuthProperties, ConnAckProperties, ConnectProperties, DisconnectProperties, PubResProperties,
-    PublishProperties, SubAckProperties, SubscribeProperties, UnSubscribeProperties,
-    WillProperties,
+    AuthProperties, ConnAckProperties, ConnectProperties, DisconnectProperties, PublishProperties,
+    ResponseProperties, SubscribeProperties, UnSubscribeProperties, WillProperties,
 };
 
 pub type MqttString = Bytes;
@@ -20,6 +19,9 @@ macro_rules! end_of_stream {
         ensure!(!$condition, anyhow!("end of stream").context($context));
     };
 }
+
+pub const MQTT: &'static str = "MQTT";
+pub const VERSION: u8 = 5;
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Ord, PartialOrd, Hash)]
 pub enum QoS {
@@ -41,7 +43,17 @@ impl TryFrom<u8> for QoS {
     }
 }
 
-impl Into<u8> for QoS {
+impl From<QoS> for u8 {
+    fn from(qos: QoS) -> Self {
+        match qos {
+            QoS::AtMostOnce => 0,
+            QoS::AtLeastOnce => 1,
+            QoS::ExactlyOnce => 2,
+        }
+    }
+}
+
+/*impl Into<u8> for QoS {
     fn into(self) -> u8 {
         match self {
             QoS::AtMostOnce => 0,
@@ -49,7 +61,7 @@ impl Into<u8> for QoS {
             QoS::ExactlyOnce => 2,
         }
     }
-}
+}*/
 
 struct QoSVisitor;
 
@@ -351,11 +363,11 @@ pub struct Publish {
 }
 
 #[derive(Eq, PartialEq)]
-pub struct PubResp {
+pub struct Response {
     pub packet_type: PacketType,
     pub packet_identifier: u16,
     pub reason_code: ReasonCode,
-    pub properties: PubResProperties,
+    pub properties: ResponseProperties,
 }
 
 #[derive(Eq, PartialEq)]
@@ -382,7 +394,7 @@ pub struct Subscribe {
 #[derive(Eq, PartialEq)]
 pub struct SubAck {
     pub packet_identifier: u16,
-    pub properties: SubAckProperties,
+    pub properties: ResponseProperties,
     pub reason_codes: Vec<ReasonCode>,
 }
 
@@ -404,10 +416,10 @@ pub enum ControlPacket {
     Connect(Connect),
     ConnAck(ConnAck),
     Publish(Publish),
-    PubAck(PubResp),
-    PubRec(PubResp),
-    PubRel(PubResp),
-    PubComp(PubResp),
+    PubAck(Response),
+    PubRec(Response),
+    PubRel(Response),
+    PubComp(Response),
     Subscribe(Subscribe),
     SubAck(SubAck),
     UnSubscribe(UnSubscribe),
@@ -429,6 +441,38 @@ pub enum PacketPart {
 #[derive(Debug)]
 pub struct MQTTCodec {
     pub part: PacketPart,
+}
+
+impl Connect {
+    pub(crate) fn get_flags(&self) -> u8 {
+        let mut flags = 0b0000_0000;
+        flags |= (self.clean_start_flag as u8) << 1;
+        if let Some(will) = &self.will {
+            flags |= 0b0000_0100;
+            flags |= u8::from(will.qos) << 3;
+            flags |= (will.retain as u8) << 5;
+        }
+        flags |= (self.password.is_some() as u8) << 6;
+        flags |= (self.username.is_some() as u8) << 6;
+        flags
+    }
+
+    pub(crate) fn set_flags(flags: u8) -> anyhow::Result<(bool, bool, QoS, bool, bool, bool)> {
+        let clean_start_flag = ((flags & 0b00000010) >> 1) != 0;
+        let will_flag = ((flags & 0b00000100) >> 2) != 0;
+        let will_qos_flag: QoS = QoS::try_from((flags & 0b00011000) >> 3)?;
+        let will_retain_flag = ((flags & 0b00100000) >> 5) != 0;
+        let password_flag = ((flags & 0b01000000) >> 6) != 0;
+        let username_flag = ((flags & 0b10000000) >> 7) != 0;
+        Ok((
+            clean_start_flag,
+            will_flag,
+            will_qos_flag,
+            will_retain_flag,
+            password_flag,
+            username_flag,
+        ))
+    }
 }
 
 impl fmt::Debug for PacketPart {
@@ -509,7 +553,7 @@ impl fmt::Debug for Publish {
     }
 }
 
-impl fmt::Debug for PubResp {
+impl fmt::Debug for Response {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("");
         debug_struct.field("reason_code", &self.reason_code);

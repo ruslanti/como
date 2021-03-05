@@ -1,4 +1,5 @@
 use std::convert::TryInto;
+use std::mem::size_of_val;
 
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -6,6 +7,7 @@ use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::encode_utf8_string;
+use crate::v5::encoder::RemainingLength;
 use crate::v5::property::*;
 use crate::v5::types::{ConnAck, ControlPacket, MQTTCodec};
 
@@ -48,7 +50,9 @@ pub fn decode_connack_properties(mut reader: Bytes) -> Result<ConnAckProperties>
                 end_of_stream!(reader.remaining() < 4, "maximum packet size");
                 builder = builder.maximum_packet_size(reader.get_u32())?;
             }
-            Property::AssignedClientIdentifier => unimplemented!(),
+            Property::AssignedClientIdentifier => {
+                builder = builder.assigned_client_identifier(decode_utf8_string(&mut reader)?)?;
+            }
             Property::TopicAliasMaximum => {
                 end_of_stream!(reader.remaining() < 2, "topic alias maximum");
                 builder = builder.topic_alias_maximum(reader.get_u16())?;
@@ -97,6 +101,8 @@ impl Encoder<ConnAckProperties> for MQTTCodec {
         properties: ConnAckProperties,
         writer: &mut BytesMut,
     ) -> Result<(), Self::Error> {
+        self.encode(properties.size(), writer)?; // properties length
+
         encode_property_u32!(
             writer,
             SessionExpireInterval,
@@ -119,5 +125,41 @@ impl Encoder<ConnAckProperties> for MQTTCodec {
         encode_property_string!(writer, ReasonString, properties.reason_string);
         encode_property_user_properties!(writer, UserProperty, properties.user_properties);
         Ok(())
+    }
+}
+
+impl Encoder<ConnAck> for MQTTCodec {
+    type Error = anyhow::Error;
+
+    fn encode(&mut self, msg: ConnAck, writer: &mut BytesMut) -> Result<(), Self::Error> {
+        writer.put_u8(msg.session_present as u8); // connack flags
+        writer.put_u8(msg.reason_code.into());
+        self.encode(msg.properties, writer)
+    }
+}
+
+impl RemainingLength for ConnAck {
+    fn remaining_length(&self) -> usize {
+        let properties_length = self.properties.size();
+        2 + properties_length.size() + properties_length
+    }
+}
+
+impl PropertiesSize for ConnAckProperties {
+    fn size(&self) -> usize {
+        let mut len = check_size_of!(self, session_expire_interval);
+        len += check_size_of!(self, receive_maximum);
+        len += check_size_of!(self, maximum_qos);
+        len += check_size_of!(self, retain_available);
+        len += check_size_of!(self, maximum_packet_size);
+        len += check_size_of_string!(self, assigned_client_identifier);
+        len += check_size_of!(self, topic_alias_maximum);
+        len += check_size_of_string!(self, reason_string);
+        len += self
+            .user_properties
+            .iter()
+            .map(|(x, y)| 5 + x.len() + y.len())
+            .sum::<usize>();
+        len
     }
 }

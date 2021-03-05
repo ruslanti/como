@@ -12,6 +12,7 @@ use tracing::{debug, instrument, trace, warn};
 
 use como_mqtt::v5::types::{Publish, QoS};
 
+use crate::settings;
 use crate::topic::filter::{Status, TopicFilter};
 use crate::topic::path::TopicNode;
 
@@ -39,9 +40,14 @@ pub struct Topics {
 }
 
 impl Topics {
-    pub fn new(path: &str) -> Result<Self> {
-        debug!("open topics db: {:?}", path);
-        let db = sled::open(path)?;
+    pub fn new(cfg: settings::Topics) -> Result<Self> {
+        debug!("open topics db: {:?}", cfg);
+        let db = sled::Config::new().temporary(cfg.temporary);
+        let db = if let Some(path) = cfg.db_path {
+            db.path(path).open()?
+        } else {
+            db.open()?
+        };
 
         let mut nodes = TopicNode::new();
 

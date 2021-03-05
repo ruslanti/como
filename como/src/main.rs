@@ -1,31 +1,17 @@
-use std::io::Read;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-#[cfg(feature = "tls")]
-use native_tls::Identity;
-#[cfg(feature = "tls")]
-use native_tls::TlsAcceptor;
-use tokio::net::TcpListener;
+use anyhow::Result;
 use tokio::signal;
 use tracing::{debug, Level};
 
-use crate::context::AppContext;
-use crate::settings::Settings;
+use como::service;
+use como::settings::Settings;
 
 /*use std::thread;
 use std::time::Duration;
 use tracing_subscriber::prelude::*;
  */
-mod connection;
-mod context;
-mod exactly_once;
-mod service;
-mod session;
-mod settings;
-mod shutdown;
-mod topic;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -76,48 +62,5 @@ async fn main() -> Result<()> {
 
     debug!("{:?}", settings);
 
-    let context = Arc::new(AppContext::new(settings.clone())?);
-
-    // Bind a TCP listener
-    let listener = TcpListener::bind(&format!(
-        "{}:{}",
-        settings.service.bind, settings.service.port
-    ))
-    .await?;
-
-    let srv = service::run(
-        listener,
-        None,
-        settings.clone(),
-        signal::ctrl_c(),
-        context.clone(),
-    );
-
-    if let Some(tls) = &settings.clone().service.tls {
-        // Bind a TLS listener
-        let cert = &tls.cert;
-        let mut file = std::fs::File::open(cert)
-            .with_context(|| format!("could not open cert file: {}", cert))?;
-        let mut identity = vec![];
-        file.read_to_end(&mut identity)
-            .with_context(|| format!("could not read cert file: {}", cert))?;
-        let identity = Identity::from_pkcs12(&identity, tls.pass.as_str())
-            .with_context(|| format!("could not read identity from cert file: {}", cert))?;
-
-        let acceptor = TlsAcceptor::new(identity).context("TLS acceptor fail")?;
-        let acceptor = Arc::new(acceptor.into());
-
-        let tls_listener = TcpListener::bind(&format!("{}:{}", tls.bind, tls.port)).await?;
-        let tls_srv = service::run(
-            tls_listener,
-            Some(acceptor),
-            settings.clone(),
-            signal::ctrl_c(),
-            context.clone(),
-        );
-        let (res, tls_res) = tokio::join!(srv, tls_srv);
-        res.and(tls_res)
-    } else {
-        srv.await
-    }
+    service::run(settings, signal::ctrl_c()).await
 }
