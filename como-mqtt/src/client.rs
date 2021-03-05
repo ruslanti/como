@@ -3,19 +3,22 @@ use std::net::SocketAddr;
 use anyhow::{anyhow, Error, Result};
 use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpSocket, TcpStream};
-use tokio::time::error::Elapsed;
 use tokio::time::timeout;
 use tokio::time::Duration;
 use tokio_util::codec::Framed;
+use tracing::trace;
 
 use crate::v5::property::PropertiesBuilder;
-use crate::v5::types::{ConnAck, Connect, ControlPacket, MQTTCodec, MqttString};
+use crate::v5::types::{
+    ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, MqttString, ReasonCode,
+};
 
-pub struct Client {
+pub struct MqttClient {
     stream: Framed<TcpStream, MQTTCodec>,
     client_id: Option<MqttString>,
     keep_alive: u16,
     properties_builder: PropertiesBuilder,
+    timeout: Duration,
 }
 
 pub struct ClientBuilder<'a> {
@@ -25,7 +28,7 @@ pub struct ClientBuilder<'a> {
     properties_builder: PropertiesBuilder,
 }
 
-impl Client {
+impl MqttClient {
     pub async fn connect(&mut self, clean_start: bool) -> Result<ConnAck> {
         let connect = Connect {
             clean_start_flag: clean_start,
@@ -36,21 +39,38 @@ impl Client {
             password: None,
             will: None,
         };
-        println!("send {:?}", connect);
-        self.stream.send(ControlPacket::Connect(connect)).await;
-        match timeout(Duration::from_millis(100), self.stream.next()).await {
-            Ok(Some(Ok(result))) => match result {
+        trace!("send {:?}", connect);
+        self.stream.send(ControlPacket::Connect(connect)).await?;
+        self.recv_with_timeout()
+            .await
+            .and_then(|packet| match packet {
                 ControlPacket::ConnAck(ack) => Ok(ack),
-                _ => Err(anyhow!("unexpected message")),
-            },
-            Ok(Some(Err(err))) => Err(anyhow!("error")),
-            Ok(None) => Err(anyhow!("disconnected")),
-            Err(elapsed) => Err(anyhow!("received response timeout")),
-        }
+                _ => Err(anyhow!("unexpected: {:?}", packet)),
+            })
     }
 
-    pub async fn disconnect() -> Result<()> {
-        Ok(())
+    async fn recv_with_timeout(&mut self) -> Result<ControlPacket, Error> {
+        timeout(self.timeout, self.stream.next())
+            .await
+            .map_err(Error::msg)
+            .and_then(|r| r.ok_or(anyhow!("none message")))
+            .and_then(|r| r)
+    }
+
+    pub async fn disconnect(&mut self) -> Result<()> {
+        self.disconnect_with_reason(ReasonCode::Success).await
+    }
+
+    pub async fn disconnect_with_reason(&mut self, reason_code: ReasonCode) -> Result<()> {
+        let disconnect = Disconnect {
+            reason_code,
+            properties: Default::default(),
+        };
+
+        trace!("send {:?}", disconnect);
+        self.stream
+            .send(ControlPacket::Disconnect(disconnect))
+            .await
     }
 
     pub async fn publish() -> Result<()> {
@@ -90,7 +110,7 @@ impl<'a> ClientBuilder<'a> {
         self
     }
 
-    pub async fn client(self) -> Result<Client> {
+    pub async fn client(self) -> Result<MqttClient> {
         let peer: SocketAddr = self.address.parse()?;
         let socket = if peer.is_ipv4() {
             TcpSocket::new_v4()?
@@ -101,11 +121,12 @@ impl<'a> ClientBuilder<'a> {
         let stream = socket.connect(peer).await?;
         let stream = Framed::new(stream, MQTTCodec::new());
 
-        Ok(Client {
+        Ok(MqttClient {
             stream,
             client_id: self.client_id,
             keep_alive: self.keep_alive.unwrap_or(0),
             properties_builder: self.properties_builder,
+            timeout: Duration::from_millis(100),
         })
     }
 }

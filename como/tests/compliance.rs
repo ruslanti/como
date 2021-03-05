@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::signal;
+use tokio::sync::oneshot;
 use tokio::time::Duration;
 
 use como::service;
@@ -9,8 +9,6 @@ use como_mqtt::client::ClientBuilder;
 
 pub fn setup() {
     // setup code specific to your library's tests would go here
-    println!("SETUP");
-    panic!("TTT")
 }
 
 #[tokio::test]
@@ -20,8 +18,12 @@ async fn basic_connect_clean_session() {
     settings.service.port = port;
 
     tracing_subscriber::fmt::init();
-    tokio::spawn(service::run(Arc::new(settings), signal::ctrl_c()));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    tokio::spawn(service::run(Arc::new(settings), shutdown_rx));
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
     let mut client = ClientBuilder::new(&format!("127.0.0.1:{}", port))
         .client()
         .await
@@ -30,5 +32,8 @@ async fn basic_connect_clean_session() {
     let res = client.connect(true).await.unwrap();
     println!("{:?}", res);
 
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    client.disconnect().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(shutdown_tx); // send terminate signal
+    tokio::time::sleep(Duration::from_millis(100)).await;
 }

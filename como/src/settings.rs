@@ -32,7 +32,7 @@ pub struct Connection {
     pub retain_available: Option<bool>,
     pub maximum_packet_size: Option<u32>,
     pub topic_alias_maximum: Option<u16>,
-    pub db_path: String,
+    pub db_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,7 +92,7 @@ impl Default for Tls {
 impl Default for Connection {
     fn default() -> Self {
         Connection {
-            idle_keep_alive: 400,
+            idle_keep_alive: 500,
             server_keep_alive: None,
             session_expire_interval: None,
             receive_maximum: None,
@@ -100,7 +100,7 @@ impl Default for Connection {
             retain_available: None,
             maximum_packet_size: None,
             topic_alias_maximum: None,
-            db_path: "data/sessions".to_string(),
+            db_path: None,
         }
     }
 }

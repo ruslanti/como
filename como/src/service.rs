@@ -6,7 +6,7 @@ use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, Semaphore};
 use tokio::time::{sleep, Duration};
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 
 use crate::connection::ConnectionHandler;
 use crate::context::AppContext;
@@ -72,7 +72,7 @@ pub async fn run(settings: Arc<Settings>, shutdown: impl Future) -> Result<()> {
         }
         _ = shutdown => {
             // The shutdown signal has been received.
-            info!("shutting down");
+            info!("shutting down signal");
         }
     }
 
@@ -134,7 +134,9 @@ impl TcpTransport {
 
             tokio::spawn(async move {
                 if let Err(err) = handler.client(stream, shutdown).await {
-                    error!(cause = ?err, "connection error");
+                    warn!(cause = ?err, "connection {} error", handler.peer);
+                } else {
+                    info!("connection {} closed", handler.peer)
                 }
             });
         }

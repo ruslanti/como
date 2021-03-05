@@ -252,6 +252,7 @@ impl Session {
                             .publish_client(message)
                             .await
                             .context("publish_client")?,
+
                     }
                 }
             }
@@ -381,7 +382,6 @@ impl Session {
                     },
                 });
                 Ok(Some(ack))
-                //self.response_tx.send(ack).await.map_err(Error::msg)
             }
             Err(err) => {
                 warn!(cause = ?err, "session error: ");
@@ -703,7 +703,6 @@ impl Session {
                 self.topics.publish(will).await?;
             }
         }
-
         Ok(None)
     }
 }
