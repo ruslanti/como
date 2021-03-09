@@ -81,7 +81,7 @@ async fn connect_existing_session() -> anyhow::Result<()> {
         .client()
         .await?;
 
-    let ack = assert_ok!(client.connect(true).await);
+    let ack = assert_ok!(client.connect(false).await);
     assert!(!ack.session_present);
     assert_none!(ack.properties.assigned_client_identifier);
     assert_none!(ack.properties.session_expire_interval);
@@ -96,19 +96,28 @@ async fn connect_existing_session() -> anyhow::Result<()> {
     assert_none!(ack.properties.session_expire_interval);
 
     assert_matches!(assert_ok!(client.recv().await), ControlPacket::Disconnect(d) if d.reason_code == ReasonCode::SessionTakenOver);
+    assert_none!(client2.disconnect().await?);
 
-    /*
-    let mut client = ClientBuilder::new(&format!("127.0.0.1:{}", port))
+    let mut client3 = ClientBuilder::new(&format!("127.0.0.1:{}", port))
         .client_id("connect_existing_session")
         .session_expire_interval(10)
         .client()
         .await?;
+    let ack = assert_ok!(client3.connect(false).await);
+    assert!(!ack.session_present);
 
-    let res = client.connect(true).await?;
-    //println!("{:?}", res);
-    assert_none!(client.disconnect().await?);*/
+    assert_none!(client3.disconnect().await?);
 
-    assert_none!(client2.disconnect().await?);
+    let mut client4 = ClientBuilder::new(&format!("127.0.0.1:{}", port))
+        .client_id("connect_existing_session")
+        .session_expire_interval(10)
+        .client()
+        .await?;
+    let ack = assert_ok!(client4.connect(false).await);
+    assert!(ack.session_present);
+
+    assert_none!(client4.disconnect().await?);
+
     drop(shutdown_notify);
     handle.await?
 }

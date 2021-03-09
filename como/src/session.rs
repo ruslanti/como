@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use sled::{Batch, Event, IVec, Subscriber, Tree};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::time::Duration;
 use tracing::{debug, error, field, info, instrument, trace, warn};
 
 use como_mqtt::v5::property::{
@@ -78,7 +77,7 @@ pub struct Session {
     peer: SocketAddr,
     properties: ConnectProperties,
     will: Option<Will>,
-    expire_interval: Duration,
+    session_expire_interval: Option<u32>,
     config: Connection,
     server_flows: HashMap<u16, Sender<PublishEvent>>,
     client_flows: HashMap<u16, Sender<PublishEvent>>,
@@ -120,7 +119,7 @@ impl Session {
             peer,
             properties,
             will,
-            expire_interval: Duration::from_millis(1),
+            session_expire_interval: None,
             config,
             server_flows: HashMap::new(),
             client_flows: HashMap::new(),
@@ -230,13 +229,7 @@ impl Session {
             ControlPacket::SubAck(s) => self.suback(s).await,
             ControlPacket::UnSubscribe(s) => self.unsubscribe(s).await,
             ControlPacket::UnSubAck(s) => self.unsuback(s).await,
-            ControlPacket::Disconnect(d) => {
-                if let Some(ex) = d.properties.session_expire_interval {
-                    self.expire_interval = Duration::from_secs(ex as u64);
-                }
-                self.disconnect(d).await
-                //self.connection = None;
-            }
+            ControlPacket::Disconnect(d) => self.disconnect(d).await,
             _ => unreachable!(),
         }
     }
@@ -312,7 +305,11 @@ impl Session {
                                 .unwrap_or(SessionState {
                                     peer: SocketAddr::new("0.0.0.0".parse().unwrap(), 0),
                                 });
-                            info!("acquired session by: {}", state.peer);
+                            info!(
+                                "acquired session '{}' by: {}",
+                                std::str::from_utf8(prefix.as_bytes()).unwrap_or(""),
+                                state.peer
+                            );
                             if let Err(err) = session_event_tx
                                 .send(SessionEvent::SessionTakenOver(state))
                                 .await
@@ -326,7 +323,10 @@ impl Session {
                             unreachable!()
                         }
                     }
-                    Event::Remove { .. } => unreachable!(),
+                    Event::Remove { key } => {
+                        trace!("session removed: {:?}", key);
+                        break;
+                    }
                 }
             }
         });
@@ -349,6 +349,11 @@ impl Session {
                     self.config.maximum_qos
                 };
 
+                trace!(
+                    "config {:?}, connect {:?}",
+                    self.config.session_expire_interval,
+                    msg.properties.session_expire_interval
+                );
                 let session_expire_interval =
                     if let Some(server_expire) = self.config.session_expire_interval {
                         if let Some(client_expire) = msg.properties.session_expire_interval {
@@ -359,6 +364,8 @@ impl Session {
                     } else {
                         None
                     };
+                self.session_expire_interval =
+                    session_expire_interval.or(msg.properties.session_expire_interval);
 
                 let ack = ControlPacket::ConnAck(ConnAck {
                     session_present,
@@ -679,7 +686,23 @@ impl Session {
     }
 
     #[instrument(skip(self, msg))]
-    async fn disconnect(&self, msg: Disconnect) -> Result<Option<ControlPacket>> {
+    async fn disconnect(&mut self, msg: Disconnect) -> Result<Option<ControlPacket>> {
+        match (
+            self.session_expire_interval,
+            msg.properties.session_expire_interval,
+        ) {
+            (Some(0), Some(_)) => {
+                return Ok(Some(ControlPacket::Disconnect(Disconnect {
+                    reason_code: ReasonCode::ProtocolError,
+                    properties: Default::default(),
+                })))
+            }
+            (_, Some(session_expire_interval)) => {
+                self.session_expire_interval = Some(session_expire_interval)
+            }
+            _ => {}
+        };
+
         if msg.reason_code != ReasonCode::Success {
             // publish will
             if let Some(will) = self.will.borrow() {
@@ -800,8 +823,25 @@ impl TryInto<Vec<u8>> for SessionState {
 }
 
 impl Drop for Session {
-    #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)))]
+    #[instrument(skip(self), fields(peer = field::display(& self.peer),
+    client_identifier = field::debug(& self.id)))]
     fn drop(&mut self) {
+        trace!(
+            "self.session_expire_interval {:?}",
+            self.session_expire_interval
+        );
+        match self.session_expire_interval {
+            None | Some(0) => match self.sessions_db.remove(self.id.as_bytes()) {
+                Ok(Some(_)) => debug!("session db removed"),
+                Ok(None) => debug!("session db nothing to remove"),
+                Err(err) => warn!(cause = ?err, "session db remove"),
+            },
+            Some(session_expire_interval) => {
+                // update session state
+                //self.sessions_db.insert(self.id.as_bytes(), "".as_bytes());
+            }
+        };
+
         info!("session closed");
     }
 }
