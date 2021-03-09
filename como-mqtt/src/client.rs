@@ -138,7 +138,7 @@ impl<'a> ClientBuilder<'a> {
         }
     }
 
-    pub fn client_id(mut self, value: String) -> Self {
+    pub fn client_id(mut self, value: &'static str) -> Self {
         self.client_id = Some(MqttString::from(value));
         self
     }

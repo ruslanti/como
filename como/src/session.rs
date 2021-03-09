@@ -45,7 +45,7 @@ pub struct TopicMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum SessionEvent {
-    SessionTaken(SessionState),
+    SessionTakenOver(SessionState),
     TopicMessage(TopicMessage),
 }
 
@@ -161,8 +161,8 @@ impl Session {
         }
     }
 
-    #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
-    async fn publish_client(&mut self, event: TopicMessage) -> Result<()> {
+    #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)))]
+    async fn publish_client(&mut self, event: TopicMessage) -> Option<ControlPacket> {
         let msg = event.msg;
         let packet_identifier = self.packet_identifier_seq.clone();
         let qos = min(msg.qos, event.subscription_qos);
@@ -190,14 +190,14 @@ impl Session {
         if let Some(maximum_packet_size) = self.properties.maximum_packet_size {
             if publish.size() > maximum_packet_size as usize {
                 warn!("exceed maximum_packet_size: {:?}", publish);
-                return Ok(());
+                return None;
             }
         }
 
-        self.response_tx
-            .send(ControlPacket::Publish(publish))
-            .await
-            .map_err(Error::msg)?;
+        /*        self.response_tx
+        .send(ControlPacket::Publish(publish))
+        .await
+        .map_err(Error::msg)?;*/
 
         if QoS::ExactlyOnce == qos {
             let (tx, rx) = mpsc::channel(1);
@@ -214,7 +214,8 @@ impl Session {
                 }
             });
         };
-        Ok(())
+
+        Some(ControlPacket::Publish(publish))
     }
 
     pub async fn handle_msg(&mut self, msg: ControlPacket) -> Result<Option<ControlPacket>> {
@@ -241,19 +242,20 @@ impl Session {
     }
 
     #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
-    pub async fn session(&mut self) -> Result<()> {
+    pub async fn session(&mut self) -> Result<Option<ControlPacket>> {
         tokio::select! {
             res = self.session_event_rx.recv() => {
                 if let Some(event) = res {
                     trace!("subscription event: {:?}", event);
-                    match event {
-                        SessionEvent::SessionTaken(_taken) => unimplemented!(),
+                    let response = match event {
+                        SessionEvent::SessionTakenOver(_taken) =>
+                            Some(ControlPacket::Disconnect(Disconnect {reason_code: ReasonCode::SessionTakenOver, properties: Default::default()}))
+                        ,
                         SessionEvent::TopicMessage(message) => self
                             .publish_client(message)
-                            .await
-                            .context("publish_client")?,
-
-                    }
+                            .await,
+                    };
+                    return Ok(response);
                 }
             }
             res = self.topic_event.recv() => {
@@ -270,7 +272,7 @@ impl Session {
                 }
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
@@ -312,7 +314,7 @@ impl Session {
                                 });
                             info!("acquired session by: {}", state.peer);
                             if let Err(err) = session_event_tx
-                                .send(SessionEvent::SessionTaken(state))
+                                .send(SessionEvent::SessionTakenOver(state))
                                 .await
                                 .context("SessionTaken event")
                             {

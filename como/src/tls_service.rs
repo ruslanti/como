@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use native_tls::Identity;
 use native_tls::TlsAcceptor;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc, Semaphore};
+use tokio::sync::{broadcast, mpsc, Barrier, Semaphore};
 use tracing::{error, info, instrument};
 
 use crate::connection::ConnectionHandler;
@@ -19,6 +19,7 @@ pub(crate) struct TlsTransport {
     notify_shutdown: broadcast::Sender<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
     context: Arc<AppContext>,
+    ready: Arc<Barrier>,
 }
 
 impl TlsTransport {
@@ -27,12 +28,14 @@ impl TlsTransport {
         notify_shutdown: broadcast::Sender<()>,
         shutdown_complete_tx: mpsc::Sender<()>,
         context: Arc<AppContext>,
+        ready: Arc<Barrier>,
     ) -> Self {
         TlsTransport {
             limit_connections,
             notify_shutdown,
             shutdown_complete_tx,
             context,
+            ready,
         }
     }
 
@@ -40,7 +43,6 @@ impl TlsTransport {
     pub(crate) async fn listen(&mut self) -> Result<()> {
         if let Some(tls) = self.context.config.service.tls.to_owned() {
             let address = format!("{}:{}", tls.bind, tls.port);
-            info!("accepting inbound TLS connections: {}", address);
             let listener = TcpListener::bind(&address).await?;
 
             let cert = &tls.cert;
@@ -54,6 +56,9 @@ impl TlsTransport {
 
             let acceptor: TlsAcceptor = TlsAcceptor::new(identity).context("TLS acceptor fail")?;
             let acceptor: tokio_native_tls::TlsAcceptor = acceptor.into();
+
+            self.ready.wait().await;
+            info!("accepting inbound TLS connections: {}", address);
 
             loop {
                 self.limit_connections.acquire().await?.forget();

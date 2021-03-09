@@ -159,7 +159,6 @@ impl Encoder<PublishProperties> for MQTTCodec {
         properties: PublishProperties,
         writer: &mut BytesMut,
     ) -> Result<(), Self::Error> {
-        println!("encode properties size: {}", properties.size());
         self.encode(properties.size(), writer)?;
         // properties length
         encode_property_u8!(

@@ -4,7 +4,7 @@ use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{anyhow, Context, Result};
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::Sender;
@@ -14,7 +14,7 @@ use tokio_util::codec::Framed;
 use tracing::{debug, field, instrument, trace};
 use uuid::Uuid;
 
-use como_mqtt::v5::types::{Auth, Connect, ControlPacket, Disconnect, MQTTCodec, ReasonCode};
+use como_mqtt::v5::types::{Auth, Connect, ControlPacket, MQTTCodec};
 
 use crate::context::AppContext;
 use crate::session::Session;
@@ -121,7 +121,7 @@ impl ConnectionHandler {
         }
     }
 
-    async fn session(&mut self) -> Result<()> {
+    async fn session(&mut self) -> Result<Option<ControlPacket>> {
         match self.session.borrow_mut() {
             None => Err(anyhow!("unacceptable event").context("subscription event")),
             Some(session) => session.session().await,
@@ -133,19 +133,6 @@ impl ConnectionHandler {
         Ok(())
     }
 
-    #[instrument(skip(self, conn_tx), err)]
-    async fn disconnect(
-        &self,
-        conn_tx: Sender<ControlPacket>,
-        reason_code: ReasonCode,
-    ) -> Result<()> {
-        let disc = ControlPacket::Disconnect(Disconnect {
-            reason_code,
-            properties: Default::default(),
-        });
-        conn_tx.send(disc).await.map_err(Error::msg)
-    }
-
     #[instrument(skip(self, socket, shutdown), fields(peer = field::display(& self.peer)))]
     pub async fn client<S>(&mut self, socket: S, mut shutdown: Shutdown) -> Result<()>
     where
@@ -154,7 +141,6 @@ impl ConnectionHandler {
         let framed = Framed::new(socket, MQTTCodec::new());
         let (mut sink, mut stream) = framed.split::<ControlPacket>();
         let (response_tx, mut response_rx) = mpsc::channel::<ControlPacket>(32);
-
         while !shutdown.is_shutdown() {
             // While reading a request frame, also listen for the shutdown signal.
             //trace!("select with timeout {} ms", duration.as_millis());
@@ -189,7 +175,13 @@ impl ConnectionHandler {
                 }
                 res = self.session(), if self.session.is_some() => {
                      trace!("session event: {:?}", res);
-                     res?;
+                     if let Some(msg) = res? {
+                        if let ControlPacket::Disconnect(_) = msg {
+                            self.keep_alive = Duration::from_millis(0); // close socket and session
+                        }
+                        debug!("sending {:?}", msg);
+                        sink.send(msg).await.context("socket send error")?;
+                     }
                 }
                  _ = shutdown.recv() => {
                      //self.disconnect(conn_tx.clone(), ReasonCode::ServerShuttingDown).await?;

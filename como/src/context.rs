@@ -4,7 +4,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use sled::{Db, Tree};
 use tokio::sync::mpsc::Sender;
-use tracing::debug;
 
 use como_mqtt::v5::property::ConnectProperties;
 use como_mqtt::v5::types::{ControlPacket, MqttString, Will};
@@ -24,16 +23,12 @@ pub struct AppContext {
 
 impl AppContext {
     pub fn new(config: Arc<Settings>) -> Result<Self> {
-        let db = sled::Config::new().temporary(true);
+        let db = sled::Config::new().temporary(true).create_new(true);
         let db = if let Some(path) = config.connection.db_path.to_owned() {
             db.path(path).open()?
         } else {
             db.open()?
         };
-        debug!(
-            "session DB name {}",
-            std::str::from_utf8(db.name().as_ref())?
-        );
         let sessions = db.open_tree("sessions")?;
         let subscriptions = db.open_tree("subscriptions")?;
         Ok(Self {

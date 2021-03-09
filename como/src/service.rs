@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, Semaphore};
+use tokio::sync::{broadcast, mpsc, Barrier, Semaphore};
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, instrument, warn};
 
@@ -26,9 +26,19 @@ struct TcpTransport {
     notify_shutdown: broadcast::Sender<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
     context: Arc<AppContext>,
+    ready: Arc<Barrier>,
 }
 
 pub async fn run(settings: Arc<Settings>, shutdown: impl Future) -> Result<()> {
+    let ready = Arc::new(Barrier::new(1));
+    run_with_ready(settings, shutdown, ready).await
+}
+
+pub async fn run_with_ready(
+    settings: Arc<Settings>,
+    shutdown: impl Future,
+    ready: Arc<Barrier>,
+) -> Result<()> {
     let limit_connections = Arc::new(Semaphore::new(settings.service.max_connections));
 
     let context = Arc::new(AppContext::new(settings)?);
@@ -42,6 +52,7 @@ pub async fn run(settings: Arc<Settings>, shutdown: impl Future) -> Result<()> {
         notify_shutdown.clone(),
         shutdown_complete_tx.clone(),
         context.clone(),
+        ready.clone(),
     );
 
     let use_tls = context.config.service.tls.is_some();
@@ -50,6 +61,7 @@ pub async fn run(settings: Arc<Settings>, shutdown: impl Future) -> Result<()> {
         notify_shutdown.clone(),
         shutdown_complete_tx.clone(),
         context.clone(),
+        ready.clone(),
     );
 
     // Initialize the listener state
@@ -123,12 +135,14 @@ impl TcpTransport {
         notify_shutdown: broadcast::Sender<()>,
         shutdown_complete_tx: mpsc::Sender<()>,
         context: Arc<AppContext>,
+        ready: Arc<Barrier>,
     ) -> Self {
         TcpTransport {
             limit_connections,
             notify_shutdown,
             shutdown_complete_tx,
             context,
+            ready,
         }
     }
 
@@ -138,8 +152,9 @@ impl TcpTransport {
             "{}:{}",
             self.context.config.service.bind, self.context.config.service.port
         );
-        info!("accepting inbound connections: {}", address);
         let listener = TcpListener::bind(&address).await?;
+        self.ready.wait().await;
+        info!("accepting inbound connections: {}", address);
 
         loop {
             self.limit_connections.acquire().await?.forget();
