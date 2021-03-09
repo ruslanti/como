@@ -5,13 +5,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use native_tls::Identity;
 use native_tls::TlsAcceptor;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Semaphore};
-use tokio::time::{sleep, Duration};
 use tracing::{error, info, instrument};
 
 use crate::connection::ConnectionHandler;
 use crate::context::AppContext;
+use crate::service::accept;
 use crate::shutdown::Shutdown;
 
 pub(crate) struct TlsTransport {
@@ -58,7 +58,7 @@ impl TlsTransport {
             loop {
                 self.limit_connections.acquire().await?.forget();
 
-                let stream = Self::accept(listener.borrow()).await?;
+                let stream = accept(listener.borrow()).await?;
 
                 let mut handler = ConnectionHandler::new(
                     stream.peer_addr()?,
@@ -78,28 +78,5 @@ impl TlsTransport {
             }
         };
         Ok(())
-    }
-
-    #[instrument(skip(listener), err)]
-    async fn accept(listener: &TcpListener) -> Result<TcpStream> {
-        let mut backoff = 1;
-
-        loop {
-            match listener.accept().await {
-                Ok((socket, address)) => {
-                    info!("inbound connection: {:?} ", address);
-                    return Ok(socket);
-                }
-                Err(err) => {
-                    if backoff > 64 {
-                        error!("error on accepting connection: {}", err);
-                        return Err(err.into());
-                    }
-                }
-            }
-            sleep(Duration::from_secs(backoff)).await;
-            // Double the back off
-            backoff *= 2;
-        }
     }
 }

@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{anyhow, Error, Result};
+use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::time::timeout;
@@ -8,9 +9,11 @@ use tokio::time::Duration;
 use tokio_util::codec::Framed;
 use tracing::trace;
 
+use crate::identifier::Sequence;
 use crate::v5::property::PropertiesBuilder;
 use crate::v5::types::{
-    ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, MqttString, ReasonCode,
+    ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, MqttString, Publish, QoS, ReasonCode,
+    Response,
 };
 
 pub struct MqttClient {
@@ -19,6 +22,7 @@ pub struct MqttClient {
     keep_alive: u16,
     properties_builder: PropertiesBuilder,
     timeout: Duration,
+    packet_identifier: Sequence,
 }
 
 pub struct ClientBuilder<'a> {
@@ -41,15 +45,13 @@ impl MqttClient {
         };
         trace!("send {:?}", connect);
         self.stream.send(ControlPacket::Connect(connect)).await?;
-        self.recv_with_timeout()
-            .await
-            .and_then(|packet| match packet {
-                ControlPacket::ConnAck(ack) => Ok(ack),
-                _ => Err(anyhow!("unexpected: {:?}", packet)),
-            })
+        self.recv().await.and_then(|packet| match packet {
+            ControlPacket::ConnAck(ack) => Ok(ack),
+            _ => Err(anyhow!("unexpected: {:?}", packet)),
+        })
     }
 
-    async fn recv_with_timeout(&mut self) -> Result<ControlPacket, Error> {
+    pub async fn recv(&mut self) -> Result<ControlPacket, Error> {
         timeout(self.timeout, self.stream.next())
             .await
             .map_err(Error::msg)
@@ -57,11 +59,14 @@ impl MqttClient {
             .and_then(|r| r)
     }
 
-    pub async fn disconnect(&mut self) -> Result<()> {
+    pub async fn disconnect(&mut self) -> Result<Option<ControlPacket>> {
         self.disconnect_with_reason(ReasonCode::Success).await
     }
 
-    pub async fn disconnect_with_reason(&mut self, reason_code: ReasonCode) -> Result<()> {
+    pub async fn disconnect_with_reason(
+        &mut self,
+        reason_code: ReasonCode,
+    ) -> Result<Option<ControlPacket>> {
         let disconnect = Disconnect {
             reason_code,
             properties: Default::default(),
@@ -70,11 +75,52 @@ impl MqttClient {
         trace!("send {:?}", disconnect);
         self.stream
             .send(ControlPacket::Disconnect(disconnect))
-            .await
+            .await?;
+        // expected None on socket close
+        self.stream.next().await.transpose()
     }
 
-    pub async fn publish() -> Result<()> {
-        Ok(())
+    pub async fn publish_most_once(
+        &mut self,
+        retain: bool,
+        topic_name: String,
+        payload: Vec<u8>,
+    ) -> Result<()> {
+        let publish = Publish {
+            dup: false,
+            qos: QoS::AtMostOnce,
+            retain,
+            topic_name: Bytes::from(topic_name),
+            packet_identifier: None,
+            properties: Default::default(),
+            payload: Bytes::from(payload),
+        };
+        trace!("send {:?}", publish);
+        self.stream.send(ControlPacket::Publish(publish)).await
+    }
+
+    pub async fn publish_least_once(
+        &mut self,
+        retain: bool,
+        topic_name: String,
+        payload: Vec<u8>,
+    ) -> Result<Response> {
+        let packet_identifier = self.packet_identifier.next()?;
+        let publish = Publish {
+            dup: false,
+            qos: QoS::AtLeastOnce,
+            retain,
+            topic_name: Bytes::from(topic_name),
+            packet_identifier: Some(packet_identifier.value()),
+            properties: Default::default(),
+            payload: Bytes::from(payload),
+        };
+        trace!("send {:?}", publish);
+        self.stream.send(ControlPacket::Publish(publish)).await?;
+        self.recv().await.and_then(|packet| match packet {
+            ControlPacket::PubAck(ack) => Ok(ack),
+            _ => Err(anyhow!("unexpected: {:?}", packet)),
+        })
     }
 
     pub async fn subscribe() -> Result<()> {
@@ -127,6 +173,7 @@ impl<'a> ClientBuilder<'a> {
             keep_alive: self.keep_alive.unwrap_or(0),
             properties_builder: self.properties_builder,
             timeout: Duration::from_millis(100),
+            packet_identifier: Default::default(),
         })
     }
 }

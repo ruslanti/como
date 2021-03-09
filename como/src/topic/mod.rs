@@ -48,7 +48,10 @@ impl Topics {
         } else {
             db.open()?
         };
-
+        debug!(
+            "topics DB name {}",
+            std::str::from_utf8(db.name().as_ref())?
+        );
         let mut nodes = TopicNode::new();
 
         for name in db.tree_names().iter().filter_map(|tree_name| {

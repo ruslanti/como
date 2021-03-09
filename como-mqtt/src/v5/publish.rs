@@ -90,9 +90,16 @@ impl Encoder<Publish> for MQTTCodec {
 
     fn encode(&mut self, msg: Publish, writer: &mut BytesMut) -> Result<(), Self::Error> {
         self.encode(msg.topic_name, writer)?;
-        if let Some(packet_identifier) = msg.packet_identifier {
-            writer.put_u16(packet_identifier); // packet identifier
-        };
+        if QoS::AtMostOnce != msg.qos {
+            if let Some(packet_identifier) = msg.packet_identifier {
+                writer.put_u16(packet_identifier); // packet identifier
+            } else {
+                return Err(anyhow!(
+                    "undefined packet identifier with qos: {:?}",
+                    msg.qos
+                ));
+            }
+        }
         self.encode(msg.properties, writer)?;
         self.encode(msg.payload, writer)
     }
@@ -152,6 +159,7 @@ impl Encoder<PublishProperties> for MQTTCodec {
         properties: PublishProperties,
         writer: &mut BytesMut,
     ) -> Result<(), Self::Error> {
+        println!("encode properties size: {}", properties.size());
         self.encode(properties.size(), writer)?;
         // properties length
         encode_property_u8!(

@@ -94,6 +94,29 @@ pub async fn run(settings: Arc<Settings>, shutdown: impl Future) -> Result<()> {
     Ok(())
 }
 
+#[instrument(skip(listener), err)]
+pub(crate) async fn accept(listener: &TcpListener) -> Result<TcpStream> {
+    let mut backoff = 1;
+
+    loop {
+        match listener.accept().await {
+            Ok((socket, address)) => {
+                info!("inbound connection: {:?} ", address);
+                return Ok(socket);
+            }
+            Err(err) => {
+                if backoff > 64 {
+                    error!("error on accepting connection: {}", err);
+                    return Err(err.into());
+                }
+            }
+        }
+        sleep(Duration::from_secs(backoff)).await;
+        // Double the back off
+        backoff *= 2;
+    }
+}
+
 impl TcpTransport {
     pub fn new(
         limit_connections: Arc<Semaphore>,
@@ -121,7 +144,7 @@ impl TcpTransport {
         loop {
             self.limit_connections.acquire().await?.forget();
 
-            let stream = Self::accept(listener.borrow()).await?;
+            let stream = accept(listener.borrow()).await?;
 
             let mut handler = ConnectionHandler::new(
                 stream.peer_addr()?,
@@ -139,29 +162,6 @@ impl TcpTransport {
                     info!("connection {} closed", handler.peer)
                 }
             });
-        }
-    }
-
-    #[instrument(skip(listener), err)]
-    async fn accept(listener: &TcpListener) -> Result<TcpStream> {
-        let mut backoff = 1;
-
-        loop {
-            match listener.accept().await {
-                Ok((socket, address)) => {
-                    info!("inbound connection: {:?} ", address);
-                    return Ok(socket);
-                }
-                Err(err) => {
-                    if backoff > 64 {
-                        error!("error on accepting connection: {}", err);
-                        return Err(err.into());
-                    }
-                }
-            }
-            sleep(Duration::from_secs(backoff)).await;
-            // Double the back off
-            backoff *= 2;
         }
     }
 }

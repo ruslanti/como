@@ -411,7 +411,7 @@ pub struct Auth {
     pub properties: AuthProperties,
 }
 
-#[derive(Eq, PartialEq)]
+#[derive(PartialEq)]
 pub enum ControlPacket {
     Connect(Connect),
     ConnAck(ConnAck),
