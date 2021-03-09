@@ -1,20 +1,17 @@
 #[macro_use]
 extern crate claim;
 
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 
 use anyhow::{Error, Result};
-use futures::SinkExt;
-use tokio::signal;
+use tokio::sync::oneshot;
 use tokio::sync::oneshot::Sender;
-use tokio::sync::{broadcast, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 use como::service;
 use como::settings::Settings;
 use como_mqtt::client::ClientBuilder;
-use como_mqtt::v5::types::QoS;
 
 #[tokio::test]
 async fn basic_connect_clean_session() -> anyhow::Result<()> {
