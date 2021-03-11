@@ -9,6 +9,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Error, Result};
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::Bytes;
+use chrono::{Duration, Utc};
 use nom::AsBytes;
 use serde::{Deserialize, Serialize};
 use sled::{Batch, Event, IVec, Subscriber, Tree};
@@ -25,6 +26,7 @@ use como_mqtt::v5::types::{
 };
 
 use crate::exactly_once::{exactly_once_client, exactly_once_server};
+use crate::session_context::{SessionContext, SessionState};
 use crate::settings::Connection;
 use crate::topic::{PubMessage, Topics};
 
@@ -56,11 +58,6 @@ pub enum PublishEvent {
     PubComp(Response),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SessionState {
-    pub peer: SocketAddr,
-}
-
 trait Subscriptions {
     fn store_subscription(&self, topic_filter: &[u8], option: &SubscriptionOptions) -> Result<()>;
     fn remove_subscription(&self, topic_filter: &[u8]) -> Result<bool>;
@@ -87,12 +84,6 @@ pub struct Session {
     subscriptions_db: Tree,
     topic_filters: HashMap<String, Vec<oneshot::Sender<()>>>,
     topic_event: broadcast::Receiver<String>,
-}
-
-impl SessionState {
-    pub fn new(peer: SocketAddr) -> Self {
-        SessionState { peer }
-    }
 }
 
 impl Session {
@@ -129,34 +120,6 @@ impl Session {
             subscriptions_db,
             topic_filters: HashMap::new(),
             topic_event,
-        }
-    }
-
-    //#[instrument(skip(self))]
-    pub fn acquire(&self) -> Result<bool> {
-        let update_fn = |old: Option<&[u8]>| -> Option<Vec<u8>> {
-            let session = match old {
-                Some(encoded) => {
-                    if let Ok(mut session) = SessionState::try_from(encoded) {
-                        session.peer = self.peer;
-                        Some(session)
-                    } else {
-                        Some(SessionState::new(self.peer))
-                    }
-                }
-                None => Some(SessionState::new(self.peer)),
-            };
-            session.and_then(|s: SessionState| s.try_into().ok())
-        };
-
-        if let Some(_encoded) = self
-            .sessions_db
-            .fetch_and_update(self.id.clone(), update_fn)
-            .map_err(Error::msg)?
-        {
-            Ok(true)
-        } else {
-            Ok(false)
         }
     }
 
@@ -270,11 +233,10 @@ impl Session {
 
     #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
     fn init(&mut self, clean_start: bool) -> Result<bool> {
-        let session_present = self.acquire().context("acquire session")?;
+        let session_state = self.acquire(clean_start).context("acquire session")?;
+        self.start_monitor();
 
-        self.taken();
-
-        if session_present {
+        if let Some(session_state) = session_state {
             if clean_start {
                 let removed = self.clear_subscriptions().context("clean start session")?;
                 info!("removed {} subscriptions", removed);
@@ -286,50 +248,10 @@ impl Session {
                 }
                 // start subscriptions
             }
-        };
-
-        Ok(session_present)
-    }
-
-    fn taken(&self) {
-        let prefix = self.id.clone();
-        let session_event_tx = self.session_event_tx.clone();
-        let mut subscriber = self.sessions_db.watch_prefix(prefix.as_bytes());
-        tokio::spawn(async move {
-            while let Some(event) = (&mut subscriber).await {
-                match event {
-                    Event::Insert { key, value } => {
-                        if key.as_bytes() == prefix.as_bytes() {
-                            let state = SessionState::try_from(value)
-                                .context("deserialize event")
-                                .unwrap_or(SessionState {
-                                    peer: SocketAddr::new("0.0.0.0".parse().unwrap(), 0),
-                                });
-                            info!(
-                                "acquired session '{}' by: {}",
-                                std::str::from_utf8(prefix.as_bytes()).unwrap_or(""),
-                                state.peer
-                            );
-                            if let Err(err) = session_event_tx
-                                .send(SessionEvent::SessionTakenOver(state))
-                                .await
-                                .context("SessionTaken event")
-                            {
-                                warn!(cause=?err, "SessionTaken event sent error");
-                            }
-                            break;
-                        } else {
-                            warn!("wrong modified session: {:?}", key);
-                            unreachable!()
-                        }
-                    }
-                    Event::Remove { key } => {
-                        trace!("session removed: {:?}", key);
-                        break;
-                    }
-                }
-            }
-        });
+            Ok(true) // session present
+        } else {
+            Ok(false) // new session
+        }
     }
 
     #[instrument(skip(self, msg), fields(client_identifier = field::debug(& self.id)), err)]
@@ -732,6 +654,118 @@ impl Session {
     }
 }
 
+impl SessionContext for Session {
+    fn acquire(&self, clean_start: bool) -> Result<Option<SessionState>> {
+        let update_fn = |old: Option<&[u8]>| -> Option<Vec<u8>> {
+            let session_state = match old {
+                Some(encoded) => {
+                    if let Ok(mut session_state) = SessionState::try_from(encoded) {
+                        session_state.peer = self.peer;
+                        session_state.expire = None;
+                        if clean_start {
+                            session_state.last_topic_id = None;
+                        }
+                        session_state
+                    } else {
+                        SessionState::new(self.peer)
+                    }
+                }
+                None => SessionState::new(self.peer),
+            };
+            session_state.try_into().ok()
+        };
+
+        if let Some(encoded) = self
+            .sessions_db
+            .fetch_and_update(self.id.clone(), update_fn)
+            .map_err(Error::msg)?
+        {
+            Ok(Some(SessionState::try_from(encoded)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn update(&self, state: SessionState) -> Result<()> {
+        let update_fn = |old: Option<&[u8]>| -> Option<Vec<u8>> {
+            let session_state = match old {
+                Some(encoded) => {
+                    if let Ok(mut session_state) = SessionState::try_from(encoded) {
+                        if state.peer == session_state.peer {
+                            session_state.expire = state.expire;
+                            session_state.last_topic_id = state.last_topic_id;
+                            Some(session_state)
+                        } else {
+                            debug!("session {:?} acquired by {}", self.id, session_state.peer);
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            };
+            session_state.and_then(|s| s.try_into().ok())
+        };
+
+        self.sessions_db
+            .update_and_fetch(self.id.clone(), update_fn)
+            .map(|_| ())
+            .map_err(Error::msg)
+    }
+
+    fn remove(&self) -> Result<()> {
+        self.sessions_db
+            .remove(self.id.clone())
+            .map(|_| ())
+            .map_err(Error::msg)
+    }
+
+    fn start_monitor(&self) {
+        let prefix = self.id.clone();
+        let peer = self.peer.clone();
+        let session_event_tx = self.session_event_tx.clone();
+        let mut subscriber = self.sessions_db.watch_prefix(prefix.clone());
+        tokio::spawn(async move {
+            while let Some(event) = (&mut subscriber).await {
+                match event {
+                    Event::Insert { key, value } => {
+                        if key.as_bytes() == prefix {
+                            if let Ok(state) = SessionState::try_from(value) {
+                                // if peer address is different then session is acquired by other
+                                // connection, else it is closed by the same connection and break
+                                // the watcher
+                                if peer != state.peer {
+                                    info!(
+                                        "acquired session '{}' by: {:?}",
+                                        std::str::from_utf8(prefix.as_bytes()).unwrap_or(""),
+                                        state.peer
+                                    );
+                                    if let Err(err) = session_event_tx
+                                        .send(SessionEvent::SessionTakenOver(state))
+                                        .await
+                                        .context("SessionTaken event")
+                                    {
+                                        warn!(cause=?err, "SessionTaken event sent error");
+                                    }
+                                }
+                                break;
+                            }
+                        } else {
+                            warn!("wrong modified session: {:?}", key);
+                            unreachable!()
+                        }
+                    }
+                    Event::Remove { key } => {
+                        trace!("session removed: {:?}", key);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+}
+
 impl Subscriptions for Session {
     fn store_subscription(&self, topic_filter: &[u8], option: &SubscriptionOptions) -> Result<()> {
         let key = SubscriptionKey {
@@ -798,30 +832,6 @@ impl Subscriptions for Session {
     }
 }
 
-impl TryFrom<IVec> for SessionState {
-    type Error = Error;
-
-    fn try_from(encoded: IVec) -> Result<Self> {
-        bincode::deserialize(encoded.as_ref()).map_err(Error::msg)
-    }
-}
-
-impl TryFrom<&[u8]> for SessionState {
-    type Error = Error;
-
-    fn try_from(encoded: &[u8]) -> Result<Self> {
-        bincode::deserialize(encoded.as_ref()).map_err(Error::msg)
-    }
-}
-
-impl TryInto<Vec<u8>> for SessionState {
-    type Error = Error;
-
-    fn try_into(self) -> Result<Vec<u8>> {
-        bincode::serialize(&self).map_err(Error::msg)
-    }
-}
-
 impl Drop for Session {
     #[instrument(skip(self), fields(peer = field::display(& self.peer),
     client_identifier = field::debug(& self.id)))]
@@ -831,14 +841,21 @@ impl Drop for Session {
             self.session_expire_interval
         );
         match self.session_expire_interval {
-            None | Some(0) => match self.sessions_db.remove(self.id.as_bytes()) {
-                Ok(Some(_)) => debug!("session db removed"),
-                Ok(None) => debug!("session db nothing to remove"),
-                Err(err) => warn!(cause = ?err, "session db remove"),
-            },
+            None | Some(0) => {
+                if let Err(err) = self.remove() {
+                    warn!(cause = ?err, "close session remove failure");
+                }
+            }
             Some(session_expire_interval) => {
-                // update session state
-                //self.sessions_db.insert(self.id.as_bytes(), "".as_bytes());
+                let now = Utc::now();
+                now.checked_add_signed(Duration::seconds(session_expire_interval as i64));
+                if let Err(err) = self.update(SessionState {
+                    peer: self.peer,
+                    expire: Some(now.timestamp()),
+                    last_topic_id: None,
+                }) {
+                    warn!(cause = ?err, "close session update failure");
+                }
             }
         };
 
