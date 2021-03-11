@@ -73,7 +73,6 @@ async fn connect_clean_session() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn connect_existing_session() -> anyhow::Result<()> {
-    //println!("connect_existing_session start");
     let (port, shutdown_notify, handle) = start_test_broker().await;
     let mut client = ClientBuilder::new(&format!("127.0.0.1:{}", port))
         .client_id("connect_existing_session")
@@ -81,6 +80,7 @@ async fn connect_existing_session() -> anyhow::Result<()> {
         .client()
         .await?;
 
+    // Initial #1 connection
     let ack = assert_ok!(client.connect(false).await);
     assert!(!ack.session_present);
     assert_none!(ack.properties.assigned_client_identifier);
@@ -90,14 +90,16 @@ async fn connect_existing_session() -> anyhow::Result<()> {
         .client_id("connect_existing_session")
         .client()
         .await?;
+    // #2 connection take over the session from #1
     let ack = assert_ok!(client2.connect(true).await);
     assert!(ack.session_present);
     assert_none!(ack.properties.assigned_client_identifier);
     assert_none!(ack.properties.session_expire_interval);
-
+    // expected #1 disconnect
     assert_matches!(assert_ok!(client.recv().await), ControlPacket::Disconnect(d) if d.reason_code == ReasonCode::SessionTakenOver);
     assert_none!(client2.disconnect().await?);
 
+    // #3 connection
     let mut client3 = ClientBuilder::new(&format!("127.0.0.1:{}", port))
         .client_id("connect_existing_session")
         .session_expire_interval(10)
@@ -113,6 +115,7 @@ async fn connect_existing_session() -> anyhow::Result<()> {
         .session_expire_interval(10)
         .client()
         .await?;
+    // #4 connection after #3 disconnect with 10 sec session_expire
     let ack = assert_ok!(client4.connect(false).await);
     assert!(ack.session_present);
 
