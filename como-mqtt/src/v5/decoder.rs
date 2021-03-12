@@ -6,12 +6,13 @@ use tokio_util::codec::Decoder;
 use tracing::{instrument, trace};
 
 use crate::v5::connack::decode_connack;
-use crate::v5::connect::decode_connect;
 use crate::v5::disconnect::decode_disconnect;
 use crate::v5::publish::decode_publish;
-use crate::v5::pubres::{decode_puback, decode_pubcomp, decode_pubrec, decode_pubrel};
 use crate::v5::subscribe::decode_subscribe;
-use crate::v5::types::{Auth, ControlPacket, MQTTCodec, MqttString, PacketPart, PacketType};
+use crate::v5::types::{
+    Auth, Connect, ControlPacket, MQTTCodec, MqttString, PacketPart, PacketType, PublishResponse,
+    SubAck,
+};
 use crate::v5::unsubscribe::decode_unsubscribe;
 
 const MIN_FIXED_HEADER_LEN: usize = 2;
@@ -51,17 +52,24 @@ impl Decoder for MQTTCodec {
                 self.part = PacketPart::FixedHeader;
                 let packet = reader.split_to(remaining).freeze();
                 match packet_type {
-                    PacketType::CONNECT => decode_connect(packet),
+                    PacketType::CONNECT => Connect::try_from(packet)
+                        .map(|connect| Some(ControlPacket::Connect(connect))),
                     PacketType::CONNACK => decode_connack(packet),
                     PacketType::PUBLISH { dup, qos, retain } => {
                         decode_publish(dup, qos, retain, packet)
                     }
-                    PacketType::PUBACK => decode_puback(packet),
-                    PacketType::PUBREC => decode_pubrec(packet),
-                    PacketType::PUBREL => decode_pubrel(packet),
-                    PacketType::PUBCOMP => decode_pubcomp(packet),
+                    PacketType::PUBACK => PublishResponse::try_from(packet)
+                        .map(|response| Some(ControlPacket::PubAck(response))),
+                    PacketType::PUBREC => PublishResponse::try_from(packet)
+                        .map(|response| Some(ControlPacket::PubRec(response))),
+                    PacketType::PUBREL => PublishResponse::try_from(packet)
+                        .map(|response| Some(ControlPacket::PubRel(response))),
+                    PacketType::PUBCOMP => PublishResponse::try_from(packet)
+                        .map(|response| Some(ControlPacket::PubComp(response))),
                     PacketType::SUBSCRIBE => decode_subscribe(packet),
-                    PacketType::SUBACK => unimplemented!(),
+                    PacketType::SUBACK => {
+                        SubAck::try_from(packet).map(|s| Some(ControlPacket::SubAck(s)))
+                    }
                     PacketType::UNSUBSCRIBE => decode_unsubscribe(packet),
                     PacketType::UNSUBACK => unimplemented!(),
                     PacketType::PINGREQ => Ok(Some(ControlPacket::PingReq)),

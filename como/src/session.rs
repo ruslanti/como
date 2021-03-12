@@ -21,8 +21,8 @@ use como_mqtt::v5::property::{
     ConnAckProperties, ConnectProperties, PublishProperties, ResponseProperties,
 };
 use como_mqtt::v5::types::{
-    ConnAck, Connect, ControlPacket, Disconnect, MqttString, PacketType, Publish, QoS, ReasonCode,
-    Response, SubAck, Subscribe, SubscriptionOptions, UnSubscribe, Will,
+    ConnAck, Connect, ControlPacket, Disconnect, MqttString, Publish, PublishResponse, QoS,
+    ReasonCode, SubAck, Subscribe, SubscriptionOptions, UnSubscribe, Will,
 };
 
 use crate::exactly_once::{exactly_once_client, exactly_once_server};
@@ -40,7 +40,7 @@ struct SubscriptionKey<'a> {
 pub struct TopicMessage {
     id: u64,
     topic_name: String,
-    subscription_qos: QoS,
+    option: SubscriptionOptions,
     msg: PubMessage,
 }
 
@@ -53,12 +53,13 @@ pub enum SessionEvent {
 #[derive(Debug, Eq, PartialEq)]
 pub enum PublishEvent {
     Publish(Publish),
-    PubRec(Response),
-    PubRel(Response),
-    PubComp(Response),
+    PubRec(PublishResponse),
+    PubRel(PublishResponse),
+    PubComp(PublishResponse),
 }
 
 trait Subscriptions {
+    fn get_subscription(&self, topic_filter: &[u8]) -> Result<Option<SubscriptionOptions>>;
     fn store_subscription(&self, topic_filter: &[u8], option: &SubscriptionOptions) -> Result<()>;
     fn remove_subscription(&self, topic_filter: &[u8]) -> Result<bool>;
     fn list_subscriptions(&self) -> Result<Vec<(IVec, SubscriptionOptions)>>;
@@ -127,7 +128,7 @@ impl Session {
     async fn publish_client(&mut self, event: TopicMessage) -> Option<ControlPacket> {
         let msg = event.msg;
         let packet_identifier = self.packet_identifier_seq.clone();
-        let qos = min(msg.qos, event.subscription_qos);
+        let qos = min(msg.qos, event.option.qos);
         let packet_identifier = if QoS::AtMostOnce == qos {
             None
         } else {
@@ -218,8 +219,21 @@ impl Session {
                 match res {
                     Ok(topic_name) => {
                         debug!("new topic event: {}", topic_name);
-                        for (topic_filter, _option) in self.topic_filters.iter() {
+                        for (topic_filter, unsubscribes) in self.topic_filters.iter() {
                             if Topics::match_filter(topic_name.as_str(), topic_filter.as_str())? {
+                                debug!("topic: {} match topic filter: {}", topic_name.as_str(),
+                                topic_filter.as_str());
+                                if let Some(options) = self.get_subscription(topic_filter.as_bytes()
+                                )? {
+                                    match self.subscribe_topic(topic_filter, options).await {
+                                        Ok((_, unsubscribe)) => {
+                                            unsubscribes.extend(unsubscribe);
+                                        }
+                                        Err(err) => {
+                                            warn!(cause = ?err, "subscribe error: ");
+                                         }
+                                    }
+                                }
 
                             }
                         }
@@ -236,7 +250,7 @@ impl Session {
         let session_state = self.acquire(clean_start).context("acquire session")?;
         self.start_monitor();
 
-        if let Some(session_state) = session_state {
+        if let Some(_session_state) = session_state {
             if clean_start {
                 let removed = self.clear_subscriptions().context("clean start session")?;
                 info!("removed {} subscriptions", removed);
@@ -339,8 +353,7 @@ impl Session {
                 if let Some(packet_identifier) = msg.packet_identifier {
                     //TODO handler error
                     self.topics.publish(msg).await?;
-                    let ack = ControlPacket::PubAck(Response {
-                        packet_type: PacketType::PUBACK,
+                    let ack = ControlPacket::PubAck(PublishResponse {
                         packet_identifier,
                         reason_code: ReasonCode::Success,
                         properties: ResponseProperties {
@@ -403,13 +416,13 @@ impl Session {
     }
 
     #[instrument(skip(self), err)]
-    async fn puback(&self, msg: Response) -> Result<Option<ControlPacket>> {
+    async fn puback(&self, msg: PublishResponse) -> Result<Option<ControlPacket>> {
         trace!("{:?}", msg);
         Ok(None)
     }
 
     #[instrument(skip(self), err)]
-    async fn pubrel(&self, msg: Response) -> Result<Option<ControlPacket>> {
+    async fn pubrel(&self, msg: PublishResponse) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.server_flows.get(&msg.packet_identifier) {
             tx.clone()
                 .send(PublishEvent::PubRel(msg))
@@ -426,7 +439,7 @@ impl Session {
     }
 
     #[instrument(skip(self), err)]
-    async fn pubrec(&self, msg: Response) -> Result<Option<ControlPacket>> {
+    async fn pubrec(&self, msg: PublishResponse) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.client_flows.get(&msg.packet_identifier) {
             tx.clone()
                 .send(PublishEvent::PubRec(msg))
@@ -443,7 +456,7 @@ impl Session {
     }
 
     #[instrument(skip(self), err)]
-    async fn pubcomp(&self, msg: Response) -> Result<Option<ControlPacket>> {
+    async fn pubcomp(&self, msg: PublishResponse) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.client_flows.get(&msg.packet_identifier) {
             tx.clone()
                 .send(PublishEvent::PubComp(msg))
@@ -481,7 +494,7 @@ impl Session {
                             .send(SessionEvent::TopicMessage(TopicMessage {
                                 id,
                                 topic_name: topic_name.to_owned(),
-                                subscription_qos: option.qos,
+                                option: option.clone(),
                                 msg,
                             }))
                             .await
@@ -498,10 +511,11 @@ impl Session {
     }
 
     async fn subscribe_topic(
-        &mut self,
+        &self,
         topic_filter: &str,
         options: SubscriptionOptions,
-    ) -> Result<ReasonCode> {
+    ) -> Result<(ReasonCode, Vec<oneshot::Sender<()>>)> {
+        let mut unsubscribes = vec![];
         let channels = self.topics.subscribe(topic_filter).await?;
         trace!("subscribe returns {} subscriptions", channels.len());
         let reason_code = match options.qos {
@@ -509,17 +523,10 @@ impl Session {
             QoS::AtLeastOnce => ReasonCode::GrantedQoS1,
             QoS::ExactlyOnce => ReasonCode::GrantedQoS2,
         };
-        // add a subscription record in sled db
-        self.store_subscription(topic_filter.as_ref(), options.borrow())?;
-
-        let subscriptions = self
-            .topic_filters
-            .entry(topic_filter.to_owned())
-            .or_insert(vec![]);
 
         for (topic, subscriber) in channels {
             let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
-            subscriptions.push(unsubscribe_tx);
+            unsubscribes.push(unsubscribe_tx);
             let session = self.id.to_owned();
             let subscription_tx = self.session_event_tx.clone();
             let options = options.to_owned();
@@ -538,7 +545,7 @@ impl Session {
             });
         }
 
-        Ok(reason_code)
+        Ok((reason_code, unsubscribes))
     }
 
     #[instrument(skip(self, msg), err)]
@@ -546,14 +553,23 @@ impl Session {
         debug!("subscribe topic filters: {:?}", msg.topic_filters);
         let mut reason_codes = Vec::new();
         for (topic_filter, options) in msg.topic_filters {
+            // add a subscription record in sled db
+            self.store_subscription(topic_filter.as_ref(), options.borrow())?;
             let topic_filter = std::str::from_utf8(&topic_filter[..])?;
-            reason_codes.push(match self.subscribe_topic(topic_filter, options).await {
-                Ok(reason_code) => reason_code,
+            match self.subscribe_topic(topic_filter, options).await {
+                Ok((reason_code, unsubscribe)) => {
+                    let unsubscribes = self
+                        .topic_filters
+                        .entry(topic_filter.to_owned())
+                        .or_insert(vec![]);
+                    unsubscribes.extend(unsubscribe);
+                    reason_codes.push(reason_code);
+                }
                 Err(err) => {
                     warn!(cause = ?err, "subscribe error: ");
-                    ReasonCode::TopicFilterInvalid
+                    reason_codes.push(ReasonCode::TopicFilterInvalid);
                 }
-            });
+            }
         }
 
         let suback = ControlPacket::SubAck(SubAck {
@@ -767,6 +783,17 @@ impl SessionContext for Session {
 }
 
 impl Subscriptions for Session {
+    fn get_subscription(&self, topic_filter: &[u8]) -> Result<Option<SubscriptionOptions>> {
+        let key = SubscriptionKey {
+            session: self.id.as_ref(),
+            topic_filter,
+        };
+        self.subscriptions_db
+            .get(bincode::serialize(&key)?)
+            .map(|o| o.map(|value| SubscriptionOptions::try_from(value.as_ref())?))
+            .map_err(Error::msg)
+    }
+
     fn store_subscription(&self, topic_filter: &[u8], option: &SubscriptionOptions) -> Result<()> {
         let key = SubscriptionKey {
             session: self.id.as_ref(),

@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{instrument, trace};
 
-use como_mqtt::v5::types::{ControlPacket, MqttString, PacketType, ReasonCode, Response};
+use como_mqtt::v5::types::{ControlPacket, MqttString, PublishResponse, ReasonCode};
 
 use crate::session::PublishEvent;
 use crate::topic::Topics;
@@ -18,8 +18,7 @@ pub async fn exactly_once_client(
 ) -> Result<()> {
     if let Some(event) = rx.recv().await {
         if let PublishEvent::PubRec(_msg) = event {
-            let rel = ControlPacket::PubRel(Response {
-                packet_type: PacketType::PUBREL,
+            let rel = ControlPacket::PubRel(PublishResponse {
                 packet_identifier,
                 reason_code: ReasonCode::Success,
                 properties: Default::default(),
@@ -52,8 +51,7 @@ pub async fn exactly_once_server(
         if let PublishEvent::Publish(msg) = event {
             //TODO handler error
             root.publish(msg).await?;
-            let rec = ControlPacket::PubRec(Response {
-                packet_type: PacketType::PUBREC,
+            let rec = ControlPacket::PubRec(PublishResponse {
                 packet_identifier,
                 reason_code: ReasonCode::Success,
                 properties: Default::default(),
@@ -64,8 +62,7 @@ pub async fn exactly_once_server(
                 Some(PublishEvent::PubRel(rel)) => {
                     trace!("{:?}", rel);
                     //TODO discard packet identifier
-                    let comp = ControlPacket::PubComp(Response {
-                        packet_type: PacketType::PUBCOMP,
+                    let comp = ControlPacket::PubComp(PublishResponse {
                         packet_identifier,
                         reason_code: ReasonCode::Success,
                         properties: Default::default(),

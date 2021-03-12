@@ -122,9 +122,9 @@ impl TryFrom<u8> for Retain {
     }
 }
 
-impl Into<u8> for Retain {
-    fn into(self) -> u8 {
-        match self {
+impl From<Retain> for u8 {
+    fn from(value: Retain) -> Self {
+        match value {
             Retain::SendAtTime => 0,
             Retain::SendAtSubscribe => 1,
             Retain::DoNotSend => 2,
@@ -363,8 +363,7 @@ pub struct Publish {
 }
 
 #[derive(Eq, PartialEq)]
-pub struct Response {
-    pub packet_type: PacketType,
+pub struct PublishResponse {
     pub packet_identifier: u16,
     pub reason_code: ReasonCode,
     pub properties: ResponseProperties,
@@ -416,10 +415,10 @@ pub enum ControlPacket {
     Connect(Connect),
     ConnAck(ConnAck),
     Publish(Publish),
-    PubAck(Response),
-    PubRec(Response),
-    PubRel(Response),
-    PubComp(Response),
+    PubAck(PublishResponse),
+    PubRec(PublishResponse),
+    PubRel(PublishResponse),
+    PubComp(PublishResponse),
     Subscribe(Subscribe),
     SubAck(SubAck),
     UnSubscribe(UnSubscribe),
@@ -553,7 +552,7 @@ impl fmt::Debug for Publish {
     }
 }
 
-impl fmt::Debug for Response {
+impl fmt::Debug for PublishResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("");
         debug_struct.field("reason_code", &self.reason_code);
@@ -572,6 +571,7 @@ impl fmt::Debug for Disconnect {
 impl fmt::Debug for Subscribe {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("SUBSCRIBE");
+        debug_struct.field("packet_identifier", &self.packet_identifier);
         debug_struct.field("topic_filters", &self.topic_filters);
         debug_struct.finish()
     }
@@ -597,6 +597,34 @@ impl fmt::Debug for Auth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("AUTH");
         debug_struct.finish()
+    }
+}
+
+impl TryFrom<u8> for SubscriptionOptions {
+    type Error = Error;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        let qos: QoS = (value & 0b00000011).try_into()?;
+        let nl = ((value & 0b00000100) >> 2) != 0;
+        let rap = ((value & 0b00001000) >> 3) != 0;
+        let retain: Retain = ((value & 0b00110000) >> 4).try_into()?;
+        Ok(SubscriptionOptions {
+            qos,
+            nl,
+            rap,
+            retain,
+        })
+    }
+}
+
+impl From<SubscriptionOptions> for u8 {
+    fn from(value: SubscriptionOptions) -> Self {
+        let mut option = 0b0000_0000;
+        option |= u8::from(value.qos);
+        option |= (value.nl as u8) << 2;
+        option |= (value.rap as u8) << 3;
+        option |= u8::from(value.retain) << 4;
+        option
     }
 }
 

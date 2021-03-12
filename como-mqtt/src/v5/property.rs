@@ -317,6 +317,15 @@ impl Default for DisconnectProperties {
     }
 }
 
+impl Default for SubscribeProperties {
+    fn default() -> Self {
+        SubscribeProperties {
+            subscription_identifier: None,
+            user_properties: vec![],
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PropertiesBuilder {
     payload_format_indicator: Option<bool>,

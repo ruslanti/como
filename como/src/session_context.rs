@@ -3,11 +3,8 @@ use std::net::SocketAddr;
 
 use anyhow::Error;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sled::{IVec, Tree};
-
-use crate::session::Session;
+use sled::IVec;
 
 pub(crate) trait SessionContext {
     fn acquire(&self, clean_start: bool) -> Result<Option<SessionState>>;

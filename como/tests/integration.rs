@@ -10,8 +10,8 @@ use tokio::task::JoinHandle;
 
 use como::service;
 use como::settings::Settings;
-use como_mqtt::client::ClientBuilder;
-use como_mqtt::v5::types::{ControlPacket, ReasonCode};
+use como_mqtt::client::MqttClient;
+use como_mqtt::v5::types::{ControlPacket, QoS, ReasonCode};
 
 static ONCE: Once = Once::new();
 
@@ -40,8 +40,8 @@ async fn connect_clean_session() -> anyhow::Result<()> {
     let (port, shutdown_notify, handle) = start_test_broker().await;
     // println!("connect_clean_session end");
 
-    let mut client = ClientBuilder::new(&format!("127.0.0.1:{}", port))
-        .client()
+    let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
+        .build()
         .await?;
 
     let ack = assert_ok!(client.connect(true).await);
@@ -74,10 +74,10 @@ async fn connect_clean_session() -> anyhow::Result<()> {
 #[tokio::test]
 async fn connect_existing_session() -> anyhow::Result<()> {
     let (port, shutdown_notify, handle) = start_test_broker().await;
-    let mut client = ClientBuilder::new(&format!("127.0.0.1:{}", port))
+    let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .client_id("connect_existing_session")
         .session_expire_interval(10)
-        .client()
+        .build()
         .await?;
 
     // Initial #1 connection
@@ -86,9 +86,9 @@ async fn connect_existing_session() -> anyhow::Result<()> {
     assert_none!(ack.properties.assigned_client_identifier);
     assert_none!(ack.properties.session_expire_interval);
 
-    let mut client2 = ClientBuilder::new(&format!("127.0.0.1:{}", port))
+    let mut client2 = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .client_id("connect_existing_session")
-        .client()
+        .build()
         .await?;
     // #2 connection take over the session from #1
     let ack = assert_ok!(client2.connect(true).await);
@@ -100,20 +100,20 @@ async fn connect_existing_session() -> anyhow::Result<()> {
     assert_none!(client2.disconnect().await?);
 
     // #3 connection
-    let mut client3 = ClientBuilder::new(&format!("127.0.0.1:{}", port))
+    let mut client3 = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .client_id("connect_existing_session")
         .session_expire_interval(10)
-        .client()
+        .build()
         .await?;
     let ack = assert_ok!(client3.connect(false).await);
     assert!(!ack.session_present);
 
     assert_none!(client3.disconnect().await?);
 
-    let mut client4 = ClientBuilder::new(&format!("127.0.0.1:{}", port))
+    let mut client4 = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .client_id("connect_existing_session")
         .session_expire_interval(10)
-        .client()
+        .build()
         .await?;
     // #4 connection after #3 disconnect with 10 sec session_expire
     let ack = assert_ok!(client4.connect(false).await);
@@ -121,6 +121,45 @@ async fn connect_existing_session() -> anyhow::Result<()> {
 
     assert_none!(client4.disconnect().await?);
 
+    drop(shutdown_notify);
+    handle.await?
+}
+
+#[tokio::test]
+async fn publish_subscribe() -> anyhow::Result<()> {
+    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
+        .session_expire_interval(10)
+        .build()
+        .await?;
+
+    let ack = assert_ok!(client.connect(false).await);
+    assert!(!ack.session_present);
+    assert_some!(ack.properties.assigned_client_identifier);
+
+    let ack = assert_ok!(
+        client
+            .subscribe(QoS::AtMostOnce, String::from("topic/A"))
+            .await
+    );
+    assert_eq!(ack.reason_codes, vec![ReasonCode::Success]);
+
+    assert_ok!(
+        client
+            .publish_most_once(false, String::from("topic/A"), Vec::from("payload01"))
+            .await
+    );
+
+    assert_ok!(
+        client
+            .publish_most_once(false, String::from("topic/A"), Vec::from("payload02"))
+            .await
+    );
+
+    let msg = assert_ok!(client.recv().await);
+    assert_matches!(msg, ControlPacket::Publish(_));
+
+    assert_none!(client.disconnect().await?);
     drop(shutdown_notify);
     handle.await?
 }

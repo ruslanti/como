@@ -12,7 +12,7 @@ impl TryFrom<Bytes> for Auth {
     type Error = anyhow::Error;
 
     fn try_from(mut reader: Bytes) -> Result<Self, Self::Error> {
-        end_of_stream!(reader.remaining() < 1, "auth reason conde");
+        end_of_stream!(reader.remaining() < 1, "auth reason code");
         let reason_code = reader.get_u8().try_into()?;
         let properties_length = decode_variable_integer(&mut reader)? as usize;
         let properties = AuthProperties::try_from(reader.slice(..properties_length))?;

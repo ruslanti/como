@@ -1,14 +1,18 @@
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 
 use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
+use crate::v5::encoder::encode_utf8_string;
+use crate::v5::encoder::encode_variable_integer;
 use crate::v5::encoder::RemainingLength;
-use crate::v5::property::{PropertiesBuilder, PropertiesSize, Property, SubscribeProperties};
+use crate::v5::property::{
+    PropertiesBuilder, PropertiesSize, Property, ResponseProperties, SubscribeProperties,
+};
 use crate::v5::types::{
-    ControlPacket, MQTTCodec, MqttString, QoS, Retain, SubAck, Subscribe, SubscriptionOptions,
+    ControlPacket, MQTTCodec, MqttString, ReasonCode, SubAck, Subscribe, SubscriptionOptions,
 };
 
 pub fn decode_subscribe(mut reader: Bytes) -> Result<Option<ControlPacket>> {
@@ -55,20 +59,8 @@ pub fn decode_subscribe_payload(
     while reader.has_remaining() {
         if let Some(topic) = decode_utf8_string(&mut reader)? {
             end_of_stream!(reader.remaining() < 1, "subscription option");
-            let subscription_option = reader.get_u8();
-            let qos: QoS = (subscription_option & 0b00000011).try_into()?;
-            let nl = ((subscription_option & 0b00000100) >> 2) != 0;
-            let rap = ((subscription_option & 0b00001000) >> 3) != 0;
-            let retain: Retain = ((subscription_option & 0b00110000) >> 4).try_into()?;
-            topic_filter.push((
-                topic,
-                SubscriptionOptions {
-                    qos,
-                    nl,
-                    rap,
-                    retain,
-                },
-            ))
+            let subscription_option = SubscriptionOptions::try_from(reader.get_u8())?;
+            topic_filter.push((topic, subscription_option))
         } else {
             bail!("empty topic filter");
         }
@@ -78,23 +70,70 @@ pub fn decode_subscribe_payload(
 
 impl RemainingLength for Subscribe {
     fn remaining_length(&self) -> usize {
-        unimplemented!()
+        let len = self.properties.size();
+        2 + len.size()
+            + len
+            + self
+                .topic_filters
+                .iter()
+                .map(|(topic_filter, _)| 2 + topic_filter.len() + std::mem::size_of::<u8>())
+                .sum::<usize>()
+    }
+}
+
+impl PropertiesSize for SubscribeProperties {
+    fn size(&self) -> usize {
+        let mut len = 0;
+        if let Some(id) = self.subscription_identifier {
+            len += (id as usize).size();
+        };
+        len += self
+            .user_properties
+            .iter()
+            .map(|(x, y)| 5 + x.len() + y.len())
+            .sum::<usize>();
+        len
     }
 }
 
 impl Encoder<Subscribe> for MQTTCodec {
     type Error = anyhow::Error;
 
-    fn encode(&mut self, _item: Subscribe, _dst: &mut BytesMut) -> Result<(), Self::Error> {
-        unimplemented!()
+    fn encode(&mut self, msg: Subscribe, writer: &mut BytesMut) -> Result<(), Self::Error> {
+        writer.put_u16(msg.packet_identifier);
+        self.encode(msg.properties, writer)?;
+        for (topic_filter, subscription_option) in msg.topic_filters {
+            self.encode(topic_filter, writer)?;
+            writer.put_u8(u8::from(subscription_option))
+        }
+        Ok(())
+    }
+}
+
+impl Encoder<SubscribeProperties> for MQTTCodec {
+    type Error = anyhow::Error;
+
+    fn encode(
+        &mut self,
+        properties: SubscribeProperties,
+        writer: &mut BytesMut,
+    ) -> Result<(), Self::Error> {
+        self.encode(properties.size(), writer)?;
+        encode_property_variable_integer!(
+            writer,
+            SubscriptionIdentifier,
+            properties.subscription_identifier
+        );
+        encode_property_user_properties!(writer, UserProperty, properties.user_properties);
+        Ok(())
     }
 }
 
 impl RemainingLength for SubAck {
     fn remaining_length(&self) -> usize {
-        let properties_length = self.properties.size();
-        2 + properties_length.size()
-            + properties_length
+        let len = self.properties.size();
+        2 + len.size()
+            + len
             + self
                 .reason_codes
                 .iter()
@@ -113,5 +152,25 @@ impl Encoder<SubAck> for MQTTCodec {
             writer.put_u8(reason_code.into())
         }
         Ok(())
+    }
+}
+
+impl TryFrom<Bytes> for SubAck {
+    type Error = anyhow::Error;
+
+    fn try_from(mut reader: Bytes) -> Result<Self, Self::Error> {
+        end_of_stream!(reader.remaining() < 2, "suback packet_identifier");
+        let packet_identifier = reader.get_u16();
+        let properties_length = decode_variable_integer(&mut reader)? as usize;
+        let properties = ResponseProperties::try_from(reader.slice(..properties_length))?;
+        let mut reason_codes = vec![];
+        while reader.has_remaining() {
+            reason_codes.push(ReasonCode::try_from(reader.get_u8())?)
+        }
+        Ok(SubAck {
+            packet_identifier,
+            properties,
+            reason_codes,
+        })
     }
 }

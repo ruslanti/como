@@ -10,10 +10,10 @@ use tokio_util::codec::Framed;
 use tracing::trace;
 
 use crate::identifier::Sequence;
-use crate::v5::property::PropertiesBuilder;
+use crate::v5::property::{PropertiesBuilder, SubscribeProperties};
 use crate::v5::types::{
-    ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, MqttString, Publish, QoS, ReasonCode,
-    Response,
+    ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, MqttString, Publish, PublishResponse,
+    QoS, ReasonCode, Retain, SubAck, Subscribe, SubscriptionOptions,
 };
 
 pub struct MqttClient {
@@ -32,7 +32,16 @@ pub struct ClientBuilder<'a> {
     properties_builder: PropertiesBuilder,
 }
 
-impl MqttClient {
+impl<'a> MqttClient {
+    pub fn builder(address: &'a str) -> ClientBuilder {
+        ClientBuilder {
+            address,
+            client_id: None,
+            keep_alive: None,
+            properties_builder: PropertiesBuilder::new(),
+        }
+    }
+
     pub async fn connect(&mut self, clean_start: bool) -> Result<ConnAck> {
         let connect = Connect {
             clean_start_flag: clean_start,
@@ -104,7 +113,7 @@ impl MqttClient {
         retain: bool,
         topic_name: String,
         payload: Vec<u8>,
-    ) -> Result<Response> {
+    ) -> Result<PublishResponse> {
         let packet_identifier = self.packet_identifier.next()?;
         let publish = Publish {
             dup: false,
@@ -123,21 +132,33 @@ impl MqttClient {
         })
     }
 
-    pub async fn subscribe() -> Result<()> {
-        Ok(())
+    pub async fn subscribe(&mut self, qos: QoS, topic_filter: String) -> Result<SubAck> {
+        let packet_identifier = self.packet_identifier.next()?;
+        let subscribe = Subscribe {
+            packet_identifier: packet_identifier.value(),
+            properties: SubscribeProperties::default(),
+            topic_filters: vec![(
+                Bytes::from(topic_filter),
+                SubscriptionOptions {
+                    qos,
+                    nl: false,
+                    rap: false,
+                    retain: Retain::SendAtTime,
+                },
+            )],
+        };
+        trace!("send {:?}", subscribe);
+        self.stream
+            .send(ControlPacket::Subscribe(subscribe))
+            .await?;
+        self.recv().await.and_then(|packet| match packet {
+            ControlPacket::SubAck(ack) => Ok(ack),
+            _ => Err(anyhow!("unexpected: {:?}", packet)),
+        })
     }
 }
 
-impl<'a> ClientBuilder<'a> {
-    pub fn new(address: &'a str) -> Self {
-        ClientBuilder {
-            address,
-            client_id: None,
-            keep_alive: None,
-            properties_builder: PropertiesBuilder::new(),
-        }
-    }
-
+impl ClientBuilder<'_> {
     pub fn client_id(mut self, value: &'static str) -> Self {
         self.client_id = Some(MqttString::from(value));
         self
@@ -156,7 +177,7 @@ impl<'a> ClientBuilder<'a> {
         self
     }
 
-    pub async fn client(self) -> Result<MqttClient> {
+    pub async fn build(self) -> Result<MqttClient> {
         let peer: SocketAddr = self.address.parse()?;
         let socket = if peer.is_ipv4() {
             TcpSocket::new_v4()?
