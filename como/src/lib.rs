@@ -1,5 +1,4 @@
 mod connection;
-mod context;
 mod exactly_once;
 pub mod service;
 mod session;

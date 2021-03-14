@@ -9,7 +9,7 @@ use tokio::time::{sleep, Duration};
 use tracing::{error, info, instrument, warn};
 
 use crate::connection::ConnectionHandler;
-use crate::context::AppContext;
+use crate::session_context::SessionContext;
 use crate::settings::Settings;
 use crate::shutdown::Shutdown;
 use crate::tls_service::TlsTransport;
@@ -25,7 +25,7 @@ struct TcpTransport {
     limit_connections: Arc<Semaphore>,
     notify_shutdown: broadcast::Sender<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
-    context: Arc<AppContext>,
+    context: Arc<SessionContext>,
     ready: Arc<Barrier>,
 }
 
@@ -41,7 +41,7 @@ pub async fn run_with_ready(
 ) -> Result<()> {
     let limit_connections = Arc::new(Semaphore::new(settings.service.max_connections));
 
-    let context = Arc::new(AppContext::new(settings)?);
+    let context = Arc::new(SessionContext::new(settings)?);
 
     let (notify_shutdown, _) = broadcast::channel(1);
     let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel(1);
@@ -55,7 +55,7 @@ pub async fn run_with_ready(
         ready.clone(),
     );
 
-    let use_tls = context.config.service.tls.is_some();
+    let use_tls = context.settings.service.tls.is_some();
     let mut tls_transport = TlsTransport::new(
         limit_connections.clone(),
         notify_shutdown.clone(),
@@ -134,7 +134,7 @@ impl TcpTransport {
         limit_connections: Arc<Semaphore>,
         notify_shutdown: broadcast::Sender<()>,
         shutdown_complete_tx: mpsc::Sender<()>,
-        context: Arc<AppContext>,
+        context: Arc<SessionContext>,
         ready: Arc<Barrier>,
     ) -> Self {
         TcpTransport {
@@ -148,10 +148,8 @@ impl TcpTransport {
 
     #[instrument(skip(self), err)]
     async fn listen(&mut self) -> Result<()> {
-        let address = format!(
-            "{}:{}",
-            self.context.config.service.bind, self.context.config.service.port
-        );
+        let transport = self.context.settings.service.borrow();
+        let address = format!("{}:{}", transport.bind, transport.port);
         let listener = TcpListener::bind(&address).await?;
         self.ready.wait().await;
         info!("accepting inbound connections: {}", address);

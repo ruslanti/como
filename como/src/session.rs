@@ -1,7 +1,6 @@
 use std::borrow::Borrow;
 use std::cmp::min;
 use std::collections::HashMap;
-use std::convert::{TryFrom, TryInto};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
@@ -10,9 +9,8 @@ use anyhow::{anyhow, Context, Error, Result};
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::Bytes;
 use chrono::{Duration, Utc};
-use nom::AsBytes;
 use serde::{Deserialize, Serialize};
-use sled::{Batch, Event, IVec, Subscriber, Tree};
+use sled::{Event, Subscriber, Tree};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, field, info, instrument, trace, warn};
@@ -21,20 +19,13 @@ use como_mqtt::v5::property::{
     ConnAckProperties, ConnectProperties, PublishProperties, ResponseProperties,
 };
 use como_mqtt::v5::types::{
-    ConnAck, Connect, ControlPacket, Disconnect, MqttString, Publish, PublishResponse, QoS,
-    ReasonCode, SubAck, Subscribe, SubscriptionOptions, UnSubscribe, Will,
+    ConnAck, Connect, ControlPacket, Disconnect, Publish, PublishResponse, QoS, ReasonCode, SubAck,
+    Subscribe, SubscriptionOptions, UnSubscribe, Will,
 };
 
 use crate::exactly_once::{exactly_once_client, exactly_once_server};
-use crate::session_context::{SessionContext, SessionState};
-use crate::settings::Connection;
+use crate::session_context::{SessionContext, SessionState, SessionStore, SubscriptionsStore};
 use crate::topic::{PubMessage, Topics};
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SubscriptionKey<'a> {
-    session: &'a [u8],
-    topic_filter: &'a [u8],
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TopicMessage {
@@ -58,17 +49,9 @@ pub enum PublishEvent {
     PubComp(PublishResponse),
 }
 
-trait Subscriptions {
-    fn get_subscription(&self, topic_filter: &[u8]) -> Result<Option<SubscriptionOptions>>;
-    fn store_subscription(&self, topic_filter: &[u8], option: &SubscriptionOptions) -> Result<()>;
-    fn remove_subscription(&self, topic_filter: &[u8]) -> Result<bool>;
-    fn list_subscriptions(&self) -> Result<Vec<(IVec, SubscriptionOptions)>>;
-    fn clear_subscriptions(&self) -> Result<usize>;
-}
-
 #[derive(Debug)]
 pub(crate) struct Session {
-    id: MqttString,
+    client_id: String,
     response_tx: Sender<ControlPacket>,
     session_event_tx: Sender<SessionEvent>,
     session_event_rx: Receiver<SessionEvent>,
@@ -76,34 +59,29 @@ pub(crate) struct Session {
     properties: ConnectProperties,
     will: Option<Will>,
     session_expire_interval: Option<u32>,
-    config: Connection,
     server_flows: HashMap<u16, Sender<PublishEvent>>,
     client_flows: HashMap<u16, Sender<PublishEvent>>,
     topics: Arc<Topics>,
     packet_identifier_seq: Arc<AtomicU16>,
-    sessions_db: Tree,
-    subscriptions_db: Tree,
+    context: Arc<SessionContext>,
     topic_filters: HashMap<String, (SubscriptionOptions, Vec<oneshot::Sender<()>>)>,
     topic_event: broadcast::Receiver<(String, Tree)>,
 }
 
 impl Session {
     pub fn new(
-        id: MqttString,
+        id: String,
         response_tx: Sender<ControlPacket>,
         peer: SocketAddr,
         properties: ConnectProperties,
         will: Option<Will>,
-        config: Connection,
-        topic_manager: Arc<Topics>,
-        sessions_db: Tree,
-        subscriptions_db: Tree,
+        context: Arc<SessionContext>,
     ) -> Self {
         info!("new session: {:?}", id);
         let (session_event_tx, session_event_rx) = mpsc::channel(32);
-        let topic_event = topic_manager.topic_event();
+        let topic_event = context.topic_manager.topic_event();
         Self {
-            id,
+            client_id: id,
             //created: Instant::now(),
             response_tx,
             session_event_tx,
@@ -112,19 +90,17 @@ impl Session {
             properties,
             will,
             session_expire_interval: None,
-            config,
             server_flows: HashMap::new(),
             client_flows: HashMap::new(),
-            topics: topic_manager,
+            topics: context.topic_manager.clone(),
             packet_identifier_seq: Arc::new(AtomicU16::new(1)),
-            sessions_db,
-            subscriptions_db,
+            context,
             topic_filters: HashMap::new(),
             topic_event,
         }
     }
 
-    #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)))]
+    #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)))]
     async fn publish_client(&mut self, event: TopicMessage) -> Option<ControlPacket> {
         let msg = event.msg;
         let packet_identifier = self.packet_identifier_seq.clone();
@@ -167,11 +143,10 @@ impl Session {
             let packet_identifier = packet_identifier.unwrap();
             self.client_flows.insert(packet_identifier, tx);
             let response_tx = self.response_tx.clone();
-            let session = self.id.clone();
+            let client_id = self.client_id.clone();
             tokio::spawn(async move {
                 if let Err(err) =
-                    exactly_once_client(session.to_owned(), packet_identifier, rx, response_tx)
-                        .await
+                    exactly_once_client(client_id, packet_identifier, rx, response_tx).await
                 {
                     error!(cause = ?err, "QoS 2 protocol error: {}", err);
                 }
@@ -200,7 +175,7 @@ impl Session {
 
     async fn handle_topic_event(&mut self, topic_name: String, log: Tree) {
         debug!("new topic event: {}", topic_name);
-        let session = self.id.clone();
+        let session = self.client_id.clone();
         let subscription_tx = self.session_event_tx.clone();
         self.topic_filters
             .iter_mut()
@@ -229,7 +204,7 @@ impl Session {
             });
     }
 
-    #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
+    #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)), err)]
     pub async fn session(&mut self) -> Result<Option<ControlPacket>> {
         tokio::select! {
             res = self.session_event_rx.recv() => {
@@ -256,18 +231,38 @@ impl Session {
         Ok(None)
     }
 
-    #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
+    #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)), err)]
     fn init(&mut self, clean_start: bool) -> Result<bool> {
-        let session_state = self.acquire(clean_start).context("acquire session")?;
-        self.start_monitor();
+        let session_state = self
+            .context
+            .acquire(self.client_id.as_str(), self.peer, clean_start)
+            .context("acquire session")?;
+        self.context.start_monitor(
+            self.client_id.as_str(),
+            self.peer,
+            self.session_event_tx.clone(),
+        );
 
         if let Some(_session_state) = session_state {
             if clean_start {
-                let removed = self.clear_subscriptions().context("clean start session")?;
+                let removed = self
+                    .context
+                    .clear_subscriptions(self.client_id.as_str())
+                    .context(
+                        "clean \
+                start \
+                session",
+                    )?;
                 info!("removed {} subscriptions", removed);
             } else {
                 // load session state
-                let subscriptions = self.list_subscriptions().context("list subscriptions")?;
+                let subscriptions = self
+                    .context
+                    .list_subscriptions(self.client_id.as_str())
+                    .context(
+                        "list \
+                subscriptions",
+                    )?;
                 for (topic_filter, option) in subscriptions {
                     debug!("subscribe {:?}:{:?}", topic_filter, option);
                 }
@@ -279,7 +274,7 @@ impl Session {
         }
     }
 
-    #[instrument(skip(self, msg), fields(client_identifier = field::debug(& self.id)), err)]
+    #[instrument(skip(self, msg), fields(client_id = field::debug(& self.client_id)), err)]
     async fn connect(&mut self, msg: Connect) -> Result<Option<ControlPacket>> {
         match self.init(msg.clean_start_flag) {
             Ok(session_present) => {
@@ -287,30 +282,32 @@ impl Session {
                 let assigned_client_identifier = if msg.client_identifier.is_some() {
                     None
                 } else {
-                    Some(self.id.clone())
+                    Some(Bytes::from(self.client_id.to_owned()))
                 };
 
-                let maximum_qos = if let Some(QoS::ExactlyOnce) = self.config.maximum_qos {
-                    None
-                } else {
-                    self.config.maximum_qos
-                };
+                let maximum_qos =
+                    if let Some(QoS::ExactlyOnce) = self.context.settings.connection.maximum_qos {
+                        None
+                    } else {
+                        self.context.settings.connection.maximum_qos
+                    };
 
                 trace!(
                     "config {:?}, connect {:?}",
-                    self.config.session_expire_interval,
+                    self.context.settings.connection.session_expire_interval,
                     msg.properties.session_expire_interval
                 );
-                let session_expire_interval =
-                    if let Some(server_expire) = self.config.session_expire_interval {
-                        if let Some(client_expire) = msg.properties.session_expire_interval {
-                            Some(min(server_expire, client_expire))
-                        } else {
-                            Some(server_expire)
-                        }
+                let session_expire_interval = if let Some(server_expire) =
+                    self.context.settings.connection.session_expire_interval
+                {
+                    if let Some(client_expire) = msg.properties.session_expire_interval {
+                        Some(min(server_expire, client_expire))
                     } else {
-                        None
-                    };
+                        Some(server_expire)
+                    }
+                } else {
+                    None
+                };
                 self.session_expire_interval =
                     session_expire_interval.or(msg.properties.session_expire_interval);
 
@@ -319,18 +316,18 @@ impl Session {
                     reason_code: ReasonCode::Success,
                     properties: ConnAckProperties {
                         session_expire_interval,
-                        receive_maximum: self.config.receive_maximum,
+                        receive_maximum: self.context.settings.connection.receive_maximum,
                         maximum_qos,
-                        retain_available: self.config.retain_available,
-                        maximum_packet_size: self.config.maximum_packet_size,
+                        retain_available: self.context.settings.connection.retain_available,
+                        maximum_packet_size: self.context.settings.connection.maximum_packet_size,
                         assigned_client_identifier,
-                        topic_alias_maximum: self.config.topic_alias_maximum,
+                        topic_alias_maximum: self.context.settings.connection.topic_alias_maximum,
                         reason_string: None,
                         user_properties: vec![],
                         wildcard_subscription_available: None,
                         subscription_identifier_available: None,
                         shared_subscription_available: None,
-                        server_keep_alive: self.config.server_keep_alive,
+                        server_keep_alive: self.context.settings.connection.server_keep_alive,
                         response_information: None,
                         server_reference: None,
                         authentication_method: None,
@@ -352,7 +349,7 @@ impl Session {
         }
     }
 
-    #[instrument(skip(self, msg), fields(client_identifier = field::debug(& self.id)), err)]
+    #[instrument(skip(self, msg), fields(client_id = field::debug(& self.client_id)), err)]
     async fn publish(&mut self, msg: Publish) -> Result<Option<ControlPacket>> {
         match msg.qos {
             //TODO handler error
@@ -389,9 +386,9 @@ impl Session {
                         Ok(Some(disconnect))
                         //self.response_tx.send(disconnect).await?;
                     } else if self.server_flows.len()
-                        < self.config.receive_maximum.unwrap() as usize
+                        < self.context.settings.connection.receive_maximum.unwrap() as usize
                     {
-                        let session = self.id.clone();
+                        let session = self.client_id.clone();
                         let (tx, rx) = mpsc::channel(1);
                         let root = self.topics.clone();
                         let response_tx = self.response_tx.clone();
@@ -485,7 +482,7 @@ impl Session {
 
     #[instrument(skip(option, subscriber, session_event_tx))]
     pub async fn subscription(
-        client_identifier: MqttString,
+        client_id: String,
         option: SubscriptionOptions,
         session_event_tx: Sender<SessionEvent>,
         topic_name: String,
@@ -537,7 +534,7 @@ impl Session {
 
         for (topic_name, subscriber) in channels {
             unsubscribes.push(Self::subscribe_topic(
-                self.id.clone(),
+                self.client_id.clone(),
                 topic_name.to_owned(),
                 options.to_owned(),
                 self.session_event_tx.clone(),
@@ -549,7 +546,7 @@ impl Session {
     }
 
     fn subscribe_topic(
-        session: MqttString,
+        client_id: String,
         topic_name: String,
         options: SubscriptionOptions,
         subscription_tx: Sender<SessionEvent>,
@@ -558,11 +555,11 @@ impl Session {
         let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
         tokio::spawn(async move {
             tokio::select! {
-                Err(err) = Self::subscription(session.to_owned(), options, subscription_tx, topic_name.to_owned(), subscriber) => {
+                Err(err) = Self::subscription(client_id.to_owned(), options, subscription_tx, topic_name.to_owned(), subscriber) => {
                     warn!(cause = ? err, "subscription {} error", topic_name);
                 },
                 _ = unsubscribe_rx => {
-                    debug!("{:?} unsubscribe {}", session, topic_name);
+                    debug!("{:?} unsubscribe {}", client_id, topic_name);
                 }
             }
         });
@@ -575,7 +572,11 @@ impl Session {
         let mut reason_codes = Vec::new();
         for (topic_filter, options) in msg.topic_filters {
             // add a subscription record in sled db
-            self.store_subscription(topic_filter.as_ref(), options.borrow())?;
+            self.context.store_subscription(
+                self.client_id.as_str(),
+                topic_filter.as_ref(),
+                options.borrow(),
+            )?;
             let topic_filter = std::str::from_utf8(&topic_filter[..])?;
             match self
                 .subscribe_topic_filter(topic_filter, options.borrow())
@@ -621,7 +622,8 @@ impl Session {
                     if let Some((_, removed)) = self.topic_filters.remove(topic_filter) {
                         debug!("stop {} subscriptions", removed.len())
                     };
-                    self.remove_subscription(topic_filter.as_ref())?;
+                    self.context
+                        .remove_subscription(self.client_id.as_str(), topic_filter.as_ref())?;
                     ReasonCode::Success
                 }
                 Err(err) => {
@@ -694,198 +696,9 @@ impl Session {
     }
 }
 
-impl SessionContext for Session {
-    fn acquire(&self, clean_start: bool) -> Result<Option<SessionState>> {
-        let update_fn = |old: Option<&[u8]>| -> Option<Vec<u8>> {
-            let session_state = match old {
-                Some(encoded) => {
-                    if let Ok(mut session_state) = SessionState::try_from(encoded) {
-                        session_state.peer = self.peer;
-                        session_state.expire = None;
-                        if clean_start {
-                            session_state.last_topic_id = None;
-                        }
-                        session_state
-                    } else {
-                        SessionState::new(self.peer)
-                    }
-                }
-                None => SessionState::new(self.peer),
-            };
-            session_state.try_into().ok()
-        };
-
-        if let Some(encoded) = self
-            .sessions_db
-            .fetch_and_update(self.id.clone(), update_fn)
-            .map_err(Error::msg)?
-        {
-            Ok(Some(SessionState::try_from(encoded)?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn update(&self, state: SessionState) -> Result<()> {
-        let update_fn = |old: Option<&[u8]>| -> Option<Vec<u8>> {
-            let session_state = match old {
-                Some(encoded) => {
-                    if let Ok(mut session_state) = SessionState::try_from(encoded) {
-                        if state.peer == session_state.peer {
-                            session_state.expire = state.expire;
-                            session_state.last_topic_id = state.last_topic_id;
-                            Some(session_state)
-                        } else {
-                            debug!("session {:?} acquired by {}", self.id, session_state.peer);
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                }
-                None => None,
-            };
-            session_state.and_then(|s| s.try_into().ok())
-        };
-
-        self.sessions_db
-            .update_and_fetch(self.id.clone(), update_fn)
-            .map(|_| ())
-            .map_err(Error::msg)
-    }
-
-    fn remove(&self) -> Result<()> {
-        self.sessions_db
-            .remove(self.id.clone())
-            .map(|_| ())
-            .map_err(Error::msg)
-    }
-
-    fn start_monitor(&self) {
-        let prefix = self.id.clone();
-        let peer = self.peer;
-        let session_event_tx = self.session_event_tx.clone();
-        let mut subscriber = self.sessions_db.watch_prefix(prefix.clone());
-        tokio::spawn(async move {
-            while let Some(event) = (&mut subscriber).await {
-                match event {
-                    Event::Insert { key, value } => {
-                        if key.as_bytes() == prefix {
-                            if let Ok(state) = SessionState::try_from(value) {
-                                // if peer address is different then session is acquired by other
-                                // connection, else it is closed by the same connection and break
-                                // the watcher
-                                if peer != state.peer {
-                                    info!(
-                                        "acquired session '{}' by: {:?}",
-                                        std::str::from_utf8(prefix.as_bytes()).unwrap_or(""),
-                                        state.peer
-                                    );
-                                    if let Err(err) = session_event_tx
-                                        .send(SessionEvent::SessionTakenOver(state))
-                                        .await
-                                        .context("SessionTaken event")
-                                    {
-                                        warn!(cause=?err, "SessionTaken event sent error");
-                                    }
-                                }
-                                break;
-                            }
-                        } else {
-                            warn!("wrong modified session: {:?}", key);
-                            unreachable!()
-                        }
-                    }
-                    Event::Remove { key } => {
-                        trace!("session removed: {:?}", key);
-                        break;
-                    }
-                }
-            }
-        });
-    }
-}
-
-impl Subscriptions for Session {
-    fn get_subscription(&self, topic_filter: &[u8]) -> Result<Option<SubscriptionOptions>> {
-        let key = SubscriptionKey {
-            session: self.id.as_ref(),
-            topic_filter,
-        };
-        self.subscriptions_db
-            .get(bincode::serialize(&key)?)
-            .map(|o| o.and_then(|value| SubscriptionOptions::try_from(value.as_ref()).ok()))
-            .map_err(Error::msg)
-    }
-
-    fn store_subscription(&self, topic_filter: &[u8], option: &SubscriptionOptions) -> Result<()> {
-        let key = SubscriptionKey {
-            session: self.id.as_ref(),
-            topic_filter,
-        };
-        self.subscriptions_db
-            .insert(bincode::serialize(&key)?, bincode::serialize(&option)?)
-            .map(|_| ())
-            .map_err(Error::msg)
-    }
-
-    fn remove_subscription(&self, topic_filter: &[u8]) -> Result<bool> {
-        let key = SubscriptionKey {
-            session: self.id.as_ref(),
-            topic_filter,
-        };
-        self.subscriptions_db
-            .remove(bincode::serialize(&key)?)
-            .map(|d| d.is_some())
-            .map_err(Error::msg)
-    }
-
-    fn list_subscriptions(&self) -> Result<Vec<(IVec, SubscriptionOptions)>, Error> {
-        let key = SubscriptionKey {
-            session: self.id.as_ref(),
-            topic_filter: "".as_ref(),
-        };
-        let prefix = bincode::serialize(&key)?;
-        let mut ret = vec![];
-
-        for res in self.subscriptions_db.scan_prefix(prefix) {
-            match res {
-                Ok((key, value)) => ret.push((key, SubscriptionOptions::try_from(value.as_ref())?)),
-                Err(err) => warn!(cause = ?err, "subscription scan error:"),
-            }
-        }
-
-        Ok(ret)
-    }
-
-    fn clear_subscriptions(&self) -> Result<usize> {
-        let key = SubscriptionKey {
-            session: self.id.as_ref(),
-            topic_filter: "".as_ref(),
-        };
-        let mut batch = Batch::default();
-        let prefix = bincode::serialize(&key)?;
-        let mut ret = 0;
-
-        for res in self.subscriptions_db.scan_prefix(prefix) {
-            match res {
-                Ok((key, _)) => {
-                    batch.remove(key);
-                    ret += 1;
-                }
-                Err(err) => warn!(cause = ?err, "subscription scan error:"),
-            }
-        }
-        self.subscriptions_db
-            .apply_batch(batch)
-            .map(|_| ret)
-            .map_err(Error::msg)
-    }
-}
-
 impl Drop for Session {
     #[instrument(skip(self), fields(peer = field::display(& self.peer),
-    client_identifier = field::debug(& self.id)))]
+    client_id = field::debug(& self.client_id)))]
     fn drop(&mut self) {
         trace!(
             "self.session_expire_interval {:?}",
@@ -893,18 +706,21 @@ impl Drop for Session {
         );
         match self.session_expire_interval {
             None | Some(0) => {
-                if let Err(err) = self.remove() {
+                if let Err(err) = self.context.remove(self.client_id.as_str()) {
                     warn!(cause = ?err, "close session remove failure");
                 }
             }
             Some(session_expire_interval) => {
                 let now = Utc::now();
                 now.checked_add_signed(Duration::seconds(session_expire_interval as i64));
-                if let Err(err) = self.update(SessionState {
-                    peer: self.peer,
-                    expire: Some(now.timestamp()),
-                    last_topic_id: None,
-                }) {
+                if let Err(err) = self.context.update(
+                    self.client_id.as_str(),
+                    SessionState {
+                        peer: self.peer,
+                        expire: Some(now.timestamp()),
+                        last_topic_id: None,
+                    },
+                ) {
                     warn!(cause = ?err, "close session update failure");
                 }
             }

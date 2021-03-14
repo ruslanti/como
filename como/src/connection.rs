@@ -16,9 +16,8 @@ use uuid::Uuid;
 
 use como_mqtt::v5::types::{Auth, Connect, ControlPacket, MQTTCodec};
 
-use crate::context::AppContext;
 use crate::session::Session;
-use crate::settings::Connection;
+use crate::session_context::SessionContext;
 use crate::shutdown::Shutdown;
 
 #[derive(Debug)]
@@ -27,27 +26,24 @@ pub struct ConnectionHandler {
     limit_connections: Arc<Semaphore>,
     shutdown_complete: mpsc::Sender<()>,
     keep_alive: Duration,
-    context: Arc<AppContext>,
+    context: Arc<SessionContext>,
     session: Option<Session>,
-    config: Connection,
 }
 
 impl ConnectionHandler {
-    pub fn new(
+    pub(crate) fn new(
         peer: SocketAddr,
         limit_connections: Arc<Semaphore>,
         shutdown_complete: mpsc::Sender<()>,
-        context: Arc<AppContext>,
+        context: Arc<SessionContext>,
     ) -> Self {
-        let config = context.config.connection.to_owned();
         ConnectionHandler {
             peer,
             limit_connections,
             shutdown_complete,
-            keep_alive: Duration::from_millis(config.idle_keep_alive as u64),
+            keep_alive: Duration::from_millis(context.settings.connection.idle_keep_alive as u64),
             context,
             session: None,
-            config,
         }
     }
 
@@ -72,20 +68,24 @@ impl ConnectionHandler {
             None
         };
         self.keep_alive = self
-            .config
+            .context
+            .settings
+            .connection
             .server_keep_alive
             .or(client_keep_alive)
             .map(|d| Duration::from_secs(d as u64).add(Duration::from_millis(100)))
             .unwrap_or_else(|| Duration::from_micros(u64::MAX));
         trace!("keep_alive: {:?}", self.keep_alive);
 
-        let session = self.context.make_session(
-            identifier,
+        let session = Session::new(
+            String::from_utf8(identifier.to_vec())?,
             response_tx,
             self.peer,
             msg.properties.clone(),
             msg.will.clone(),
+            self.context.clone(),
         );
+
         Ok(session)
     }
 

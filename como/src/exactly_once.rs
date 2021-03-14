@@ -4,14 +4,14 @@ use anyhow::{bail, Result};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{instrument, trace};
 
-use como_mqtt::v5::types::{ControlPacket, MqttString, PublishResponse, ReasonCode};
+use como_mqtt::v5::types::{ControlPacket, PublishResponse, ReasonCode};
 
 use crate::session::PublishEvent;
 use crate::topic::Topics;
 
 #[instrument(skip(rx, response_tx), err)]
 pub async fn exactly_once_client(
-    session: MqttString,
+    session: String,
     packet_identifier: u16,
     mut rx: Receiver<PublishEvent>,
     response_tx: Sender<ControlPacket>,
@@ -41,7 +41,7 @@ pub async fn exactly_once_client(
 
 #[instrument(skip(rx, response_tx, root), err)]
 pub async fn exactly_once_server(
-    session: MqttString,
+    session: String,
     packet_identifier: u16,
     root: Arc<Topics>,
     mut rx: Receiver<PublishEvent>,
