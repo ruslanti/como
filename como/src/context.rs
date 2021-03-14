@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
 use sled::{Db, Tree};
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 
 use como_mqtt::v5::property::ConnectProperties;
@@ -40,16 +42,16 @@ impl AppContext {
         })
     }
 
-    pub fn make_session(
+    pub(crate) fn make_session(
         &self,
-        session: MqttString,
+        id: MqttString,
         response_tx: Sender<ControlPacket>,
         peer: SocketAddr,
         properties: ConnectProperties,
         will: Option<Will>,
     ) -> Session {
         Session::new(
-            session,
+            id,
             response_tx,
             peer,
             properties,

@@ -43,7 +43,7 @@ pub fn decode_publish(
 }
 
 pub fn decode_publish_properties(mut reader: Bytes) -> Result<PublishProperties> {
-    let mut builder = PropertiesBuilder::new();
+    let mut builder = PropertiesBuilder::default();
     while reader.has_remaining() {
         let id = decode_variable_integer(&mut reader)?;
         match id.try_into()? {
@@ -101,7 +101,8 @@ impl Encoder<Publish> for MQTTCodec {
             }
         }
         self.encode(msg.properties, writer)?;
-        self.encode(msg.payload, writer)
+        writer.put(msg.payload);
+        Ok(())
     }
 }
 
@@ -127,7 +128,6 @@ impl RemainingLength for Publish {
             + properties_length.size()
             + properties_length
             + self.payload.len()
-            + 2
     }
 }
 

@@ -20,7 +20,7 @@ macro_rules! end_of_stream {
     };
 }
 
-pub const MQTT: &'static str = "MQTT";
+pub const MQTT: &str = "MQTT";
 pub const VERSION: u8 = 5;
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Ord, PartialOrd, Hash)]
@@ -548,6 +548,7 @@ impl fmt::Debug for Publish {
         debug_struct.field("retain", &self.retain);
         debug_field!(self, debug_struct, packet_identifier);
         debug_struct.field("topic_name", &self.topic_name);
+        debug_struct.field("payload", &self.payload);
         debug_struct.finish()
     }
 }
@@ -632,12 +633,12 @@ impl TryFrom<&[u8]> for SubscriptionOptions {
     type Error = Error;
 
     fn try_from(encoded: &[u8]) -> Result<Self, Self::Error> {
-        bincode::deserialize(encoded.as_ref()).map_err(Error::msg)
+        bincode::deserialize(encoded).map_err(Error::msg)
     }
 }
 
-impl MQTTCodec {
-    pub fn new() -> Self {
+impl Default for MQTTCodec {
+    fn default() -> Self {
         MQTTCodec {
             part: PacketPart::FixedHeader,
         }

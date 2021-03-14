@@ -326,7 +326,7 @@ impl Default for SubscribeProperties {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PropertiesBuilder {
     payload_format_indicator: Option<bool>,
     message_expire_interval: Option<u32>,
@@ -357,8 +357,8 @@ pub struct PropertiesBuilder {
     shared_subscription_available: Option<bool>,
 }
 
-impl PropertiesBuilder {
-    pub fn new() -> Self {
+impl Default for PropertiesBuilder {
+    fn default() -> Self {
         PropertiesBuilder {
             session_expire_interval: None,
             assigned_client_identifier: None,
@@ -389,7 +389,9 @@ impl PropertiesBuilder {
             shared_subscription_available: None,
         }
     }
+}
 
+impl PropertiesBuilder {
     pub fn session_expire_interval(mut self, value: u32) -> Result<Self> {
         check_and_set!(self, session_expire_interval, value)
     }
@@ -581,12 +583,14 @@ impl PropertiesBuilder {
 
 #[cfg(test)]
 mod tests {
+    use claim::*;
+
     use super::*;
 
     #[test]
     fn test_connection_properties_default() {
         assert_eq!(
-            PropertiesBuilder::new().connect(),
+            PropertiesBuilder::default().connect(),
             ConnectProperties {
                 session_expire_interval: None,
                 receive_maximum: None,
@@ -601,7 +605,7 @@ mod tests {
     }
     #[test]
     fn test_connection_properties_fill() {
-        let mut builder = PropertiesBuilder::new();
+        let mut builder = PropertiesBuilder::default();
         builder = builder.session_expire_interval(20).unwrap();
         builder = builder.receive_maximum(1000).unwrap();
         builder = builder.maximum_packet_size(1024).unwrap();
@@ -630,27 +634,21 @@ mod tests {
 
     #[test]
     fn test_properties_sei_dup() {
-        let mut builder = PropertiesBuilder::new();
+        let mut builder = PropertiesBuilder::default();
         builder = builder.session_expire_interval(20).unwrap();
-        match builder.session_expire_interval(60) {
-            Err(_) => assert!(true),
-            _ => assert!(false, "should panic"),
-        }
+        assert_err!(builder.session_expire_interval(60));
     }
     #[test]
     fn test_properties_rm_dup() {
-        let mut builder = PropertiesBuilder::new();
+        let mut builder = PropertiesBuilder::default();
         builder = builder.receive_maximum(20).unwrap();
-        match builder.receive_maximum(60) {
-            Err(_) => assert!(true),
-            _ => assert!(false, "should panic"),
-        }
+        assert_err!(builder.receive_maximum(60));
     }
 
     #[test]
     fn test_will_properties_default() {
         assert_eq!(
-            PropertiesBuilder::new().will(),
+            PropertiesBuilder::default().will(),
             WillProperties {
                 will_delay_interval: 0,
                 payload_format_indicator: None,
@@ -664,7 +662,7 @@ mod tests {
     }
     #[test]
     fn test_connack_properties_default_len() {
-        let mut builder = PropertiesBuilder::new();
+        let mut builder = PropertiesBuilder::default();
         builder = builder.session_expire_interval(20).unwrap();
         builder = builder.user_properties((Bytes::from("username"), Bytes::from("admin")));
         builder = builder.user_properties((Bytes::from("password"), Bytes::from("123456")));

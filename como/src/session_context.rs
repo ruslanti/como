@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 use sled::IVec;
 
 pub(crate) trait SessionContext {
-    fn acquire(&self, clean_start: bool) -> Result<Option<SessionState>>;
-    fn update(&self, session_state: SessionState) -> Result<()>;
-    fn remove(&self) -> Result<()>;
-    fn start_monitor(&self);
+    fn acquire(&self, client_id: &str, clean_start: bool) -> Result<Option<SessionState>>;
+    fn update(&self, client_id: &str, session_state: SessionState) -> Result<()>;
+    fn remove(&self, client_id: &str) -> Result<()>;
+    fn start_monitor(&self, client_id: &str);
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,7 +42,7 @@ impl TryFrom<&[u8]> for SessionState {
     type Error = Error;
 
     fn try_from(encoded: &[u8]) -> anyhow::Result<Self> {
-        bincode::deserialize(encoded.as_ref()).map_err(Error::msg)
+        bincode::deserialize(encoded).map_err(Error::msg)
     }
 }
 

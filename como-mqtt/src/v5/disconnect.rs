@@ -29,7 +29,7 @@ pub fn decode_disconnect(mut reader: Bytes) -> Result<Option<ControlPacket>> {
 }
 
 fn decode_disconnect_properties(mut reader: Bytes) -> Result<DisconnectProperties> {
-    let mut builder = PropertiesBuilder::new();
+    let mut builder = PropertiesBuilder::default();
     while reader.has_remaining() {
         let id = decode_variable_integer(&mut reader)?;
         match id.try_into()? {

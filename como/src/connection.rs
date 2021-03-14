@@ -61,7 +61,7 @@ impl ConnectionHandler {
         let identifier = msg
             .client_identifier
             .clone()
-            .unwrap_or(Uuid::new_v4().to_simple().to_string().into());
+            .unwrap_or_else(|| Uuid::new_v4().to_simple().to_string().into());
 
         //let id = std::str::from_utf8(&identifier[..])?;
         //debug!("client identifier: {}", id);
@@ -76,11 +76,11 @@ impl ConnectionHandler {
             .server_keep_alive
             .or(client_keep_alive)
             .map(|d| Duration::from_secs(d as u64).add(Duration::from_millis(100)))
-            .unwrap_or(Duration::from_micros(u64::MAX));
+            .unwrap_or_else(|| Duration::from_micros(u64::MAX));
         trace!("keep_alive: {:?}", self.keep_alive);
 
         let session = self.context.make_session(
-            identifier.clone(),
+            identifier,
             response_tx,
             self.peer,
             msg.properties.clone(),
@@ -138,7 +138,7 @@ impl ConnectionHandler {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        let framed = Framed::new(socket, MQTTCodec::new());
+        let framed = Framed::new(socket, MQTTCodec::default());
         let (mut sink, mut stream) = framed.split::<ControlPacket>();
         let (response_tx, mut response_rx) = mpsc::channel::<ControlPacket>(32);
         while !shutdown.is_shutdown() {

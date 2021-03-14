@@ -67,7 +67,7 @@ trait Subscriptions {
 }
 
 #[derive(Debug)]
-pub struct Session {
+pub(crate) struct Session {
     id: MqttString,
     response_tx: Sender<ControlPacket>,
     session_event_tx: Sender<SessionEvent>,
@@ -83,8 +83,8 @@ pub struct Session {
     packet_identifier_seq: Arc<AtomicU16>,
     sessions_db: Tree,
     subscriptions_db: Tree,
-    topic_filters: HashMap<String, Vec<oneshot::Sender<()>>>,
-    topic_event: broadcast::Receiver<String>,
+    topic_filters: HashMap<String, (SubscriptionOptions, Vec<oneshot::Sender<()>>)>,
+    topic_event: broadcast::Receiver<(String, Tree)>,
 }
 
 impl Session {
@@ -181,7 +181,7 @@ impl Session {
         Some(ControlPacket::Publish(publish))
     }
 
-    pub async fn handle_msg(&mut self, msg: ControlPacket) -> Result<Option<ControlPacket>> {
+    pub(crate) async fn handle_msg(&mut self, msg: ControlPacket) -> Result<Option<ControlPacket>> {
         match msg {
             ControlPacket::Connect(p) => self.connect(p).await,
             ControlPacket::Publish(p) => self.publish(p).await,
@@ -196,6 +196,37 @@ impl Session {
             ControlPacket::Disconnect(d) => self.disconnect(d).await,
             _ => unreachable!(),
         }
+    }
+
+    async fn handle_topic_event(&mut self, topic_name: String, log: Tree) {
+        debug!("new topic event: {}", topic_name);
+        let session = self.id.clone();
+        let subscription_tx = self.session_event_tx.clone();
+        self.topic_filters
+            .iter_mut()
+            .for_each(|(topic_filter, (options, unsubscribes))| {
+                match Topics::match_filter(topic_name.as_str(), topic_filter.as_str()) {
+                    Ok(true) => {
+                        debug!(
+                            "topic: {} match topic filter: {}",
+                            topic_name.as_str(),
+                            topic_filter.as_str()
+                        );
+                        unsubscribes.push(Self::subscribe_topic(
+                            session.clone(),
+                            topic_name.to_owned(),
+                            options.to_owned(),
+                            subscription_tx.clone(),
+                            log.watch_prefix(vec![]),
+                        ));
+                    }
+                    Err(error) => warn!(cause = ?error, "match filter: "),
+                    _ => {
+                        /* doesn't match */
+                        trace!("{} doesn't match {}", topic_name, topic_filter);
+                    }
+                }
+            });
     }
 
     #[instrument(skip(self), fields(client_identifier = field::debug(& self.id)), err)]
@@ -217,27 +248,7 @@ impl Session {
             }
             res = self.topic_event.recv() => {
                 match res {
-                    Ok(topic_name) => {
-                        debug!("new topic event: {}", topic_name);
-                        for (topic_filter, unsubscribes) in self.topic_filters.iter() {
-                            if Topics::match_filter(topic_name.as_str(), topic_filter.as_str())? {
-                                debug!("topic: {} match topic filter: {}", topic_name.as_str(),
-                                topic_filter.as_str());
-                                if let Some(options) = self.get_subscription(topic_filter.as_bytes()
-                                )? {
-                                    match self.subscribe_topic(topic_filter, options).await {
-                                        Ok((_, unsubscribe)) => {
-                                            unsubscribes.extend(unsubscribe);
-                                        }
-                                        Err(err) => {
-                                            warn!(cause = ?err, "subscribe error: ");
-                                         }
-                                    }
-                                }
-
-                            }
-                        }
-                    }
+                    Ok((topic_name, log)) => self.handle_topic_event(topic_name, log).await,
                     Err(err) => warn!(cause=?err, "new topic event recv error")
                 }
             }
@@ -256,7 +267,7 @@ impl Session {
                 info!("removed {} subscriptions", removed);
             } else {
                 // load session state
-                let subscriptions = self.list_subscriptions().context("get subscriptions")?;
+                let subscriptions = self.list_subscriptions().context("list subscriptions")?;
                 for (topic_filter, option) in subscriptions {
                     debug!("subscribe {:?}:{:?}", topic_filter, option);
                 }
@@ -273,7 +284,7 @@ impl Session {
         match self.init(msg.clean_start_flag) {
             Ok(session_present) => {
                 trace!("session_present: {}", session_present);
-                let assigned_client_identifier = if let Some(_) = msg.client_identifier.clone() {
+                let assigned_client_identifier = if msg.client_identifier.is_some() {
                     None
                 } else {
                     Some(self.id.clone())
@@ -510,10 +521,10 @@ impl Session {
         Ok(())
     }
 
-    async fn subscribe_topic(
+    async fn subscribe_topic_filter(
         &self,
         topic_filter: &str,
-        options: SubscriptionOptions,
+        options: &SubscriptionOptions,
     ) -> Result<(ReasonCode, Vec<oneshot::Sender<()>>)> {
         let mut unsubscribes = vec![];
         let channels = self.topics.subscribe(topic_filter).await?;
@@ -524,28 +535,38 @@ impl Session {
             QoS::ExactlyOnce => ReasonCode::GrantedQoS2,
         };
 
-        for (topic, subscriber) in channels {
-            let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
-            unsubscribes.push(unsubscribe_tx);
-            let session = self.id.to_owned();
-            let subscription_tx = self.session_event_tx.clone();
-            let options = options.to_owned();
-            let topic_name = topic.to_owned();
-            tokio::spawn(async move {
-                tokio::select! {
-                    Err(err) = Self::subscription(session, options, subscription_tx,
-                    topic_name,
-                    subscriber) => {
-                        warn!(cause = ? err, "subscription error");
-                    },
-                    _ = unsubscribe_rx => {
-                        debug!("unsubscribe");
-                    }
-                }
-            });
+        for (topic_name, subscriber) in channels {
+            unsubscribes.push(Self::subscribe_topic(
+                self.id.clone(),
+                topic_name.to_owned(),
+                options.to_owned(),
+                self.session_event_tx.clone(),
+                subscriber,
+            ));
         }
 
         Ok((reason_code, unsubscribes))
+    }
+
+    fn subscribe_topic(
+        session: MqttString,
+        topic_name: String,
+        options: SubscriptionOptions,
+        subscription_tx: Sender<SessionEvent>,
+        subscriber: Subscriber,
+    ) -> oneshot::Sender<()> {
+        let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            tokio::select! {
+                Err(err) = Self::subscription(session.to_owned(), options, subscription_tx, topic_name.to_owned(), subscriber) => {
+                    warn!(cause = ? err, "subscription {} error", topic_name);
+                },
+                _ = unsubscribe_rx => {
+                    debug!("{:?} unsubscribe {}", session, topic_name);
+                }
+            }
+        });
+        unsubscribe_tx
     }
 
     #[instrument(skip(self, msg), err)]
@@ -556,12 +577,15 @@ impl Session {
             // add a subscription record in sled db
             self.store_subscription(topic_filter.as_ref(), options.borrow())?;
             let topic_filter = std::str::from_utf8(&topic_filter[..])?;
-            match self.subscribe_topic(topic_filter, options).await {
+            match self
+                .subscribe_topic_filter(topic_filter, options.borrow())
+                .await
+            {
                 Ok((reason_code, unsubscribe)) => {
-                    let unsubscribes = self
+                    let (_, unsubscribes) = self
                         .topic_filters
                         .entry(topic_filter.to_owned())
-                        .or_insert(vec![]);
+                        .or_insert((options, vec![]));
                     unsubscribes.extend(unsubscribe);
                     reason_codes.push(reason_code);
                 }
@@ -594,9 +618,9 @@ impl Session {
         for topic_filter in msg.topic_filters {
             reason_codes.push(match std::str::from_utf8(&topic_filter[..]) {
                 Ok(topic_filter) => {
-                    self.topic_filters
-                        .remove(topic_filter)
-                        .map(|removed| debug!("stop {} subscriptions", removed.len()));
+                    if let Some((_, removed)) = self.topic_filters.remove(topic_filter) {
+                        debug!("stop {} subscriptions", removed.len())
+                    };
                     self.remove_subscription(topic_filter.as_ref())?;
                     ReasonCode::Success
                 }
@@ -739,7 +763,7 @@ impl SessionContext for Session {
 
     fn start_monitor(&self) {
         let prefix = self.id.clone();
-        let peer = self.peer.clone();
+        let peer = self.peer;
         let session_event_tx = self.session_event_tx.clone();
         let mut subscriber = self.sessions_db.watch_prefix(prefix.clone());
         tokio::spawn(async move {
@@ -790,7 +814,7 @@ impl Subscriptions for Session {
         };
         self.subscriptions_db
             .get(bincode::serialize(&key)?)
-            .map(|o| o.map(|value| SubscriptionOptions::try_from(value.as_ref())?))
+            .map(|o| o.and_then(|value| SubscriptionOptions::try_from(value.as_ref()).ok()))
             .map_err(Error::msg)
     }
 

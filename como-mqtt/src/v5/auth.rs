@@ -27,7 +27,7 @@ impl TryFrom<Bytes> for AuthProperties {
     type Error = anyhow::Error;
 
     fn try_from(mut reader: Bytes) -> Result<Self, Self::Error> {
-        let mut builder = PropertiesBuilder::new();
+        let mut builder = PropertiesBuilder::default();
         while reader.has_remaining() {
             let id = decode_variable_integer(&mut reader)?;
             match id.try_into()? {

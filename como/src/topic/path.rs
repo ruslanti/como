@@ -231,12 +231,7 @@ mod tests {
                 .collect::<Vec<&str>>()
         );
 
-        assert!(topics
-            .filter("ggg/#".parse().unwrap())
-            .iter()
-            .map(|t| t.test)
-            .collect::<Vec<&str>>()
-            .is_empty());
+        assert!(topics.filter("ggg/#".parse().unwrap()).is_empty());
 
         assert_eq!(
             vec!["/aaa/ccc"],

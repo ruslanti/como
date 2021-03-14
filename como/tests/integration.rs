@@ -4,6 +4,7 @@ extern crate claim;
 use std::sync::{Arc, Once};
 
 use anyhow::{Error, Result};
+use bytes::Bytes;
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{oneshot, Barrier};
 use tokio::task::JoinHandle;
@@ -11,7 +12,7 @@ use tokio::task::JoinHandle;
 use como::service;
 use como::settings::Settings;
 use como_mqtt::client::MqttClient;
-use como_mqtt::v5::types::{ControlPacket, QoS, ReasonCode};
+use como_mqtt::v5::types::{ControlPacket, Publish, QoS, ReasonCode};
 
 static ONCE: Once = Once::new();
 
@@ -156,8 +157,26 @@ async fn publish_subscribe() -> anyhow::Result<()> {
             .await
     );
 
-    let msg = assert_ok!(client.recv().await);
-    assert_matches!(msg, ControlPacket::Publish(_));
+    assert_matches!(assert_ok!(client.recv().await), ControlPacket::Publish(p) if p == Publish {
+        dup: false,
+        qos: QoS::AtMostOnce,
+        retain: false,
+        topic_name: Bytes::from("topic/A"),
+        packet_identifier: None,
+        properties: Default::default(),
+        payload: Bytes::from("payload01"),
+        }
+    );
+    assert_matches!(assert_ok!(client.recv().await), ControlPacket::Publish(p) if p == Publish {
+        dup: false,
+        qos: QoS::AtMostOnce,
+        retain: false,
+        topic_name: Bytes::from("topic/A"),
+        packet_identifier: None,
+        properties: Default::default(),
+        payload: Bytes::from("payload01"),
+        }
+    );
 
     assert_none!(client.disconnect().await?);
     drop(shutdown_notify);

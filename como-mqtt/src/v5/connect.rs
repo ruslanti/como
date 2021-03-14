@@ -52,7 +52,7 @@ impl TryFrom<Bytes> for Connect {
                 .context("will properties decode error")?;
             let topic = decode_utf8_string(&mut reader)
                 .context("will topic decode error")?
-                .ok_or(anyhow!("will topic is missing"))?;
+                .ok_or_else(|| anyhow!("will topic is missing"))?;
             let payload = reader;
             Some(Will {
                 qos: will_qos_flag,
@@ -95,7 +95,7 @@ impl TryFrom<Bytes> for ConnectProperties {
     type Error = anyhow::Error;
 
     fn try_from(mut reader: Bytes) -> Result<Self, Self::Error> {
-        let mut builder = PropertiesBuilder::new();
+        let mut builder = PropertiesBuilder::default();
         while reader.has_remaining() {
             let id = decode_variable_integer(&mut reader)?;
             match id.try_into()? {
@@ -192,7 +192,7 @@ impl Encoder<Connect> for MQTTCodec {
         writer.put_u8(msg.get_flags());
         writer.put_u16(msg.keep_alive);
         self.encode(msg.properties, writer)?;
-        self.encode(msg.client_identifier.unwrap_or(Bytes::new()), writer)?;
+        self.encode(msg.client_identifier.unwrap_or_default(), writer)?;
         if let Some(will) = msg.will {
             self.encode(will, writer)?;
         }

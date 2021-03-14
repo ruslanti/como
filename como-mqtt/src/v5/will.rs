@@ -11,7 +11,7 @@ use crate::v5::property::{PropertiesBuilder, PropertiesSize, Property, WillPrope
 use crate::v5::types::{MQTTCodec, Will};
 
 pub fn decode_will_properties(mut reader: Bytes) -> Result<WillProperties> {
-    let mut builder = PropertiesBuilder::new();
+    let mut builder = PropertiesBuilder::default();
     while reader.has_remaining() {
         let id = decode_variable_integer(&mut reader)?;
         match id.try_into()? {

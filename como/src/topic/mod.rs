@@ -36,7 +36,7 @@ struct Topic {
 pub struct Topics {
     db: Db,
     nodes: RwLock<TopicNode<Topic>>,
-    new_topic_event: Sender<String>,
+    new_topic_event: Sender<(String, Tree)>,
 }
 
 impl Topics {
@@ -80,7 +80,7 @@ impl Topics {
         })
     }
 
-    pub fn topic_event(&self) -> Receiver<String> {
+    pub fn topic_event(&self) -> Receiver<(String, Tree)> {
         self.new_topic_event.subscribe()
     }
 
@@ -90,7 +90,7 @@ impl Topics {
         let mut nodes = self.nodes.write().await;
         let topic = nodes.get(topic_name.parse()?)?;
 
-        if let None = *topic {
+        if topic.is_none() {
             //new topic event
             debug!("new topic {}", topic_name);
             let log = self.db.open_tree(topic_name)?;
@@ -100,7 +100,11 @@ impl Topics {
             });
 
             if let Some(topic) = topic {
-                if let Err(err) = self.new_topic_event.send(topic.name.clone()) {
+                if let Err(err) = self
+                    .new_topic_event
+                    .send((topic.name.clone(), topic.log.clone()))
+                    .map_err(|_| anyhow!("send error"))
+                {
                     warn!(cause = ?err, "new topic event error");
                 }
             }

@@ -23,7 +23,7 @@ pub fn decode_unsubscribe(mut reader: Bytes) -> Result<Option<ControlPacket>> {
 }
 
 pub fn decode_unsubscribe_properties(mut reader: Bytes) -> Result<UnSubscribeProperties> {
-    let mut builder = PropertiesBuilder::new();
+    let mut builder = PropertiesBuilder::default();
     while reader.has_remaining() {
         let id = decode_variable_integer(&mut reader)?;
         match id.try_into()? {

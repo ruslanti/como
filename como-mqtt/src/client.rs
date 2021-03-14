@@ -38,7 +38,7 @@ impl<'a> MqttClient {
             address,
             client_id: None,
             keep_alive: None,
-            properties_builder: PropertiesBuilder::new(),
+            properties_builder: PropertiesBuilder::default(),
         }
     }
 
@@ -64,7 +64,7 @@ impl<'a> MqttClient {
         timeout(self.timeout, self.stream.next())
             .await
             .map_err(Error::msg)
-            .and_then(|r| r.ok_or(anyhow!("none message")))
+            .and_then(|r| r.ok_or_else(|| anyhow!("none message")))
             .and_then(|r| r)
     }
 
@@ -186,7 +186,7 @@ impl ClientBuilder<'_> {
         };
 
         let stream = socket.connect(peer).await?;
-        let stream = Framed::new(stream, MQTTCodec::new());
+        let stream = Framed::new(stream, MQTTCodec::default());
 
         Ok(MqttClient {
             stream,
