@@ -23,8 +23,8 @@ use como_mqtt::v5::types::{
     Subscribe, SubscriptionOptions, UnSubscribe, Will,
 };
 
+use crate::context::{SessionContext, SessionState, SessionStore, SubscriptionsStore};
 use crate::exactly_once::{exactly_once_client, exactly_once_server};
-use crate::session_context::{SessionContext, SessionState, SessionStore, SubscriptionsStore};
 use crate::topic::{PubMessage, Topics};
 
 #[derive(Debug, Serialize, Deserialize)]

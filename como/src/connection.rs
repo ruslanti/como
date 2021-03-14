@@ -16,8 +16,8 @@ use uuid::Uuid;
 
 use como_mqtt::v5::types::{Auth, Connect, ControlPacket, MQTTCodec};
 
+use crate::context::SessionContext;
 use crate::session::Session;
-use crate::session_context::SessionContext;
 use crate::shutdown::Shutdown;
 
 #[derive(Debug)]

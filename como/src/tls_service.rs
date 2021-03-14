@@ -10,8 +10,8 @@ use tokio::sync::{broadcast, mpsc, Barrier, Semaphore};
 use tracing::{error, info, instrument};
 
 use crate::connection::ConnectionHandler;
+use crate::context::SessionContext;
 use crate::service::accept;
-use crate::session_context::SessionContext;
 use crate::shutdown::Shutdown;
 
 pub(crate) struct TlsTransport {

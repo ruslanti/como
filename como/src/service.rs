@@ -9,7 +9,7 @@ use tokio::time::{sleep, Duration};
 use tracing::{error, info, instrument, warn};
 
 use crate::connection::ConnectionHandler;
-use crate::session_context::SessionContext;
+use crate::context::SessionContext;
 use crate::settings::Settings;
 use crate::shutdown::Shutdown;
 use crate::tls_service::TlsTransport;
