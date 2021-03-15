@@ -4,7 +4,7 @@ use std::fmt::Debug;
 
 use anyhow::{anyhow, Error, Result};
 use serde::{Deserialize, Serialize};
-use sled::{Db, IVec, Subscriber, Tree};
+use sled::{Db, IVec, Tree};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::sync::RwLock;
@@ -24,7 +24,6 @@ mod path;
 pub struct PubMessage {
     pub retain: bool,
     pub qos: QoS,
-    //pub properties: PublishProperties,
     pub payload: Vec<u8>,
 }
 
@@ -90,6 +89,8 @@ impl Topics {
         let mut nodes = self.nodes.write().await;
         let topic = nodes.get(topic_name.parse()?)?;
 
+        let id = self.db.generate_id()?;
+
         if topic.is_none() {
             //new topic event
             debug!("new topic {}", topic_name);
@@ -113,7 +114,6 @@ impl Topics {
         };
 
         if let Some(topic) = topic {
-            let id = self.db.generate_id()?;
             let m: PubMessage = msg.into();
             let value = bincode::serialize(&m)?;
             trace!("append {} - {:?} bytes", id, value);
@@ -125,13 +125,13 @@ impl Topics {
     }
 
     #[instrument(skip(self))]
-    pub async fn subscribe(&self, topic_filter: &str) -> Result<Vec<(String, Subscriber)>> {
+    pub async fn subscribe(&self, topic_filter: &str) -> Result<Vec<(String, Tree)>> {
         let node = self.nodes.read().await;
         let topic_filter = topic_filter.parse()?;
         Ok(node
             .filter(topic_filter)
             .into_iter()
-            .map(|t| (t.name.to_owned(), t.log.watch_prefix(vec![])))
+            .map(|t| (t.name.to_owned(), t.log.clone()))
             .collect())
     }
 
@@ -181,7 +181,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_topicmessage() {
+    fn test_topic_message() {
         let m = PubMessage {
             retain: false,
             qos: QoS::AtMostOnce,

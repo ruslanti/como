@@ -174,7 +174,7 @@ async fn publish_subscribe() -> anyhow::Result<()> {
         topic_name: Bytes::from("topic/A"),
         packet_identifier: None,
         properties: Default::default(),
-        payload: Bytes::from("payload01"),
+        payload: Bytes::from("payload02"),
         }
     );
 
