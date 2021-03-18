@@ -10,6 +10,7 @@ mod disconnect;
 pub mod encoder;
 mod publish;
 mod pubres;
+pub mod string;
 mod subscribe;
 mod unsubscribe;
 mod will;

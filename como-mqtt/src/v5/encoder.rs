@@ -3,7 +3,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
 use crate::v5::property::PropertiesSize;
-use crate::v5::types::{ControlPacket, MQTTCodec, MqttString, PacketType};
+use crate::v5::string::MqttString;
+use crate::v5::types::{ControlPacket, MQTTCodec, PacketType};
 
 pub trait RemainingLength {
     fn remaining_length(&self) -> usize;
@@ -116,6 +117,16 @@ impl Encoder<usize> for MQTTCodec {
     }
 }
 
+impl Encoder<Bytes> for MQTTCodec {
+    type Error = anyhow::Error;
+
+    fn encode(&mut self, b: Bytes, writer: &mut BytesMut) -> Result<(), Self::Error> {
+        end_of_stream!(writer.capacity() < b.len(), "encode bytes");
+        writer.put(b);
+        Ok(())
+    }
+}
+
 impl Encoder<MqttString> for MQTTCodec {
     type Error = anyhow::Error;
 
@@ -149,7 +160,7 @@ impl PropertiesSize for usize {
     }
 }
 
-pub fn encode_utf8_string(writer: &mut BytesMut, s: Bytes) -> Result<()> {
+pub fn encode_utf8_string(writer: &mut BytesMut, s: MqttString) -> Result<()> {
     end_of_stream!(writer.capacity() < 2, "encode utf2 string len");
     writer.put_u16(s.len() as u16);
     end_of_stream!(writer.capacity() < s.len(), "encode utf2 string");

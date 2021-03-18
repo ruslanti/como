@@ -18,6 +18,7 @@ use tracing::{debug, error, field, info, instrument, trace, warn};
 use como_mqtt::v5::property::{
     ConnAckProperties, ConnectProperties, PublishProperties, ResponseProperties,
 };
+use como_mqtt::v5::string::MqttString;
 use como_mqtt::v5::types::{
     ConnAck, Connect, ControlPacket, Disconnect, Publish, PublishResponse, QoS, ReasonCode, SubAck,
     Subscribe, SubscriptionOptions, UnSubscribe, Will,
@@ -50,6 +51,9 @@ pub enum PublishEvent {
     PubComp(PublishResponse),
 }
 
+pub(crate) type SubscribedTopics = HashMap<String, oneshot::Sender<()>>;
+pub(crate) type SubscriptionValue = (SubscriptionOptions, SubscribedTopics);
+
 #[derive(Debug)]
 pub(crate) struct Session {
     client_id: String,
@@ -64,7 +68,7 @@ pub(crate) struct Session {
     client_flows: HashMap<u16, Sender<PublishEvent>>,
     packet_identifier_seq: Arc<AtomicU16>,
     context: Arc<SessionContext>,
-    topic_filters: HashMap<String, (SubscriptionOptions, Vec<oneshot::Sender<()>>)>,
+    topic_filters: HashMap<String, SubscriptionValue>,
     topic_event: broadcast::Receiver<(String, Tree)>,
 }
 
@@ -130,7 +134,7 @@ impl Session {
             dup: false,
             qos,
             retain: msg.retain,
-            topic_name: Bytes::from(event.topic_name),
+            topic_name: MqttString::from(event.topic_name),
             packet_identifier,
             properties: PublishProperties::default(),
             payload: Bytes::from(msg.payload),
@@ -185,39 +189,50 @@ impl Session {
         for (topic_filter, (options, unsubscribes)) in self.topic_filters.iter_mut() {
             match Topics::match_filter(topic_name.as_str(), topic_filter.as_str()) {
                 Ok(true) => {
-                    debug!(
-                        "topic: {} match topic filter: {}",
-                        topic_name.as_str(),
-                        topic_filter.as_str()
-                    );
+                    if !unsubscribes.contains_key(&topic_name) {
+                        debug!(
+                            "topic: {} match topic filter: {}",
+                            topic_name.as_str(),
+                            topic_filter.as_str()
+                        );
 
-                    if let Some((key, value)) = log.last().ok().flatten() {
-                        let id = key.as_ref().read_u64::<BigEndian>().unwrap_or(0);
-                        if let Ok(msg) = bincode::deserialize::<PubMessage>(value.as_ref())
-                            .context("deserialize event")
-                        {
-                            if let Err(err) = self
-                                .session_event_tx
-                                .send(SessionEvent::TopicMessage(TopicMessage::new(
-                                    id,
-                                    topic_name.to_owned(),
-                                    options.clone(),
-                                    msg,
-                                )))
-                                .await
+                        if let Some((key, value)) = log.last().ok().flatten() {
+                            let id = key.as_ref().read_u64::<BigEndian>().unwrap_or(0);
+                            if let Ok(msg) = bincode::deserialize::<PubMessage>(value.as_ref())
+                                .context("deserialize event")
                             {
-                                warn!(cause = ?err, "subscription send");
+                                if let Err(err) = self
+                                    .session_event_tx
+                                    .send(SessionEvent::TopicMessage(TopicMessage::new(
+                                        id,
+                                        topic_name.to_owned(),
+                                        options.clone(),
+                                        msg,
+                                    )))
+                                    .await
+                                {
+                                    warn!(cause = ?err, "subscription send");
+                                }
                             }
-                        }
-                    };
+                        };
 
-                    unsubscribes.push(subscribe_topic(
-                        client_id.to_owned(),
-                        topic_name.to_owned(),
-                        options.to_owned(),
-                        subscription_tx.clone(),
-                        log.watch_prefix(vec![]),
-                    ));
+                        unsubscribes.insert(
+                            topic_name.to_owned(),
+                            subscribe_topic(
+                                client_id.to_owned(),
+                                topic_name.to_owned(),
+                                options.to_owned(),
+                                subscription_tx.clone(),
+                                log.watch_prefix(vec![]),
+                            ),
+                        );
+                    } else {
+                        debug!(
+                            "already subscribed topic: {} match topic filter: {}",
+                            topic_name.as_str(),
+                            topic_filter.as_str()
+                        );
+                    }
                 }
                 Err(error) => warn!(cause = ?error, "match filter: "),
                 _ => {
@@ -306,7 +321,7 @@ impl Session {
                 let assigned_client_identifier = if msg.client_identifier.is_some() {
                     None
                 } else {
-                    Some(Bytes::from(self.client_id.to_owned()))
+                    Some(MqttString::from(self.client_id.to_owned()))
                 };
 
                 let maximum_qos =
@@ -316,11 +331,6 @@ impl Session {
                         self.context.settings.connection.maximum_qos
                     };
 
-                trace!(
-                    "config {:?}, connect {:?}",
-                    self.context.settings.connection.session_expire_interval,
-                    msg.properties.session_expire_interval
-                );
                 let session_expire_interval = if let Some(server_expire) =
                     self.context.settings.connection.session_expire_interval
                 {
@@ -334,6 +344,7 @@ impl Session {
                 };
                 self.session_expire_interval =
                     session_expire_interval.or(msg.properties.session_expire_interval);
+                self.will = msg.will;
 
                 let ack = ControlPacket::ConnAck(ConnAck {
                     session_present,
@@ -510,6 +521,7 @@ impl Session {
                 topic_filter.as_ref(),
                 options.borrow(),
             )?;
+
             let topic_filter = std::str::from_utf8(&topic_filter[..])?;
             match self
                 .context
@@ -525,7 +537,7 @@ impl Session {
                     let (_, unsubscribes) = self
                         .topic_filters
                         .entry(topic_filter.to_owned())
-                        .or_insert((options, vec![]));
+                        .or_insert((options, Default::default()));
                     unsubscribes.extend(unsubscribe);
                     reason_codes.push(reason_code);
                 }

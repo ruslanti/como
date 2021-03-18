@@ -12,7 +12,8 @@ use tokio::task::JoinHandle;
 use como::service;
 use como::settings::Settings;
 use como_mqtt::client::MqttClient;
-use como_mqtt::v5::types::{ControlPacket, Publish, QoS, ReasonCode};
+use como_mqtt::v5::string::MqttString;
+use como_mqtt::v5::types::{ControlPacket, Publish, QoS, ReasonCode, Will};
 
 static ONCE: Once = Once::new();
 
@@ -122,6 +123,10 @@ async fn connect_existing_session() -> anyhow::Result<()> {
 
     assert_none!(client4.disconnect().await?);
 
+    drop(client);
+    drop(client2);
+    drop(client3);
+    drop(client4);
     drop(shutdown_notify);
     handle.await?
 }
@@ -138,22 +143,18 @@ async fn publish_subscribe() -> anyhow::Result<()> {
     assert!(!ack.session_present);
     assert_some!(ack.properties.assigned_client_identifier);
 
-    let ack = assert_ok!(
-        client
-            .subscribe(QoS::AtMostOnce, String::from("topic/A"))
-            .await
-    );
+    let ack = assert_ok!(client.subscribe(QoS::AtMostOnce, "topic/A").await);
     assert_eq!(ack.reason_codes, vec![ReasonCode::Success]);
 
     assert_ok!(
         client
-            .publish_most_once(false, String::from("topic/A"), Vec::from("payload01"))
+            .publish_most_once("topic/A", Vec::from("payload01"), false)
             .await
     );
 
     assert_ok!(
         client
-            .publish_most_once(false, String::from("topic/A"), Vec::from("payload02"))
+            .publish_most_once("topic/A", Vec::from("payload02"), false)
             .await
     );
 
@@ -161,7 +162,7 @@ async fn publish_subscribe() -> anyhow::Result<()> {
         dup: false,
         qos: QoS::AtMostOnce,
         retain: false,
-        topic_name: Bytes::from("topic/A"),
+        topic_name: MqttString::from("topic/A"),
         packet_identifier: None,
         properties: Default::default(),
         payload: Bytes::from("payload01"),
@@ -171,7 +172,7 @@ async fn publish_subscribe() -> anyhow::Result<()> {
         dup: false,
         qos: QoS::AtMostOnce,
         retain: false,
-        topic_name: Bytes::from("topic/A"),
+        topic_name: MqttString::from("topic/A"),
         packet_identifier: None,
         properties: Default::default(),
         payload: Bytes::from("payload02"),
@@ -179,6 +180,156 @@ async fn publish_subscribe() -> anyhow::Result<()> {
     );
 
     assert_none!(client.disconnect().await?);
+    drop(client);
+    drop(shutdown_notify);
+    handle.await?
+}
+
+#[tokio::test]
+async fn retained_publish_subscribe() -> anyhow::Result<()> {
+    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
+        .build()
+        .await?;
+
+    let ack = assert_ok!(client.connect(false).await);
+    assert!(!ack.session_present);
+    assert_some!(ack.properties.assigned_client_identifier);
+
+    assert_ok!(
+        client
+            .publish_most_once("topic/A", Vec::from("payload01a"), true)
+            .await
+    );
+
+    assert_ok!(
+        client
+            .publish_most_once("topic/A", Vec::from("payload01b"), false)
+            .await
+    );
+
+    assert_ok!(
+        client
+            .publish_most_once("topic/B", Vec::from("payload02"), false)
+            .await
+    );
+
+    assert_ok!(
+        client
+            .publish_most_once("topic/C", Vec::from("payload03"), true)
+            .await
+    );
+
+    let ack = assert_ok!(client.subscribe(QoS::AtMostOnce, "topic/+").await);
+    assert_eq!(ack.reason_codes, vec![ReasonCode::Success]);
+
+    assert_matches!(assert_ok!(client.recv().await), ControlPacket::Publish(p) if p == Publish {
+        dup: false,
+        qos: QoS::AtMostOnce,
+        retain: true,
+        topic_name: MqttString::from("topic/A"),
+        packet_identifier: None,
+        properties: Default::default(),
+        payload: Bytes::from("payload01a"),
+        }
+    );
+    assert_matches!(assert_ok!(client.recv().await), ControlPacket::Publish(p) if p == Publish {
+        dup: false,
+        qos: QoS::AtMostOnce,
+        retain: true,
+        topic_name: MqttString::from("topic/C"),
+        packet_identifier: None,
+        properties: Default::default(),
+        payload: Bytes::from("payload03"),
+        }
+    );
+
+    // If the Payload contains zero bytes it is processed normally by the Server but any retained
+    // message with the same topic name MUST be removed and any future subscribers for the topic
+    // will not receive a retained message
+    assert_ok!(client.publish_most_once("topic/C", vec![], true).await);
+
+    let mut client2 = MqttClient::builder(&format!("127.0.0.1:{}", port))
+        .build()
+        .await?;
+    // #2 connection take over the session from #1
+    assert_ok!(client2.connect(true).await);
+    let ack = assert_ok!(client2.subscribe(QoS::AtMostOnce, "topic/+").await);
+    assert_eq!(ack.reason_codes, vec![ReasonCode::Success]);
+    assert_matches!(assert_ok!(client2.recv().await), ControlPacket::Publish(p) if p == Publish {
+        dup: false,
+        qos: QoS::AtMostOnce,
+        retain: true,
+        topic_name: MqttString::from("topic/A"),
+        packet_identifier: None,
+        properties: Default::default(),
+        payload: Bytes::from("payload01a"),
+        }
+    );
+    assert_matches!(assert_ok!(client.recv().await), ControlPacket::Publish(p) if p == Publish {
+        dup: false,
+        qos: QoS::AtMostOnce,
+        retain: true,
+        topic_name: MqttString::from("topic/C"),
+        packet_identifier: None,
+        properties: Default::default(),
+        payload: Bytes::new(),
+        }
+    );
+    assert_none!(client2.disconnect().await?);
+
+    assert_none!(client.disconnect().await?);
+
+    drop(client);
+    drop(client2);
+    drop(shutdown_notify);
+    handle.await?
+}
+
+#[tokio::test]
+async fn will_message() -> anyhow::Result<()> {
+    let (port, shutdown_notify, handle) = start_test_broker().await;
+
+    let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
+        .with_will(Will {
+            qos: QoS::AtMostOnce,
+            retain: false,
+            properties: Default::default(),
+            topic: MqttString::from("topic/will"),
+            payload: Bytes::from("WILL"),
+        })
+        .build()
+        .await?;
+
+    let ack = assert_ok!(client.connect(true).await);
+    assert_eq!(ack.reason_code, ReasonCode::Success);
+    assert!(!ack.session_present);
+
+    let mut client2 = MqttClient::builder(&format!("127.0.0.1:{}", port))
+        .build()
+        .await?;
+    // #2 connection take over the session from #1
+    assert_ok!(client2.connect(true).await);
+    let ack = assert_ok!(client2.subscribe(QoS::AtMostOnce, "topic/+").await);
+    assert_eq!(ack.reason_codes, vec![ReasonCode::Success]);
+
+    //assert_none!(client.disconnect().await?);
+    drop(client);
+
+    assert_matches!(assert_ok!(client2.recv().await), ControlPacket::Publish(p) if p == Publish {
+        dup: false,
+        qos: QoS::AtMostOnce,
+        retain: true,
+        topic_name: MqttString::from("topic/will"),
+        packet_identifier: None,
+        properties: Default::default(),
+        payload: Bytes::from("WILL"),
+        }
+    );
+
+    assert_none!(client2.disconnect().await?);
+
+    drop(client2);
     drop(shutdown_notify);
     handle.await?
 }

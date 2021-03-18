@@ -10,8 +10,7 @@ use crate::v5::property::{
     AuthProperties, ConnAckProperties, ConnectProperties, DisconnectProperties, PublishProperties,
     ResponseProperties, SubscribeProperties, UnSubscribeProperties, WillProperties,
 };
-
-pub type MqttString = Bytes;
+use crate::v5::string::MqttString;
 
 #[macro_use]
 macro_rules! end_of_stream {
@@ -52,16 +51,6 @@ impl From<QoS> for u8 {
         }
     }
 }
-
-/*impl Into<u8> for QoS {
-    fn into(self) -> u8 {
-        match self {
-            QoS::AtMostOnce => 0,
-            QoS::AtLeastOnce => 1,
-            QoS::ExactlyOnce => 2,
-        }
-    }
-}*/
 
 struct QoSVisitor;
 
@@ -359,7 +348,7 @@ pub struct Publish {
     pub topic_name: MqttString,
     pub packet_identifier: Option<u16>,
     pub properties: PublishProperties,
-    pub payload: MqttString,
+    pub payload: Bytes,
 }
 
 #[derive(Eq, PartialEq)]

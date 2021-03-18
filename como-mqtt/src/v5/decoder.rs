@@ -8,10 +8,10 @@ use tracing::{instrument, trace};
 use crate::v5::connack::decode_connack;
 use crate::v5::disconnect::decode_disconnect;
 use crate::v5::publish::decode_publish;
+use crate::v5::string::MqttString;
 use crate::v5::subscribe::decode_subscribe;
 use crate::v5::types::{
-    Auth, Connect, ControlPacket, MQTTCodec, MqttString, PacketPart, PacketType, PublishResponse,
-    SubAck,
+    Auth, Connect, ControlPacket, MQTTCodec, PacketPart, PacketType, PublishResponse, SubAck,
 };
 use crate::v5::unsubscribe::decode_unsubscribe;
 
@@ -111,7 +111,7 @@ pub fn decode_utf8_string(reader: &mut Bytes) -> Result<Option<MqttString>> {
         let len = reader.get_u16() as usize;
         if reader.remaining() >= len {
             if len > 0 {
-                Ok(Some(reader.split_to(len)))
+                Ok(Some(MqttString::from(reader.split_to(len))))
             } else {
                 Ok(None)
             }

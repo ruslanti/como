@@ -7,15 +7,17 @@ use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::{encode_utf8_string, RemainingLength};
-use crate::v5::property::{ConnectProperties, PropertiesBuilder, PropertiesSize, Property};
+use crate::v5::property::{
+    ConnectProperties, PropertiesBuilder, PropertiesSize, Property, WillProperties,
+};
+use crate::v5::string::MqttString;
 use crate::v5::types::{Connect, MQTTCodec, Will, MQTT, VERSION};
-use crate::v5::will::decode_will_properties;
 
 impl TryFrom<Bytes> for Connect {
     type Error = anyhow::Error;
 
     fn try_from(mut reader: Bytes) -> Result<Self, Self::Error> {
-        if Some(Bytes::from(MQTT)) != decode_utf8_string(&mut reader)? {
+        if Some(MqttString::from(MQTT)) != decode_utf8_string(&mut reader)? {
             bail!("wrong protocol name");
         }
         end_of_stream!(reader.remaining() < 4, "connect version");
@@ -48,7 +50,7 @@ impl TryFrom<Bytes> for Connect {
             let will_properties_length = decode_variable_integer(&mut reader)
                 .context("will properties length decode error")?
                 as usize;
-            let properties = decode_will_properties(reader.split_to(will_properties_length))
+            let properties = WillProperties::try_from(reader.split_to(will_properties_length))
                 .context("will properties decode error")?;
             let topic = decode_utf8_string(&mut reader)
                 .context("will topic decode error")?
@@ -187,7 +189,7 @@ impl Encoder<Connect> for MQTTCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, msg: Connect, writer: &mut BytesMut) -> Result<(), Self::Error> {
-        self.encode(Bytes::from_static(MQTT.as_ref()), writer)?;
+        self.encode(MqttString::from(MQTT), writer)?;
         writer.put_u8(VERSION);
         writer.put_u8(msg.get_flags());
         writer.put_u16(msg.keep_alive);

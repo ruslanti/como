@@ -7,7 +7,8 @@ use tokio_util::codec::Encoder;
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::RemainingLength;
 use crate::v5::property::{PropertiesBuilder, Property, UnSubscribeProperties};
-use crate::v5::types::{ControlPacket, MQTTCodec, MqttString, UnSubscribe};
+use crate::v5::string::MqttString;
+use crate::v5::types::{ControlPacket, MQTTCodec, UnSubscribe};
 
 pub fn decode_unsubscribe(mut reader: Bytes) -> Result<Option<ControlPacket>> {
     end_of_stream!(reader.remaining() < 2, "unsubscribe packet identifier");

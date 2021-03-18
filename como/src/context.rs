@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -14,9 +15,9 @@ use tracing::{debug, info, instrument, trace, warn};
 
 use como_mqtt::v5::types::{Publish, QoS, ReasonCode, SubscriptionOptions};
 
-use crate::session::{SessionEvent, TopicMessage};
+use crate::session::{SessionEvent, SubscribedTopics, TopicMessage};
 use crate::settings::Settings;
-use crate::topic::Topics;
+use crate::topic::{PubMessage, Topics};
 
 pub(crate) trait SessionStore {
     fn acquire(
@@ -153,8 +154,8 @@ pub(crate) fn subscribe_topic(
     let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
     tokio::spawn(async move {
         tokio::select! {
-            Err(err) = subscription(options, subscription_tx, topic_name.to_owned(),
-            subscriber) => {
+            Err(err) = subscription(options, subscription_tx, topic_name.to_owned(), subscriber)
+            => {
                 warn!(cause = ? err, "subscription {} error", topic_name);
             },
             _ = unsubscribe_rx => {
@@ -196,8 +197,8 @@ impl SessionContext {
         topic_filter: &str,
         options: &SubscriptionOptions,
         session_event_tx: &Sender<SessionEvent>,
-    ) -> Result<(ReasonCode, Vec<oneshot::Sender<()>>)> {
-        let mut unsubscribes = vec![];
+    ) -> Result<(ReasonCode, SubscribedTopics)> {
+        let mut unsubscribes = HashMap::new();
         let channels = self.topic_manager.subscribe(topic_filter).await?;
         trace!("subscribe returns {} subscriptions", channels.len());
         let reason_code = match options.qos {
@@ -207,13 +208,46 @@ impl SessionContext {
         };
 
         for (topic_name, log) in channels {
-            unsubscribes.push(subscribe_topic(
-                client_id.to_owned(),
+            let mut last = log.last().ok().flatten();
+            while let Some((key, value)) = last {
+                let id = key.as_ref().read_u64::<BigEndian>().unwrap_or(0);
+                match bincode::deserialize::<PubMessage>(value.as_ref()) {
+                    Ok(msg) => {
+                        if msg.retain {
+                            if !msg.payload.is_empty() {
+                                if let Err(err) = session_event_tx
+                                    .send(SessionEvent::TopicMessage(TopicMessage::new(
+                                        id,
+                                        topic_name.to_owned(),
+                                        options.clone(),
+                                        msg,
+                                    )))
+                                    .await
+                                {
+                                    warn!(cause = ?err, "subscription send");
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        warn!(cause = ?err, "deserialization error");
+                        break;
+                    }
+                };
+                last = log.get_lt(key).ok().flatten();
+            }
+
+            unsubscribes.insert(
                 topic_name.to_owned(),
-                options.to_owned(),
-                session_event_tx.clone(),
-                log.watch_prefix(vec![]),
-            ));
+                subscribe_topic(
+                    client_id.to_owned(),
+                    topic_name.to_owned(),
+                    options.to_owned(),
+                    session_event_tx.clone(),
+                    log.watch_prefix(vec![]),
+                ),
+            );
         }
 
         Ok((reason_code, unsubscribes))

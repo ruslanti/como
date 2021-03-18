@@ -1,7 +1,7 @@
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 use std::mem::size_of_val;
 
-use anyhow::{anyhow, bail, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
@@ -10,43 +10,63 @@ use crate::v5::encoder::encode_utf8_string;
 use crate::v5::property::{PropertiesBuilder, PropertiesSize, Property, WillProperties};
 use crate::v5::types::{MQTTCodec, Will};
 
-pub fn decode_will_properties(mut reader: Bytes) -> Result<WillProperties> {
-    let mut builder = PropertiesBuilder::default();
-    while reader.has_remaining() {
-        let id = decode_variable_integer(&mut reader)?;
-        match id.try_into()? {
-            Property::WillDelayInterval => {
-                end_of_stream!(reader.remaining() < 4, "will delay interval");
-                builder = builder.will_delay_interval(reader.get_u32())?;
-            }
-            Property::PayloadFormatIndicator => {
-                end_of_stream!(reader.remaining() < 1, "will payload format indicator");
-                builder = builder.payload_format_indicator(reader.get_u8())?;
-            }
-            Property::MessageExpireInterval => {
-                end_of_stream!(reader.remaining() < 4, "will message expire interval");
-                builder = builder.message_expire_interval(reader.get_u32())?;
-            }
-            Property::ContentType => {
-                builder = builder.content_type(decode_utf8_string(&mut reader)?)?;
-            }
-            Property::ResponseTopic => {
-                builder = builder.response_topic(decode_utf8_string(&mut reader)?)?;
-            }
-            Property::CorrelationData => unimplemented!(),
-            Property::UserProperty => {
-                let user_property = (
-                    decode_utf8_string(&mut reader)?,
-                    decode_utf8_string(&mut reader)?,
-                );
-                if let (Some(key), Some(value)) = user_property {
-                    builder = builder.user_properties((key, value));
+impl TryFrom<Bytes> for WillProperties {
+    type Error = anyhow::Error;
+
+    fn try_from(mut reader: Bytes) -> Result<Self, Self::Error> {
+        let mut builder = PropertiesBuilder::default();
+        while reader.has_remaining() {
+            let id = decode_variable_integer(&mut reader)?;
+            match id.try_into()? {
+                Property::WillDelayInterval => {
+                    end_of_stream!(reader.remaining() < 4, "will delay interval");
+                    builder = builder
+                        .will_delay_interval(reader.get_u32())
+                        .context("will_delay_interval")?;
                 }
+                Property::PayloadFormatIndicator => {
+                    end_of_stream!(reader.remaining() < 1, "will payload format indicator");
+                    builder = builder
+                        .payload_format_indicator(reader.get_u8())
+                        .context("payload_format_indicator")?;
+                }
+                Property::MessageExpireInterval => {
+                    end_of_stream!(reader.remaining() < 4, "will message expire interval");
+                    builder = builder
+                        .message_expire_interval(reader.get_u32())
+                        .context("message_expire_interval")?;
+                }
+                Property::ContentType => {
+                    builder = builder
+                        .content_type(
+                            decode_utf8_string(&mut reader)
+                                .context("decode_utf8_string content_type")?,
+                        )
+                        .context("content_type")?;
+                }
+                Property::ResponseTopic => {
+                    builder = builder
+                        .response_topic(
+                            decode_utf8_string(&mut reader)
+                                .context("decode_utf8_string response_topic")?,
+                        )
+                        .context("response_topic")?;
+                }
+                Property::CorrelationData => unimplemented!(),
+                Property::UserProperty => {
+                    let user_property = (
+                        decode_utf8_string(&mut reader)?,
+                        decode_utf8_string(&mut reader)?,
+                    );
+                    if let (Some(key), Some(value)) = user_property {
+                        builder = builder.user_properties((key, value));
+                    }
+                }
+                _ => bail!("unknown will property: {:x}", id),
             }
-            _ => bail!("unknown will property: {:x}", id),
         }
+        Ok(builder.will())
     }
-    Ok(builder.will())
 }
 
 impl PropertiesSize for Will {
@@ -68,7 +88,7 @@ impl Encoder<Will> for MQTTCodec {
 
 impl PropertiesSize for WillProperties {
     fn size(&self) -> usize {
-        let mut len = 4; //will_delay_interval
+        let mut len = 4 + 1; //will_delay_interval
         len += check_size_of!(self, payload_format_indicator);
         len += check_size_of!(self, message_expire_interval);
         len += check_size_of_string!(self, content_type);

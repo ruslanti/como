@@ -1,4 +1,5 @@
 use std::borrow::{Borrow, BorrowMut};
+use std::convert::TryInto;
 use std::net::SocketAddr;
 use std::ops::Add;
 use std::sync::Arc;
@@ -78,7 +79,7 @@ impl ConnectionHandler {
         trace!("keep_alive: {:?}", self.keep_alive);
 
         let session = Session::new(
-            String::from_utf8(identifier.to_vec())?,
+            identifier.try_into()?,
             response_tx,
             self.peer,
             msg.properties.clone(),

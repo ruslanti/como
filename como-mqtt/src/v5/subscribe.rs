@@ -11,8 +11,9 @@ use crate::v5::encoder::RemainingLength;
 use crate::v5::property::{
     PropertiesBuilder, PropertiesSize, Property, ResponseProperties, SubscribeProperties,
 };
+use crate::v5::string::MqttString;
 use crate::v5::types::{
-    ControlPacket, MQTTCodec, MqttString, ReasonCode, SubAck, Subscribe, SubscriptionOptions,
+    ControlPacket, MQTTCodec, ReasonCode, SubAck, Subscribe, SubscriptionOptions,
 };
 
 pub fn decode_subscribe(mut reader: Bytes) -> Result<Option<ControlPacket>> {

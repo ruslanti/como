@@ -3,7 +3,8 @@ use std::convert::{TryFrom, TryInto};
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 
-use crate::v5::types::{MqttString, QoS};
+use crate::v5::string::MqttString;
+use crate::v5::types::QoS;
 
 macro_rules! check_and_set {
     ($self:ident, $property:ident, $value: expr) => {
@@ -176,7 +177,7 @@ pub struct WillProperties {
     pub message_expire_interval: Option<u32>,
     pub content_type: Option<MqttString>,
     pub response_topic: Option<MqttString>,
-    pub correlation_data: Option<Bytes>,
+    pub correlation_data: Option<MqttString>,
     pub user_properties: Vec<(MqttString, MqttString)>,
 }
 
@@ -219,7 +220,7 @@ pub struct PublishProperties {
     pub message_expire_interval: Option<u32>,
     pub topic_alias: Option<u16>,
     pub response_topic: Option<MqttString>,
-    pub correlation_data: Option<Bytes>,
+    pub correlation_data: Option<MqttString>,
     pub user_properties: Vec<(MqttString, MqttString)>,
     pub subscription_identifier: Option<u32>,
     pub content_type: Option<MqttString>,
@@ -332,7 +333,7 @@ pub struct PropertiesBuilder {
     message_expire_interval: Option<u32>,
     content_type: Option<MqttString>,
     response_topic: Option<MqttString>,
-    correlation_data: Option<Bytes>,
+    correlation_data: Option<MqttString>,
     subscription_identifier: Option<u32>,
     session_expire_interval: Option<u32>,
     assigned_client_identifier: Option<MqttString>,
@@ -387,6 +388,20 @@ impl Default for PropertiesBuilder {
             reason_string: None,
             retain_available: None,
             shared_subscription_available: None,
+        }
+    }
+}
+
+impl Default for WillProperties {
+    fn default() -> Self {
+        WillProperties {
+            will_delay_interval: 0,
+            payload_format_indicator: None,
+            message_expire_interval: None,
+            content_type: None,
+            response_topic: None,
+            correlation_data: None,
+            user_properties: vec![],
         }
     }
 }
@@ -447,7 +462,7 @@ impl PropertiesBuilder {
             Err(anyhow!("empty server reference"))
         }
     }
-    pub fn _correlation_data(mut self, value: Bytes) -> Result<Self> {
+    pub fn _correlation_data(mut self, value: MqttString) -> Result<Self> {
         check_and_set!(self, correlation_data, value)
     }
     pub fn maximum_qos(mut self, value: u8) -> Result<Self> {
@@ -612,8 +627,10 @@ mod tests {
         builder = builder.topic_alias_maximum(1024).unwrap();
         builder = builder.request_response_information(1).unwrap();
         builder = builder.request_problem_information(1).unwrap();
-        builder = builder.user_properties((Bytes::from("username"), Bytes::from("admin")));
-        builder = builder.user_properties((Bytes::from("password"), Bytes::from("12345")));
+        builder =
+            builder.user_properties((MqttString::from("username"), MqttString::from("admin")));
+        builder =
+            builder.user_properties((MqttString::from("password"), MqttString::from("12345")));
         assert_eq!(
             builder.connect(),
             ConnectProperties {
@@ -624,8 +641,8 @@ mod tests {
                 request_response_information: Some(true),
                 request_problem_information: Some(true),
                 user_properties: vec![
-                    (Bytes::from("username"), Bytes::from("admin")),
-                    (Bytes::from("password"), Bytes::from("12345"))
+                    (MqttString::from("username"), MqttString::from("admin")),
+                    (MqttString::from("password"), MqttString::from("12345"))
                 ],
                 authentication_method: None,
             }
@@ -664,8 +681,10 @@ mod tests {
     fn test_connack_properties_default_len() {
         let mut builder = PropertiesBuilder::default();
         builder = builder.session_expire_interval(20).unwrap();
-        builder = builder.user_properties((Bytes::from("username"), Bytes::from("admin")));
-        builder = builder.user_properties((Bytes::from("password"), Bytes::from("123456")));
+        builder =
+            builder.user_properties((MqttString::from("username"), MqttString::from("admin")));
+        builder =
+            builder.user_properties((MqttString::from("password"), MqttString::from("123456")));
         assert_eq!(42, builder.connack().size());
     }
 }

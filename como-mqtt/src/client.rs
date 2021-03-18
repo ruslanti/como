@@ -11,9 +11,10 @@ use tracing::trace;
 
 use crate::identifier::Sequence;
 use crate::v5::property::{PropertiesBuilder, SubscribeProperties};
+use crate::v5::string::MqttString;
 use crate::v5::types::{
-    ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, MqttString, Publish, PublishResponse,
-    QoS, ReasonCode, Retain, SubAck, Subscribe, SubscriptionOptions,
+    ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, Publish, PublishResponse, QoS,
+    ReasonCode, Retain, SubAck, Subscribe, SubscriptionOptions, Will,
 };
 
 pub struct MqttClient {
@@ -23,6 +24,7 @@ pub struct MqttClient {
     properties_builder: PropertiesBuilder,
     timeout: Duration,
     packet_identifier: Sequence,
+    will: Option<Will>,
 }
 
 pub struct ClientBuilder<'a> {
@@ -30,6 +32,7 @@ pub struct ClientBuilder<'a> {
     client_id: Option<MqttString>,
     keep_alive: Option<u16>,
     properties_builder: PropertiesBuilder,
+    will: Option<Will>,
 }
 
 impl<'a> MqttClient {
@@ -39,6 +42,7 @@ impl<'a> MqttClient {
             client_id: None,
             keep_alive: None,
             properties_builder: PropertiesBuilder::default(),
+            will: None,
         }
     }
 
@@ -47,10 +51,10 @@ impl<'a> MqttClient {
             clean_start_flag: clean_start,
             keep_alive: self.keep_alive,
             properties: self.properties_builder.to_owned().connect(),
-            client_identifier: self.client_id.to_owned(),
+            client_identifier: self.client_id.clone(),
             username: None,
             password: None,
-            will: None,
+            will: self.will.to_owned(),
         };
         trace!("send {:?}", connect);
         self.stream.send(ControlPacket::Connect(connect)).await?;
@@ -91,15 +95,15 @@ impl<'a> MqttClient {
 
     pub async fn publish_most_once(
         &mut self,
-        retain: bool,
-        topic_name: String,
+        topic_name: &str,
         payload: Vec<u8>,
+        retain: bool,
     ) -> Result<()> {
         let publish = Publish {
             dup: false,
             qos: QoS::AtMostOnce,
             retain,
-            topic_name: Bytes::from(topic_name),
+            topic_name: MqttString::from(topic_name.to_owned()),
             packet_identifier: None,
             properties: Default::default(),
             payload: Bytes::from(payload),
@@ -111,7 +115,7 @@ impl<'a> MqttClient {
     pub async fn publish_least_once(
         &mut self,
         retain: bool,
-        topic_name: String,
+        topic_name: &str,
         payload: Vec<u8>,
     ) -> Result<PublishResponse> {
         let packet_identifier = self.packet_identifier.next()?;
@@ -119,7 +123,7 @@ impl<'a> MqttClient {
             dup: false,
             qos: QoS::AtLeastOnce,
             retain,
-            topic_name: Bytes::from(topic_name),
+            topic_name: MqttString::from(topic_name.to_owned()),
             packet_identifier: Some(packet_identifier.value()),
             properties: Default::default(),
             payload: Bytes::from(payload),
@@ -132,13 +136,13 @@ impl<'a> MqttClient {
         })
     }
 
-    pub async fn subscribe(&mut self, qos: QoS, topic_filter: String) -> Result<SubAck> {
+    pub async fn subscribe(&mut self, qos: QoS, topic_filter: &str) -> Result<SubAck> {
         let packet_identifier = self.packet_identifier.next()?;
         let subscribe = Subscribe {
             packet_identifier: packet_identifier.value(),
             properties: SubscribeProperties::default(),
             topic_filters: vec![(
-                Bytes::from(topic_filter),
+                MqttString::from(topic_filter.to_owned()),
                 SubscriptionOptions {
                     qos,
                     nl: false,
@@ -177,6 +181,11 @@ impl ClientBuilder<'_> {
         self
     }
 
+    pub fn with_will(mut self, will: Will) -> Self {
+        self.will = Some(will);
+        self
+    }
+
     pub async fn build(self) -> Result<MqttClient> {
         let peer: SocketAddr = self.address.parse()?;
         let socket = if peer.is_ipv4() {
@@ -195,6 +204,7 @@ impl ClientBuilder<'_> {
             properties_builder: self.properties_builder,
             timeout: Duration::from_millis(100),
             packet_identifier: Default::default(),
+            will: self.will,
         })
     }
 }
