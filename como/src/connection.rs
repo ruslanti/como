@@ -184,17 +184,17 @@ impl ConnectionHandler {
                         sink.send(msg).await.context("socket send error")?;
                     }
                 }
-                 _ = shutdown.recv() => {
-                     debug!("server shutting down");
-                     if let Some(mut session) = self.session.take() {
-                         session.close_immediately().await;
-                     }
-                     let msg = ControlPacket::Disconnect(Disconnect {reason_code:
-                     ReasonCode::ServerShuttingDown, properties: Default::default()});
-                     debug!("sending {:?}", msg);
-                     sink.send(msg).await.context("socket send error")?;
-                     break;
-                 }
+                _ = shutdown.recv() => {
+                    debug!("server shutting down");
+                    if let Some(mut session) = self.session.take() {
+                        session.close_immediately().await;
+                    }
+                    let msg = ControlPacket::Disconnect(Disconnect {reason_code:
+                    ReasonCode::ServerShuttingDown, properties: Default::default()});
+                    debug!("sending {:?}", msg);
+                    sink.send(msg).await.context("socket send error")?;
+                    break;
+                }
             }
         }
         if let Some(mut session) = self.session.take() {
