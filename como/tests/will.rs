@@ -3,14 +3,8 @@ extern crate claim;
 
 use std::time::Duration;
 
-use anyhow::{Error, Result};
 use bytes::Bytes;
-use tokio::sync::oneshot::Sender;
-use tokio::sync::{oneshot, Barrier};
-use tokio::task::JoinHandle;
 
-use como::service;
-use como::settings::Settings;
 use como_mqtt::client::MqttClient;
 use como_mqtt::v5::property::WillProperties;
 use como_mqtt::v5::string::MqttString;
