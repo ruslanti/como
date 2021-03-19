@@ -9,7 +9,7 @@ use tokio::time::Duration;
 use tokio_util::codec::Framed;
 use tracing::trace;
 
-use crate::identifier::Sequence;
+use crate::identifier::PacketIdentifier;
 use crate::v5::property::{PropertiesBuilder, SubscribeProperties};
 use crate::v5::string::MqttString;
 use crate::v5::types::{
@@ -23,7 +23,7 @@ pub struct MqttClient {
     keep_alive: u16,
     properties_builder: PropertiesBuilder,
     timeout: Duration,
-    packet_identifier: Sequence,
+    packet_identifier: PacketIdentifier,
     will: Option<Will>,
 }
 
@@ -120,13 +120,13 @@ impl<'a> MqttClient {
         topic_name: &str,
         payload: Vec<u8>,
     ) -> Result<PublishResponse> {
-        let packet_identifier = self.packet_identifier.next()?;
+        let packet_identifier = self.packet_identifier.next();
         let publish = Publish {
             dup: false,
             qos: QoS::AtLeastOnce,
             retain,
             topic_name: MqttString::from(topic_name.to_owned()),
-            packet_identifier: Some(packet_identifier.value()),
+            packet_identifier,
             properties: Default::default(),
             payload: Bytes::from(payload),
         };
@@ -139,9 +139,9 @@ impl<'a> MqttClient {
     }
 
     pub async fn subscribe(&mut self, qos: QoS, topic_filter: &str) -> Result<SubAck> {
-        let packet_identifier = self.packet_identifier.next()?;
+        let packet_identifier = self.packet_identifier.next();
         let subscribe = Subscribe {
-            packet_identifier: packet_identifier.value(),
+            packet_identifier: packet_identifier.unwrap(),
             properties: SubscribeProperties::default(),
             topic_filters: vec![(
                 MqttString::from(topic_filter.to_owned()),

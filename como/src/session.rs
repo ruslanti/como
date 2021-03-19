@@ -1,8 +1,7 @@
 use std::borrow::Borrow;
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Error, Result};
@@ -15,6 +14,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, field, info, instrument, trace, warn};
 
+use como_mqtt::identifier::PacketIdentifier;
 use como_mqtt::v5::property::{
     ConnAckProperties, ConnectProperties, PublishProperties, ResponseProperties,
 };
@@ -65,9 +65,9 @@ pub(crate) struct Session {
     properties: ConnectProperties,
     will: Option<Will>,
     session_expire_interval: Option<u32>,
-    server_flows: HashMap<u16, Sender<PublishEvent>>,
-    client_flows: HashMap<u16, Sender<PublishEvent>>,
-    packet_identifier_seq: Arc<AtomicU16>,
+    server_flows: BTreeMap<u16, Sender<PublishEvent>>,
+    client_flows: BTreeMap<u16, Sender<PublishEvent>>,
+    packet_identifier: PacketIdentifier,
     context: Arc<SessionContext>,
     topic_filters: HashMap<String, SubscriptionValue>,
     topic_event: broadcast::Receiver<(String, Tree)>,
@@ -107,9 +107,9 @@ impl Session {
             properties,
             will,
             session_expire_interval: None,
-            server_flows: HashMap::new(),
-            client_flows: HashMap::new(),
-            packet_identifier_seq: Arc::new(AtomicU16::new(1)),
+            server_flows: BTreeMap::new(),
+            client_flows: BTreeMap::new(),
+            packet_identifier: Default::default(),
             context,
             topic_filters: HashMap::new(),
             topic_event,
@@ -119,19 +119,13 @@ impl Session {
     #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)))]
     async fn publish_client(&mut self, event: TopicMessage) -> Option<ControlPacket> {
         let msg = event.msg;
-        let packet_identifier = self.packet_identifier_seq.clone();
         let qos = min(msg.qos, event.option.qos);
         let packet_identifier = if QoS::AtMostOnce == qos {
             None
         } else {
-            let id = packet_identifier.fetch_add(1, Ordering::SeqCst);
-            if id == 0 {
-                let id = packet_identifier.fetch_add(1, Ordering::SeqCst);
-                Some(id)
-            } else {
-                Some(id)
-            }
+            self.packet_identifier.next()
         };
+
         let publish = Publish {
             dup: false,
             qos,
@@ -150,16 +144,16 @@ impl Session {
         }
 
         if QoS::ExactlyOnce == qos {
-            let (tx, rx) = mpsc::channel(1);
             let packet_identifier = packet_identifier.unwrap();
+            let (tx, rx) = mpsc::channel(1);
             self.client_flows.insert(packet_identifier, tx);
             let response_tx = self.response_tx.clone();
             let client_id = self.client_id.clone();
             tokio::spawn(async move {
-                if let Err(err) =
+                if let Err(error) =
                     exactly_once_client(client_id, packet_identifier, rx, response_tx).await
                 {
-                    error!(cause = ?err, "QoS 2 protocol error: {}", err);
+                    error!(cause = ?error, "QoS 2 protocol error");
                 }
             });
         };
@@ -294,21 +288,14 @@ impl Session {
                 let removed = self
                     .context
                     .clear_subscriptions(self.client_id.as_str())
-                    .context(
-                        "clean \
-                start \
-                session",
-                    )?;
+                    .context("clean start session")?;
                 info!("removed {} subscriptions", removed);
             } else {
                 // load session state
                 let subscriptions = self
                     .context
                     .list_subscriptions(self.client_id.as_str())
-                    .context(
-                        "list \
-                subscriptions",
-                    )?;
+                    .context("list subscriptions")?;
                 for (topic_filter, option) in subscriptions {
                     debug!("subscribe {:?}:{:?}", topic_filter, option);
                 }
@@ -411,9 +398,7 @@ impl Session {
                             user_properties: vec![],
                         },
                     });
-                    //trace!("send {:?}", ack);
                     Ok(Some(ack))
-                    //self.response_tx.send(ack).await?
                 } else {
                     Err(anyhow!("undefined packet_identifier"))
                 }
