@@ -15,7 +15,7 @@ use tokio_util::codec::Framed;
 use tracing::{debug, field, instrument, trace};
 use uuid::Uuid;
 
-use como_mqtt::v5::types::{Auth, Connect, ControlPacket, MQTTCodec};
+use como_mqtt::v5::types::{Auth, Connect, ControlPacket, Disconnect, MQTTCodec, ReasonCode};
 
 use crate::context::SessionContext;
 use crate::session::Session;
@@ -107,7 +107,7 @@ impl ConnectionHandler {
             }
             (None, ControlPacket::Auth(_auth)) => unimplemented!(), //self.process_auth(auth).await,
             (None, packet) => {
-                let context = format!("session: None, packet: {:?}", packet,);
+                let context = format!("session: None, packet: {}", packet,);
                 Err(anyhow!("unacceptable event").context(context))
             }
             (Some(_), ControlPacket::PingReq) => Ok(Some(ControlPacket::PingResp)),
@@ -175,20 +175,30 @@ impl ConnectionHandler {
                     }
                 }
                 res = self.session(), if self.session.is_some() => {
-                     trace!("session event: {:?}", res);
-                     if let Some(msg) = res? {
+                    trace!("session event: {:?}", res);
+                    if let Some(msg) = res? {
                         if let ControlPacket::Disconnect(_) = msg {
                             self.keep_alive = Duration::from_millis(0); // close socket and session
                         }
                         debug!("sending {:?}", msg);
                         sink.send(msg).await.context("socket send error")?;
-                     }
+                    }
                 }
                  _ = shutdown.recv() => {
-                     //self.disconnect(conn_tx.clone(), ReasonCode::ServerShuttingDown).await?;
+                     debug!("server shutting down");
+                     if let Some(mut session) = self.session.take() {
+                         session.close_immediately().await;
+                     }
+                     let msg = ControlPacket::Disconnect(Disconnect {reason_code:
+                     ReasonCode::ServerShuttingDown, properties: Default::default()});
+                     debug!("sending {:?}", msg);
+                     sink.send(msg).await.context("socket send error")?;
                      break;
                  }
             }
+        }
+        if let Some(mut session) = self.session.take() {
+            tokio::spawn(async move { session.close().await });
         }
         Ok(())
     }

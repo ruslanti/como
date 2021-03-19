@@ -31,6 +31,7 @@ pub struct ClientBuilder<'a> {
     address: &'a str,
     client_id: Option<MqttString>,
     keep_alive: Option<u16>,
+    timeout: Duration,
     properties_builder: PropertiesBuilder,
     will: Option<Will>,
 }
@@ -41,6 +42,7 @@ impl<'a> MqttClient {
             address,
             client_id: None,
             keep_alive: None,
+            timeout: Duration::from_millis(100),
             properties_builder: PropertiesBuilder::default(),
             will: None,
         }
@@ -56,11 +58,11 @@ impl<'a> MqttClient {
             password: None,
             will: self.will.to_owned(),
         };
-        trace!("send {:?}", connect);
+        trace!("send {}", connect);
         self.stream.send(ControlPacket::Connect(connect)).await?;
         self.recv().await.and_then(|packet| match packet {
             ControlPacket::ConnAck(ack) => Ok(ack),
-            _ => Err(anyhow!("unexpected: {:?}", packet)),
+            _ => Err(anyhow!("unexpected: {}", packet)),
         })
     }
 
@@ -85,7 +87,7 @@ impl<'a> MqttClient {
             properties: Default::default(),
         };
 
-        trace!("send {:?}", disconnect);
+        trace!("send {}", disconnect);
         self.stream
             .send(ControlPacket::Disconnect(disconnect))
             .await?;
@@ -108,7 +110,7 @@ impl<'a> MqttClient {
             properties: Default::default(),
             payload: Bytes::from(payload),
         };
-        trace!("send {:?}", publish);
+        trace!("send {}", publish);
         self.stream.send(ControlPacket::Publish(publish)).await
     }
 
@@ -128,11 +130,11 @@ impl<'a> MqttClient {
             properties: Default::default(),
             payload: Bytes::from(payload),
         };
-        trace!("send {:?}", publish);
+        trace!("send {}", publish);
         self.stream.send(ControlPacket::Publish(publish)).await?;
         self.recv().await.and_then(|packet| match packet {
             ControlPacket::PubAck(ack) => Ok(ack),
-            _ => Err(anyhow!("unexpected: {:?}", packet)),
+            _ => Err(anyhow!("unexpected: {}", packet)),
         })
     }
 
@@ -151,13 +153,13 @@ impl<'a> MqttClient {
                 },
             )],
         };
-        trace!("send {:?}", subscribe);
+        trace!("send {}", subscribe);
         self.stream
             .send(ControlPacket::Subscribe(subscribe))
             .await?;
         self.recv().await.and_then(|packet| match packet {
             ControlPacket::SubAck(ack) => Ok(ack),
-            _ => Err(anyhow!("unexpected: {:?}", packet)),
+            _ => Err(anyhow!("unexpected: {}", packet)),
         })
     }
 }
@@ -186,6 +188,11 @@ impl ClientBuilder<'_> {
         self
     }
 
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     pub async fn build(self) -> Result<MqttClient> {
         let peer: SocketAddr = self.address.parse()?;
         let socket = if peer.is_ipv4() {
@@ -202,7 +209,7 @@ impl ClientBuilder<'_> {
             client_id: self.client_id,
             keep_alive: self.keep_alive.unwrap_or(0),
             properties_builder: self.properties_builder,
-            timeout: Duration::from_millis(100),
+            timeout: self.timeout,
             packet_identifier: Default::default(),
             will: self.will,
         })

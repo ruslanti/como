@@ -8,7 +8,7 @@ use anyhow::Result;
 use anyhow::{Context, Error};
 use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
-use sled::{Batch, Event, IVec, Subscriber, Tree};
+use sled::{Batch, Db, Event, IVec, Subscriber, Tree};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tracing::{debug, info, instrument, trace, warn};
@@ -20,8 +20,10 @@ use crate::settings::Settings;
 use crate::topic::{PubMessage, Topics};
 
 pub(crate) trait SessionStore {
+    fn get(&self, client_id: &str) -> Result<Option<SessionState>>;
     fn acquire(
         &self,
+        unique_id: u64,
         client_id: &str,
         peer: SocketAddr,
         clean_start: bool,
@@ -30,8 +32,8 @@ pub(crate) trait SessionStore {
     fn remove(&self, client_id: &str) -> Result<()>;
     fn start_monitor(
         &self,
+        unique_id: u64,
         client_id: &str,
-        peer: SocketAddr,
         session_event_tx: Sender<SessionEvent>,
     );
 }
@@ -55,6 +57,7 @@ pub(crate) trait SubscriptionsStore {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionState {
+    pub unique_id: u64,
     pub peer: SocketAddr,
     pub expire: Option<i64>,
     pub last_topic_id: Option<u64>,
@@ -64,13 +67,15 @@ pub struct SessionState {
 pub(crate) struct SessionContext {
     pub settings: Arc<Settings>,
     pub topic_manager: Arc<Topics>,
+    db: Db,
     sessions: Tree,
     subscriptions: Tree,
 }
 
 impl SessionState {
-    pub fn new(peer: SocketAddr) -> Self {
+    pub fn new(unique_id: u64, peer: SocketAddr) -> Self {
         SessionState {
+            unique_id,
             peer,
             expire: None,
             last_topic_id: None,
@@ -182,9 +187,14 @@ impl SessionContext {
         Ok(SessionContext {
             settings,
             topic_manager,
+            db,
             sessions,
             subscriptions,
         })
+    }
+
+    pub fn generate_id(&self) -> u64 {
+        self.db.generate_id().unwrap_or(rand::random())
     }
 
     pub(crate) async fn publish(&self, msg: Publish) -> Result<()> {
@@ -255,8 +265,16 @@ impl SessionContext {
 }
 
 impl SessionStore for SessionContext {
+    fn get(&self, client_id: &str) -> Result<Option<SessionState>, Error> {
+        self.sessions
+            .get(client_id)
+            .map(|value| value.and_then(|encoded| SessionState::try_from(encoded).ok()))
+            .map_err(Error::msg)
+    }
+
     fn acquire(
         &self,
+        unique_id: u64,
         client_id: &str,
         peer: SocketAddr,
         clean_start: bool,
@@ -265,6 +283,7 @@ impl SessionStore for SessionContext {
             let session_state = match old {
                 Some(encoded) => {
                     if let Ok(mut session_state) = SessionState::try_from(encoded) {
+                        session_state.unique_id = unique_id;
                         session_state.peer = peer;
                         session_state.expire = None;
                         if clean_start {
@@ -272,10 +291,10 @@ impl SessionStore for SessionContext {
                         }
                         session_state
                     } else {
-                        SessionState::new(peer)
+                        SessionState::new(unique_id, peer)
                     }
                 }
-                None => SessionState::new(peer),
+                None => SessionState::new(unique_id, peer),
             };
             session_state.try_into().ok()
         };
@@ -328,8 +347,8 @@ impl SessionStore for SessionContext {
 
     fn start_monitor(
         &self,
+        unique_id: u64,
         client_id: &str,
-        peer: SocketAddr,
         session_event_tx: Sender<SessionEvent>,
     ) {
         let mut subscriber = self.sessions.watch_prefix(client_id);
@@ -343,7 +362,7 @@ impl SessionStore for SessionContext {
                                 // if peer address is different then session is acquired by other
                                 // connection, else it is closed by the same connection and break
                                 // the watcher
-                                if peer != state.peer {
+                                if unique_id != state.unique_id {
                                     info!("acquired session '{}' by: {:?}", client_id, state.peer);
                                     if let Err(err) = session_event_tx
                                         .send(SessionEvent::SessionTakenOver(state))

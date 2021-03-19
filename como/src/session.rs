@@ -8,11 +8,11 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Error, Result};
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::Bytes;
-use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sled::Tree;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::{sleep, Duration};
 use tracing::{debug, error, field, info, instrument, trace, warn};
 
 use como_mqtt::v5::property::{
@@ -56,6 +56,7 @@ pub(crate) type SubscriptionValue = (SubscriptionOptions, SubscribedTopics);
 
 #[derive(Debug)]
 pub(crate) struct Session {
+    unique_id: u64,
     client_id: String,
     response_tx: Sender<ControlPacket>,
     session_event_tx: Sender<SessionEvent>,
@@ -96,6 +97,7 @@ impl Session {
         let (session_event_tx, session_event_rx) = mpsc::channel(32);
         let topic_event = context.topic_manager.topic_event();
         Self {
+            unique_id: context.generate_id(),
             client_id: id,
             //created: Instant::now(),
             response_tx,
@@ -142,7 +144,7 @@ impl Session {
 
         if let Some(maximum_packet_size) = self.properties.maximum_packet_size {
             if publish.size() > maximum_packet_size as usize {
-                warn!("exceed maximum_packet_size: {:?}", publish);
+                warn!("exceed maximum_packet_size: {}", publish);
                 return None;
             }
         }
@@ -274,11 +276,16 @@ impl Session {
     fn init(&mut self, clean_start: bool) -> Result<bool> {
         let session_state = self
             .context
-            .acquire(self.client_id.as_str(), self.peer, clean_start)
+            .acquire(
+                self.unique_id,
+                self.client_id.as_str(),
+                self.peer,
+                clean_start,
+            )
             .context("acquire session")?;
         self.context.start_monitor(
+            self.unique_id,
             self.client_id.as_str(),
-            self.peer,
             self.session_event_tx.clone(),
         );
 
@@ -618,9 +625,73 @@ impl Session {
             _ => {}
         };
 
-        if msg.reason_code != ReasonCode::Success {
-            // publish will
-            if let Some(will) = self.will.borrow() {
+        if msg.reason_code == ReasonCode::Success {
+            // The Will Message MUST be removed from the stored Session State in the Server once
+            // it has been published or the Server has received a DISCONNECT packet with a Reason Code
+            // of 0x00 (Normal disconnection) from the Client
+            self.will.take();
+        }
+        Ok(None)
+    }
+
+    pub async fn close_immediately(&mut self) {
+        self.session_expire_interval = None;
+        self.close().await
+    }
+
+    #[instrument(skip(self), fields(peer = field::display(& self.peer),
+    client_id = field::debug(& self.client_id)))]
+    pub async fn close(&mut self) {
+        self.server_flows.clear();
+        self.client_flows.clear();
+        self.topic_filters.clear(); // stop active subscriptions
+
+        let session_expire_interval = self.session_expire_interval.unwrap_or(0);
+        let session_expire_interval = if let Some(will) = self.will.take() {
+            self.send_will(session_expire_interval, will).await
+        } else {
+            session_expire_interval
+        };
+        if session_expire_interval > 0 {
+            sleep(Duration::from_secs(session_expire_interval as u64)).await;
+        };
+        match self.context.get(self.client_id.as_str()).ok().flatten() {
+            Some(SessionState { unique_id, .. }) if self.unique_id == unique_id => {
+                self.context
+                    .remove(self.client_id.as_str())
+                    .unwrap_or_else(|error| {
+                        warn!(cause = ?error, "session context remove error");
+                    });
+                let size = self
+                    .context
+                    .clear_subscriptions(self.client_id.as_str())
+                    .unwrap_or_else(|error| {
+                        warn!(cause = ?error, "session clear subscription error");
+                        0
+                    });
+                debug!("session unsubscribed from {} subscriptions", size);
+                info!("session closed");
+            }
+            _ => {
+                debug!(
+                    "Skip session remove. Session {} reconnected",
+                    self.client_id
+                );
+            }
+        };
+    }
+
+    async fn send_will(&mut self, session_expire_interval: u32, will: Will) -> u32 {
+        trace!(
+            "will_delay_interval: {} sec",
+            will.properties.will_delay_interval
+        );
+        let delay = min(will.properties.will_delay_interval, session_expire_interval);
+        if delay > 0 {
+            sleep(Duration::from_secs(delay as u64)).await;
+        }
+        match self.context.get(self.client_id.as_str()).ok().flatten() {
+            Some(SessionState { unique_id, .. }) if self.unique_id == unique_id => {
                 debug!("send will: {:?}", will);
                 let will = Publish {
                     dup: false,
@@ -640,10 +711,15 @@ impl Session {
                     },
                     payload: will.payload.to_owned(),
                 };
-                self.context.publish(will).await?;
+                if let Err(error) = self.context.publish(will).await {
+                    warn!(cause = ?error, "will publish failure");
+                }
+            }
+            _ => {
+                debug!("Skip will. Session {} reconnected", self.client_id);
             }
         }
-        Ok(None)
+        session_expire_interval - delay
     }
 }
 
@@ -651,32 +727,6 @@ impl Drop for Session {
     #[instrument(skip(self), fields(peer = field::display(& self.peer),
     client_id = field::debug(& self.client_id)))]
     fn drop(&mut self) {
-        trace!(
-            "self.session_expire_interval {:?}",
-            self.session_expire_interval
-        );
-        match self.session_expire_interval {
-            None | Some(0) => {
-                if let Err(err) = self.context.remove(self.client_id.as_str()) {
-                    warn!(cause = ?err, "close session remove failure");
-                }
-            }
-            Some(session_expire_interval) => {
-                let now = Utc::now();
-                now.checked_add_signed(Duration::seconds(session_expire_interval as i64));
-                if let Err(err) = self.context.update(
-                    self.client_id.as_str(),
-                    SessionState {
-                        peer: self.peer,
-                        expire: Some(now.timestamp()),
-                        last_topic_id: None,
-                    },
-                ) {
-                    warn!(cause = ?err, "close session update failure");
-                }
-            }
-        };
-
-        info!("session closed");
+        trace!("drop session")
     }
 }
