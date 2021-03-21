@@ -2,6 +2,7 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::net::SocketAddr;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -17,7 +18,7 @@ use como_mqtt::v5::types::{Publish, QoS, ReasonCode, SubscriptionOptions};
 
 use crate::session::{SessionEvent, SubscribedTopics, TopicMessage};
 use crate::settings::Settings;
-use crate::topic::{PubMessage, Topics};
+use crate::topic::{NewTopicSubscriber, PubMessage, TopicManager};
 
 pub(crate) trait SessionStore {
     fn get(&self, client_id: &str) -> Result<Option<SessionState>>;
@@ -63,10 +64,12 @@ pub struct SessionState {
     pub last_topic_id: Option<u64>,
 }
 
-#[derive(Debug)]
-pub(crate) struct SessionContext {
-    pub settings: Arc<Settings>,
-    pub topic_manager: Arc<Topics>,
+#[derive(Clone)]
+pub(crate) struct SessionContext(Arc<SessionContextInner>);
+
+pub(crate) struct SessionContextInner {
+    settings: Arc<Settings>,
+    topic_manager: TopicManager,
     db: Db,
     sessions: Tree,
     subscriptions: Tree,
@@ -171,7 +174,28 @@ pub(crate) fn subscribe_topic(
     unsubscribe_tx
 }
 
+impl Deref for SessionContext {
+    type Target = SessionContextInner;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl SessionContext {
+    pub fn new(settings: Arc<Settings>) -> Result<Self> {
+        Ok(Self(Arc::new(SessionContextInner::new(settings)?)))
+    }
+    pub fn settings(&self) -> &Settings {
+        self.0.settings.borrow()
+    }
+
+    pub fn watch_new_topic(&self) -> NewTopicSubscriber {
+        self.0.topic_manager.topic_event()
+    }
+}
+
+impl SessionContextInner {
     pub fn new(settings: Arc<Settings>) -> Result<Self> {
         let db = sled::Config::new().temporary(true).create_new(true);
         let db = if let Some(path) = settings.connection.db_path.borrow() {
@@ -182,9 +206,9 @@ impl SessionContext {
         let sessions = db.open_tree("sessions")?;
         let subscriptions = db.open_tree("subscriptions")?;
 
-        let topic_manager = Arc::new(Topics::new(settings.topics.clone())?);
+        let topic_manager = TopicManager::new(settings.topics.clone())?;
 
-        Ok(SessionContext {
+        Ok(SessionContextInner {
             settings,
             topic_manager,
             db,
@@ -264,7 +288,7 @@ impl SessionContext {
     }
 }
 
-impl SessionStore for SessionContext {
+impl SessionStore for SessionContextInner {
     fn get(&self, client_id: &str) -> Result<Option<SessionState>, Error> {
         self.sessions
             .get(client_id)
@@ -397,7 +421,7 @@ impl SessionStore for SessionContext {
     }
 }
 
-impl SubscriptionsStore for SessionContext {
+impl SubscriptionsStore for SessionContextInner {
     fn get_subscription(
         &self,
         client_id: &str,

@@ -21,13 +21,12 @@ use crate::context::SessionContext;
 use crate::session::Session;
 use crate::shutdown::Shutdown;
 
-#[derive(Debug)]
 pub struct ConnectionHandler {
     pub(crate) peer: SocketAddr,
     limit_connections: Arc<Semaphore>,
-    shutdown_complete: mpsc::Sender<()>,
+    _shutdown_complete: mpsc::Sender<()>,
     keep_alive: Duration,
-    context: Arc<SessionContext>,
+    context: SessionContext,
     session: Option<Session>,
 }
 
@@ -36,13 +35,13 @@ impl ConnectionHandler {
         peer: SocketAddr,
         limit_connections: Arc<Semaphore>,
         shutdown_complete: mpsc::Sender<()>,
-        context: Arc<SessionContext>,
+        context: SessionContext,
     ) -> Self {
         ConnectionHandler {
             peer,
             limit_connections,
-            shutdown_complete,
-            keep_alive: Duration::from_millis(context.settings.connection.idle_keep_alive as u64),
+            _shutdown_complete: shutdown_complete,
+            keep_alive: Duration::from_millis(context.settings().connection.idle_keep_alive as u64),
             context,
             session: None,
         }
@@ -60,9 +59,6 @@ impl ConnectionHandler {
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_simple().to_string().into());
 
-        //let id = std::str::from_utf8(&identifier[..])?;
-        //debug!("client identifier: {}", id);
-
         let client_keep_alive = if msg.keep_alive != 0 {
             Some(msg.keep_alive)
         } else {
@@ -70,7 +66,7 @@ impl ConnectionHandler {
         };
         self.keep_alive = self
             .context
-            .settings
+            .settings()
             .connection
             .server_keep_alive
             .or(client_keep_alive)

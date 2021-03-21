@@ -2,7 +2,6 @@ use std::borrow::Borrow;
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Error, Result};
 use byteorder::{BigEndian, ReadBytesExt};
@@ -10,7 +9,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sled::Tree;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, field, info, instrument, trace, warn};
 
@@ -28,7 +27,7 @@ use crate::context::{
     subscribe_topic, SessionContext, SessionState, SessionStore, SubscriptionsStore,
 };
 use crate::exactly_once::{exactly_once_client, exactly_once_server};
-use crate::topic::{PubMessage, Topics};
+use crate::topic::{NewTopicSubscriber, PubMessage, TopicManager};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TopicMessage {
@@ -54,7 +53,6 @@ pub enum PublishEvent {
 pub(crate) type SubscribedTopics = HashMap<String, oneshot::Sender<()>>;
 pub(crate) type SubscriptionValue = (SubscriptionOptions, SubscribedTopics);
 
-#[derive(Debug)]
 pub(crate) struct Session {
     unique_id: u64,
     client_id: String,
@@ -68,9 +66,9 @@ pub(crate) struct Session {
     server_flows: BTreeMap<u16, Sender<PublishEvent>>,
     client_flows: BTreeMap<u16, Sender<PublishEvent>>,
     packet_identifier: PacketIdentifier,
-    context: Arc<SessionContext>,
+    context: SessionContext,
     topic_filters: HashMap<String, SubscriptionValue>,
-    topic_event: broadcast::Receiver<(String, Tree)>,
+    new_topic_subscriber: NewTopicSubscriber,
 }
 
 impl TopicMessage {
@@ -91,11 +89,11 @@ impl Session {
         peer: SocketAddr,
         properties: ConnectProperties,
         will: Option<Will>,
-        context: Arc<SessionContext>,
+        context: SessionContext,
     ) -> Self {
         info!("new session: {:?}", id);
         let (session_event_tx, session_event_rx) = mpsc::channel(32);
-        let topic_event = context.topic_manager.topic_event();
+        let topic_event = context.watch_new_topic();
         Self {
             unique_id: context.generate_id(),
             client_id: id,
@@ -112,7 +110,7 @@ impl Session {
             packet_identifier: Default::default(),
             context,
             topic_filters: HashMap::new(),
-            topic_event,
+            new_topic_subscriber: topic_event,
         }
     }
 
@@ -183,7 +181,7 @@ impl Session {
         let subscription_tx = self.session_event_tx.clone();
         let client_id = self.client_id.to_owned();
         for (topic_filter, (options, unsubscribes)) in self.topic_filters.iter_mut() {
-            match Topics::match_filter(topic_name.as_str(), topic_filter.as_str()) {
+            match TopicManager::match_filter(topic_name.as_str(), topic_filter.as_str()) {
                 Ok(true) => {
                     if !unsubscribes.contains_key(&topic_name) {
                         debug!(
@@ -256,7 +254,7 @@ impl Session {
                     return Ok(response);
                 }
             }
-            res = self.topic_event.recv() => {
+            res = self.new_topic_subscriber.recv() => {
                 match res {
                     Ok((topic_name, log)) => self.handle_topic_event(topic_name, log).await,
                     Err(err) => warn!(cause=?err, "new topic event recv error")
@@ -318,15 +316,16 @@ impl Session {
                     Some(MqttString::from(self.client_id.to_owned()))
                 };
 
-                let maximum_qos =
-                    if let Some(QoS::ExactlyOnce) = self.context.settings.connection.maximum_qos {
-                        None
-                    } else {
-                        self.context.settings.connection.maximum_qos
-                    };
+                let maximum_qos = if let Some(QoS::ExactlyOnce) =
+                    self.context.settings().connection.maximum_qos
+                {
+                    None
+                } else {
+                    self.context.settings().connection.maximum_qos
+                };
 
                 let session_expire_interval = if let Some(server_expire) =
-                    self.context.settings.connection.session_expire_interval
+                    self.context.settings().connection.session_expire_interval
                 {
                     if let Some(client_expire) = msg.properties.session_expire_interval {
                         Some(min(server_expire, client_expire))
@@ -345,18 +344,18 @@ impl Session {
                     reason_code: ReasonCode::Success,
                     properties: ConnAckProperties {
                         session_expire_interval,
-                        receive_maximum: self.context.settings.connection.receive_maximum,
+                        receive_maximum: self.context.settings().connection.receive_maximum,
                         maximum_qos,
-                        retain_available: self.context.settings.connection.retain_available,
-                        maximum_packet_size: self.context.settings.connection.maximum_packet_size,
+                        retain_available: self.context.settings().connection.retain_available,
+                        maximum_packet_size: self.context.settings().connection.maximum_packet_size,
                         assigned_client_identifier,
-                        topic_alias_maximum: self.context.settings.connection.topic_alias_maximum,
+                        topic_alias_maximum: self.context.settings().connection.topic_alias_maximum,
                         reason_string: None,
                         user_properties: vec![],
                         wildcard_subscription_available: None,
                         subscription_identifier_available: None,
                         shared_subscription_available: None,
-                        server_keep_alive: self.context.settings.connection.server_keep_alive,
+                        server_keep_alive: self.context.settings().connection.server_keep_alive,
                         response_information: None,
                         server_reference: None,
                         authentication_method: None,
@@ -411,7 +410,7 @@ impl Session {
                             properties: Default::default(),
                         })))
                     } else if self.server_flows.len()
-                        < self.context.settings.connection.receive_maximum.unwrap() as usize
+                        < self.context.settings().connection.receive_maximum.unwrap() as usize
                     {
                         self.context.publish(msg).await?;
                         let (tx, rx) = mpsc::channel(1);

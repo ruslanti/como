@@ -18,7 +18,7 @@ pub(crate) struct TlsTransport {
     limit_connections: Arc<Semaphore>,
     notify_shutdown: broadcast::Sender<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
-    context: Arc<SessionContext>,
+    context: SessionContext,
     ready: Arc<Barrier>,
 }
 
@@ -27,7 +27,7 @@ impl TlsTransport {
         limit_connections: Arc<Semaphore>,
         notify_shutdown: broadcast::Sender<()>,
         shutdown_complete_tx: mpsc::Sender<()>,
-        context: Arc<SessionContext>,
+        context: SessionContext,
         ready: Arc<Barrier>,
     ) -> Self {
         TlsTransport {
@@ -41,7 +41,7 @@ impl TlsTransport {
 
     #[instrument(skip(self), err)]
     pub(crate) async fn listen(&mut self) -> Result<()> {
-        if let Some(tls) = self.context.settings.service.tls.to_owned() {
+        if let Some(tls) = self.context.settings().service.tls.to_owned() {
             let address = format!("{}:{}", tls.bind, tls.port);
             let listener = TcpListener::bind(&address).await?;
 

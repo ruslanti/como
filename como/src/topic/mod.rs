@@ -1,6 +1,8 @@
 use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::Debug;
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Error, Result};
 use serde::{Deserialize, Serialize};
@@ -32,14 +34,52 @@ struct Topic {
     log: Tree,
 }
 
-pub struct Topics {
+pub(crate) struct Topics {
     db: Db,
     nodes: RwLock<TopicNode<Topic>>,
     new_topic_event: Sender<(String, Tree)>,
 }
 
-impl Topics {
+pub(crate) struct TopicManager(Arc<Topics>);
+
+impl Deref for TopicManager {
+    type Target = Topics;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl TopicManager {
     pub fn new(cfg: settings::Topics) -> Result<Self> {
+        Ok(Self(Arc::new(Topics::new(cfg)?)))
+    }
+
+    pub fn match_filter(topic_name: &str, topic_filter: &str) -> Result<bool> {
+        let topic_filter = topic_filter.parse::<TopicFilter>()?;
+        let topic_name = topic_name.parse()?;
+        Ok(topic_filter.matches(topic_name) == Status::Match)
+    }
+}
+
+pub struct NewTopicSubscriber(Receiver<(String, Tree)>);
+
+impl Deref for NewTopicSubscriber {
+    type Target = Receiver<(String, Tree)>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for NewTopicSubscriber {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Topics {
+    fn new(cfg: settings::Topics) -> Result<Self> {
         debug!("open topics db: {:?}", cfg);
         let db = sled::Config::new().temporary(cfg.temporary);
         let db = if let Some(path) = cfg.db_path {
@@ -79,8 +119,8 @@ impl Topics {
         })
     }
 
-    pub fn topic_event(&self) -> Receiver<(String, Tree)> {
-        self.new_topic_event.subscribe()
+    pub fn topic_event(&self) -> NewTopicSubscriber {
+        NewTopicSubscriber(self.new_topic_event.subscribe())
     }
 
     #[instrument(skip(self, msg))]
@@ -133,12 +173,6 @@ impl Topics {
             .into_iter()
             .map(|t| (t.name.to_owned(), t.log.clone()))
             .collect())
-    }
-
-    pub fn match_filter(topic_name: &str, topic_filter: &str) -> Result<bool> {
-        let topic_filter = topic_filter.parse::<TopicFilter>()?;
-        let topic_name = topic_name.parse()?;
-        Ok(topic_filter.matches(topic_name) == Status::Match)
     }
 }
 
