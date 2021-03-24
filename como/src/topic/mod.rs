@@ -110,7 +110,7 @@ impl Topics {
             })?;
         }
 
-        let (new_topic_event, _) = broadcast::channel(32);
+        let (new_topic_event, _) = broadcast::channel(1024);
 
         Ok(Self {
             db,

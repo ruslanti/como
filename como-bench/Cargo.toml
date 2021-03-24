@@ -16,6 +16,7 @@ tracing-subscriber = "0.2.16"
 config = { version = "0.10.1", features = ["toml"] }
 serde = { version = "1.0.123", features = ["derive"] }
 anyhow = "1.0.39"
+leaky-bucket = "0.10.0"
 #tracing = "0.1.25"
 #tracing-timing = "0.4.3"
 #clap = "2.33.3"

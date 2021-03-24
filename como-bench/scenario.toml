@@ -1,0 +1,17 @@
+pub_rate = 1000
+
+[[publications]]
+clients = 50
+topic_name = "/topic/01"
+
+[[publications]]
+clients = 50
+topic_name = "/topic/02"
+
+[[subscription]]
+clients = 5
+topic_filter = "/topic/01/+"
+
+[[subscription]]
+clients = 5
+topic_filter = "/topic/02/+"

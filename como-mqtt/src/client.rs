@@ -60,18 +60,27 @@ impl<'a> MqttClient {
         };
         trace!("send {}", connect);
         self.stream.send(ControlPacket::Connect(connect)).await?;
-        self.recv().await.and_then(|packet| match packet {
+        self.timeout_recv().await.and_then(|packet| match packet {
             ControlPacket::ConnAck(ack) => Ok(ack),
             _ => Err(anyhow!("unexpected: {}", packet)),
         })
     }
 
-    pub async fn recv(&mut self) -> Result<ControlPacket, Error> {
+    pub async fn timeout_recv(&mut self) -> Result<ControlPacket, Error> {
         timeout(self.timeout, self.stream.next())
             .await
             .map_err(Error::msg)
             .and_then(|r| r.ok_or_else(|| anyhow!("none message")))
             .and_then(|r| r)
+    }
+
+    pub async fn recv(&mut self) -> Result<ControlPacket, Error> {
+        self.stream
+            .next()
+            .await
+            .transpose()
+            .and_then(|r| r.ok_or_else(|| anyhow!("none message")))
+            .map_err(Error::msg)
     }
 
     pub async fn disconnect(&mut self) -> Result<Option<ControlPacket>> {
@@ -132,7 +141,7 @@ impl<'a> MqttClient {
         };
         trace!("send {}", publish);
         self.stream.send(ControlPacket::Publish(publish)).await?;
-        self.recv().await.and_then(|packet| match packet {
+        self.timeout_recv().await.and_then(|packet| match packet {
             ControlPacket::PubAck(ack) => Ok(ack),
             _ => Err(anyhow!("unexpected: {}", packet)),
         })
@@ -157,7 +166,7 @@ impl<'a> MqttClient {
         self.stream
             .send(ControlPacket::Subscribe(subscribe))
             .await?;
-        self.recv().await.and_then(|packet| match packet {
+        self.timeout_recv().await.and_then(|packet| match packet {
             ControlPacket::SubAck(ack) => Ok(ack),
             _ => Err(anyhow!("unexpected: {}", packet)),
         })

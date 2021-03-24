@@ -1,5 +1,5 @@
 [log]
-level = "info"
+level = "debug"
 #file = "como.log"
 
 #[service.tls]
@@ -8,5 +8,5 @@ level = "info"
 
 [connection]
 maximum_qos = 2
-session_expire_interval = 60
+#session_expire_interval = 10
 receive_maximum = 100

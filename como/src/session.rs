@@ -711,6 +711,6 @@ impl Drop for Session {
     #[instrument(skip(self), fields(peer = field::display(& self.peer),
     client_id = field::debug(& self.client_id)))]
     fn drop(&mut self) {
-        trace!("drop session")
+        info!("drop session")
     }
 }

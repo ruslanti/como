@@ -76,7 +76,7 @@ async fn connect_existing_session() -> anyhow::Result<()> {
     assert_none!(ack.properties.assigned_client_identifier);
     assert_none!(ack.properties.session_expire_interval);
     // expected #1 disconnect
-    assert_matches!(assert_ok!(client.recv().await), ControlPacket::Disconnect(d) if d.reason_code == ReasonCode::SessionTakenOver);
+    assert_matches!(assert_ok!(client.timeout_recv().await), ControlPacket::Disconnect(d) if d.reason_code == ReasonCode::SessionTakenOver);
     assert_none!(client2.disconnect().await?);
 
     // #3 connection
@@ -136,7 +136,7 @@ async fn publish_subscribe() -> anyhow::Result<()> {
             .await
     );
 
-    assert_matches!(assert_ok!(client.recv().await), ControlPacket::Publish(p) if p == Publish {
+    assert_matches!(assert_ok!(client.timeout_recv().await), ControlPacket::Publish(p) if p == Publish {
         dup: false,
         qos: QoS::AtMostOnce,
         retain: false,
@@ -146,7 +146,7 @@ async fn publish_subscribe() -> anyhow::Result<()> {
         payload: Bytes::from("payload01"),
         }
     );
-    assert_matches!(assert_ok!(client.recv().await), ControlPacket::Publish(p) if p == Publish {
+    assert_matches!(assert_ok!(client.timeout_recv().await), ControlPacket::Publish(p) if p == Publish {
         dup: false,
         qos: QoS::AtMostOnce,
         retain: false,
@@ -201,7 +201,7 @@ async fn retained_publish_subscribe() -> anyhow::Result<()> {
     let ack = assert_ok!(client.subscribe(QoS::AtMostOnce, "topic/+").await);
     assert_eq!(ack.reason_codes, vec![ReasonCode::Success]);
 
-    assert_matches!(assert_ok!(client.recv().await), ControlPacket::Publish(p) if p == Publish {
+    assert_matches!(assert_ok!(client.timeout_recv().await), ControlPacket::Publish(p) if p == Publish {
         dup: false,
         qos: QoS::AtMostOnce,
         retain: true,
@@ -211,7 +211,7 @@ async fn retained_publish_subscribe() -> anyhow::Result<()> {
         payload: Bytes::from("payload01a"),
         }
     );
-    assert_matches!(assert_ok!(client.recv().await), ControlPacket::Publish(p) if p == Publish {
+    assert_matches!(assert_ok!(client.timeout_recv().await), ControlPacket::Publish(p) if p == Publish {
         dup: false,
         qos: QoS::AtMostOnce,
         retain: true,
@@ -234,7 +234,7 @@ async fn retained_publish_subscribe() -> anyhow::Result<()> {
     assert_ok!(client2.connect(true).await);
     let ack = assert_ok!(client2.subscribe(QoS::AtMostOnce, "topic/+").await);
     assert_eq!(ack.reason_codes, vec![ReasonCode::Success]);
-    assert_matches!(assert_ok!(client2.recv().await), ControlPacket::Publish(p) if p == Publish {
+    assert_matches!(assert_ok!(client2.timeout_recv().await), ControlPacket::Publish(p) if p == Publish {
         dup: false,
         qos: QoS::AtMostOnce,
         retain: true,
@@ -244,7 +244,7 @@ async fn retained_publish_subscribe() -> anyhow::Result<()> {
         payload: Bytes::from("payload01a"),
         }
     );
-    assert_matches!(assert_ok!(client.recv().await), ControlPacket::Publish(p) if p == Publish {
+    assert_matches!(assert_ok!(client.timeout_recv().await), ControlPacket::Publish(p) if p == Publish {
         dup: false,
         qos: QoS::AtMostOnce,
         retain: true,
@@ -304,13 +304,13 @@ async fn broker_shutdown() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_millis(100)).await;
     drop(shutdown_notify);
 
-    assert_matches!(assert_ok!(client.recv().await), ControlPacket::Disconnect(d) if d == Disconnect {
+    assert_matches!(assert_ok!(client.timeout_recv().await), ControlPacket::Disconnect(d) if d == Disconnect {
            reason_code: ReasonCode::ServerShuttingDown,
            properties: Default::default()
         }
     );
 
-    let msg = assert_ok!(client2.recv().await);
+    let msg = assert_ok!(client2.timeout_recv().await);
     match msg {
         ControlPacket::Publish(p)
             if p == Publish {

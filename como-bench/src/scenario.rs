@@ -5,7 +5,6 @@ use serde::Deserialize;
 #[serde(default)]
 pub struct Publication {
     pub clients: usize,
-    pub rate: usize,
     pub topic_name: String,
     pub payload_size: usize,
 }
@@ -21,17 +20,17 @@ pub struct Subscription {
 #[serde(default)]
 pub struct Scenario {
     pub address: String,
-    pub publication: Publication,
-    pub subscription: Subscription,
+    pub pub_rate: usize,
+    pub publications: Vec<Publication>,
+    pub subscriptions: Vec<Subscription>,
 }
 
 impl Default for Publication {
     fn default() -> Self {
         Publication {
             clients: 10,
-            rate: 0,
             topic_name: "/topics".to_string(),
-            payload_size: 128,
+            payload_size: 32,
         }
     }
 }
@@ -49,8 +48,9 @@ impl Default for Scenario {
     fn default() -> Self {
         Scenario {
             address: "127.0.0.1:1883".to_string(),
-            publication: Default::default(),
-            subscription: Default::default(),
+            pub_rate: 10,
+            publications: vec![Publication::default()],
+            subscriptions: vec![Subscription::default()],
         }
     }
 }

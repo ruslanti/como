@@ -1,14 +1,16 @@
 use std::borrow::BorrowMut;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::signal;
-use tokio::sync::Barrier;
+use tokio::sync::{mpsc, Barrier};
 
 use como_mqtt::client::MqttClient;
 
-use crate::scenario::{Publication, Scenario};
+use crate::scenario::{Publication, Scenario, Subscription};
+use como_mqtt::v5::types::QoS;
+use leaky_bucket::LeakyBucket;
+use std::time::Duration;
 
 mod scenario;
 
@@ -17,10 +19,19 @@ struct PublicationBatch {
     address: String,
     publication: Publication,
     start: Arc<Barrier>,
+    stop: mpsc::Sender<()>,
 }
 
-async fn publish(client: &mut MqttClient, topic: &str, payload: Vec<u8>) {
+#[derive(Clone)]
+struct SubscriptionBatch {
+    address: String,
+    subscription: Subscription,
+    stop: mpsc::Sender<()>,
+}
+
+async fn publish(rate: LeakyBucket, client: &mut MqttClient, topic: &str, payload: Vec<u8>) {
     loop {
+        rate.acquire_one().await.unwrap();
         client
             .publish_most_once(topic, payload.clone(), false)
             .await
@@ -28,8 +39,15 @@ async fn publish(client: &mut MqttClient, topic: &str, payload: Vec<u8>) {
     }
 }
 
+async fn recv(client: &mut MqttClient) {
+    loop {
+        let _res = client.recv().await.unwrap();
+        //println!("{:?}", res);
+    }
+}
+
 impl PublicationBatch {
-    async fn run(&mut self, id: usize, stop: impl Future) {
+    async fn run(&mut self, rate: LeakyBucket, id: usize, stop: impl Future) {
         println!("run {}", id);
         let payload = vec![0xFF; self.publication.payload_size];
         let mut client = MqttClient::builder(self.address.as_str())
@@ -37,11 +55,12 @@ impl PublicationBatch {
             .await
             .unwrap();
         self.start.wait().await;
+        println!("start {}", id);
         let _ack = client.connect(true).await.unwrap();
         let topic = format!("{}/{}", self.publication.topic_name, id);
 
         tokio::select! {
-            _ = publish(client.borrow_mut(), topic.as_str(), payload)=> {
+            _ = publish(rate, client.borrow_mut(), topic.as_str(), payload)=> {
             },
             _ = stop => {
                 println!("stop {}", id);
@@ -53,130 +72,79 @@ impl PublicationBatch {
     }
 }
 
+impl SubscriptionBatch {
+    async fn run(&mut self, stop: impl Future) {
+        println!("subscribe {}", self.subscription.topic_filter);
+        let mut client = MqttClient::builder(self.address.as_str())
+            .build()
+            .await
+            .unwrap();
+        let _ack = client.connect(true).await.unwrap();
+        let _ack = client
+            .subscribe(QoS::AtLeastOnce, self.subscription.topic_filter.as_str())
+            .await
+            .unwrap();
+
+        tokio::select! {
+            res = recv(client.borrow_mut()) => {
+                println!("res {:?}", res)
+            },
+            _ = stop => {
+                println!("stop {}", self.subscription.topic_filter);
+            }
+        }
+
+        client.disconnect().await.unwrap();
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
     let scenario = Scenario::new().unwrap();
-    let publication = scenario.publication;
-    let subscription = scenario.subscription;
-    let client_num = publication.clients;
-    let barrier = Arc::new(Barrier::new(client_num));
-    let pub_batch = PublicationBatch {
-        address: scenario.address,
-        publication,
-        start: barrier,
-    };
-    for id in 0..pub_batch.publication.clients {
-        let mut batch = pub_batch.clone();
-        tokio::spawn(async move {
-            batch.run(id, signal::ctrl_c()).await;
-        });
-    }
+    let publications = scenario.publications;
+    let client_num = publications.iter().map(|p| p.clients).sum();
+    let address = scenario.address;
 
-    /*    let subscriber = Builder::default().build(|| Histogram::new_with_max(1_000_000, 2).unwrap());
-        let dispatch = Dispatch::new(subscriber);
-        tracing::dispatcher::set_global_default(dispatch.clone())
-            .expect("setting tracing default failed");
-
-        tokio::spawn(async move {
-            let mut rng = rand::thread_rng();
-            println!("start");
-            loop {
-                trace_span!("foo").in_scope(|| {
-                    trace!("foo_start");
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    //trace_span!("bar").in_scope(|| {
-                    trace!("bar_start");
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    let y: f64 = rng.gen();
-                    if y > 0.5 {
-                        trace!("bar_mid1");
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    } else {
-                        trace!("bar_mid2");
-                        std::thread::sleep(std::time::Duration::from_millis(2));
-                    }
-                    trace!("bar_end");
-                    //});
-                    trace!("foo_end");
-                })
-            }
-        });
-    */
-    /*    let n = 10;
-    let barrier = Arc::new(Barrier::new(n));
-    for _ in 0..n {
-        let start_barrier = barrier.clone();
-        tokio::spawn(async move {
-            client(start_barrier).await;
-        });
-        println!("end client");
-    }*/
-
-    /*    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        println!("end sleep");
-        dispatch
-            .downcast_ref::<TimingSubscriber>()
-            .unwrap()
-            .with_histograms(|hs| {
-                /*            assert_eq!(hs.len(), 1);
-                let hs = &mut hs.get_mut("client").unwrap();
-
-                for key in hs.keys() {
-                    println!("{}", key);
-                }
-                println!("refresh1");*/
-                let timeout = Duration::from_secs(1);
-                /*            hs.get_mut("before connect")
-                    .unwrap()
-                    .refresh_timeout(timeout);
-                hs.get_mut("after connect")
-                    .unwrap()
-                    .refresh_timeout(timeout);
-
-                hs.get_mut("after push").unwrap().refresh_timeout(timeout);*/
-
-                for (span_group, hs) in hs {
-                    println!("span_group {}", span_group);
-                    for (event_group, h) in hs {
-                        //  println!("refresh {:?}:{:?}", event_group, h);
-                        // make sure we see the latest samples:
-                        h.refresh_timeout(timeout);
-                        // print the median:
-                        println!(
-                            "{} -> {}: {}ns",
-                            span_group,
-                            event_group,
-                            h.value_at_quantile(0.5)
-                        )
-                    }
-                }
-            });
-    */
-    println!("end report");
-    signal::ctrl_c().await.unwrap();
-}
-
-//#[instrument]
-async fn client(start: Arc<Barrier>) {
-    let payload = vec![0xFF; 128];
-    let mut client = MqttClient::builder(&format!("127.0.0.1:{}", 1883))
+    let rate = LeakyBucket::builder()
+        .max(scenario.pub_rate)
+        .refill_interval(Duration::from_secs(1))
+        .refill_amount(scenario.pub_rate)
         .build()
-        .await
         .unwrap();
 
-    start.wait().await;
+    let barrier = Arc::new(Barrier::new(client_num));
+    let (shutdown_complete_tx, mut shutdown_complete_rx) = mpsc::channel(1);
 
-    //  trace!("before connect");
-    let _ack = client.connect(true).await.unwrap();
-    //  trace!("after connect");
-
-    for _ in 0..100 {
-        client
-            .publish_most_once("topic", payload.clone(), false)
-            .await
-            .unwrap();
-        //    trace!("after push");
+    for publication in publications.into_iter() {
+        let pub_batch = PublicationBatch {
+            address: address.to_owned(),
+            publication,
+            start: barrier.clone(),
+            stop: shutdown_complete_tx.clone(),
+        };
+        for id in 0..pub_batch.publication.clients {
+            let mut batch = pub_batch.clone();
+            let rate = rate.clone();
+            tokio::spawn(async move {
+                batch.run(rate, id, signal::ctrl_c()).await;
+            });
+        }
     }
-    client.disconnect().await.unwrap();
+
+    for subscription in scenario.subscriptions.into_iter() {
+        let sub_batch = SubscriptionBatch {
+            address: address.to_owned(),
+            subscription,
+            stop: shutdown_complete_tx.clone(),
+        };
+        for _ in 0..sub_batch.subscription.clients {
+            let mut batch = sub_batch.clone();
+            tokio::spawn(async move {
+                batch.run(signal::ctrl_c()).await;
+            });
+        }
+    }
+
+    shutdown_complete_rx.recv().await;
 }
