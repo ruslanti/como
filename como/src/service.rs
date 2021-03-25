@@ -160,6 +160,7 @@ impl TcpTransport {
             let stream = accept(listener.borrow()).await?;
 
             let mut handler = ConnectionHandler::new(
+                "tcp",
                 stream.peer_addr()?,
                 self.limit_connections.clone(),
                 self.shutdown_complete_tx.clone(),

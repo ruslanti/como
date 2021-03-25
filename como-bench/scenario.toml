@@ -1,11 +1,11 @@
-pub_rate = 1000
+pub_rate = 10
 
 [[publications]]
-clients = 50
+clients = 5
 topic_name = "/topic/01"
 
 [[publications]]
-clients = 50
+clients = 5
 topic_name = "/topic/02"
 
 [[subscription]]

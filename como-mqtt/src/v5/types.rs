@@ -479,6 +479,28 @@ impl fmt::Debug for PacketPart {
     }
 }
 
+impl Into<&str> for &ControlPacket {
+    fn into(self) -> &'static str {
+        match self {
+            ControlPacket::Connect(_) => "CONNECT",
+            ControlPacket::ConnAck(_) => "CONNACK",
+            ControlPacket::Publish(_) => "PUBLISH",
+            ControlPacket::PubAck(_) => "PUBACK",
+            ControlPacket::PubRec(_) => "PUBREC",
+            ControlPacket::PubRel(_) => "PUBREL",
+            ControlPacket::PubComp(_) => "PUBCOMP",
+            ControlPacket::Subscribe(_) => "SUBSCRIBE",
+            ControlPacket::SubAck(_) => "SUBACK",
+            ControlPacket::UnSubscribe(_) => "UNSUBSCRIBE",
+            ControlPacket::UnSubAck(_) => "UNSUBACK",
+            ControlPacket::PingReq => "PINGREQ",
+            ControlPacket::PingResp => "PINGRESP",
+            ControlPacket::Disconnect(_) => "DISCONNECT",
+            ControlPacket::Auth(_) => "AUTH",
+        }
+    }
+}
+
 impl fmt::Display for ControlPacket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
