@@ -1,15 +1,13 @@
 use anyhow::Result;
-use lazy_static::lazy_static;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::signal;
-use tracing::{debug, error, Level};
+use tracing::{debug, Level};
 
+use como::metrics::{metrics_handler, register_metrics};
 use como::service;
 use como::settings::Settings;
-use prometheus::{
-    HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
-};
+
 use warp::ws::WebSocket;
 use warp::{Filter, Rejection, Reply};
 
@@ -17,10 +15,6 @@ use warp::{Filter, Rejection, Reply};
 use std::time::Duration;
 use tracing_subscriber::prelude::*;
  */
-
-lazy_static! {
-    pub static ref REGISTRY: Registry = Registry::new();
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -57,7 +51,7 @@ async fn main() -> Result<()> {
                 .delimited(", ");
     */
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(Level::from_str(settings.log.level.as_str())?)
+        //.with_max_level(Level::from_str(settings.log.level.as_str())?)
         .with_ansi(true)
         .with_writer(non_blocking)
         //.pretty()
@@ -71,67 +65,24 @@ async fn main() -> Result<()> {
 
     debug!("{:?}", settings);
 
+    register_metrics();
+
     let metrics_route = warp::path!("metrics").and_then(metrics_handler);
     let ws_route = warp::path("ws")
         .and(warp::ws())
         .and(warp::path::param())
         .and_then(ws_handler);
 
-    debug!("Started web on port 8080");
-    /*    warp::serve(metrics_route.or(ws_route))
-    .run(([0, 0, 0, 0], 8080))
-    .await;*/
-
-    //service::run(settings, signal::ctrl_c()).await
-    let (_, warp) = warp::serve(metrics_route.or(ws_route))
-        .bind_with_graceful_shutdown(([0, 0, 0, 0], 8080), async {
-            signal::ctrl_c().await.unwrap()
-        });
-
-    tokio::spawn(warp);
+    tokio::spawn(warp::serve(metrics_route.or(ws_route)).run(([0, 0, 0, 0], 8080)));
 
     service::run(settings, signal::ctrl_c()).await
-}
-
-async fn metrics_handler() -> Result<impl Reply, Rejection> {
-    use prometheus::Encoder;
-    let encoder = prometheus::TextEncoder::new();
-
-    let mut buffer = Vec::new();
-    if let Err(e) = encoder.encode(&REGISTRY.gather(), &mut buffer) {
-        error!("could not encode custom metrics: {}", e);
-    };
-    let mut res = match String::from_utf8(buffer.clone()) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("custom metrics could not be from_utf8'd: {}", e);
-            String::default()
-        }
-    };
-    buffer.clear();
-
-    let mut buffer = Vec::new();
-    if let Err(e) = encoder.encode(&prometheus::gather(), &mut buffer) {
-        error!("could not encode prometheus metrics: {}", e);
-    };
-    let res_custom = match String::from_utf8(buffer.clone()) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("prometheus metrics could not be from_utf8'd: {}", e);
-            String::default()
-        }
-    };
-    buffer.clear();
-
-    res.push_str(&res_custom);
-    Ok(res)
 }
 
 async fn ws_handler(ws: warp::ws::Ws, id: String) -> Result<impl Reply, Rejection> {
     Ok(ws.on_upgrade(move |socket| client_connection(socket, id)))
 }
 
-async fn client_connection(ws: WebSocket, id: String) {
+async fn client_connection(_ws: WebSocket, _id: String) {
     /*let (_client_ws_sender, mut client_ws_rcv) = ws.split();
 
     CONNECTED_CLIENTS.inc();

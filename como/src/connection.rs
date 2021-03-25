@@ -18,6 +18,7 @@ use uuid::Uuid;
 use como_mqtt::v5::types::{Auth, Connect, ControlPacket, Disconnect, MQTTCodec, ReasonCode};
 
 use crate::context::SessionContext;
+use crate::metrics::CONNECTED_CLIENTS;
 use crate::session::Session;
 use crate::shutdown::Shutdown;
 
@@ -37,6 +38,7 @@ impl ConnectionHandler {
         shutdown_complete: mpsc::Sender<()>,
         context: SessionContext,
     ) -> Self {
+        CONNECTED_CLIENTS.with_label_values(&["404", "POST"]).inc();
         ConnectionHandler {
             peer,
             limit_connections,
@@ -202,6 +204,7 @@ impl ConnectionHandler {
 
 impl Drop for ConnectionHandler {
     fn drop(&mut self) {
+        CONNECTED_CLIENTS.with_label_values(&["404", "POST"]).dec();
         self.limit_connections.add_permits(1);
     }
 }

@@ -12,26 +12,28 @@ services:
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
-    networks:
-      monitoring:
-        aliases:
-          - grafana
-    ports:
-      - 3000:3000
+    network_mode: "host"
+    #networks:
+    #  monitoring:
+    #    aliases:
+    #      - grafana
+    #ports:
+    #  - 3000:3000
     depends_on:
       - prometheus
 
   prometheus:
     container_name: prometheus
     image: prom/prometheus
-    ports:
-      - 9090:9090
+    #ports:
+    #  - 9090:9090
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - ./prometheus:/prometheus
-    networks:
-      monitoring:
-        aliases:
-          - prometheus
-networks:
-  monitoring:
+    network_mode: "host"
+    #networks:
+    #  monitoring:
+    #    aliases:
+    #      - prometheus
+#networks:
+#  monitoring:
