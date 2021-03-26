@@ -1,5 +1,5 @@
 mod connection;
-mod context;
+pub mod context;
 mod exactly_once;
 pub mod metric;
 pub mod service;

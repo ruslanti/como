@@ -14,6 +14,7 @@ use tracing::{debug, instrument, trace, warn};
 
 use como_mqtt::v5::types::{Publish, QoS};
 
+use crate::metric;
 use crate::settings;
 use crate::topic::filter::{Status, TopicFilter};
 use crate::topic::path::TopicNode;
@@ -134,6 +135,7 @@ impl Topics {
         if topic.is_none() {
             //new topic event
             debug!("new topic {}", topic_name);
+            metric::TOPICS_NUMBER.with_label_values(&[]).inc();
             let log = self.db.open_tree(topic_name)?;
             *topic = Some(Topic {
                 name: topic_name.to_owned(),
@@ -158,6 +160,9 @@ impl Topics {
             let value = bincode::serialize(&m)?;
             trace!("append {} - {:?} bytes", id, value);
             topic.log.insert(id.to_be_bytes(), value)?;
+            metric::TOPICS_SIZE
+                .with_label_values(&[])
+                .set(self.db.size_on_disk().unwrap_or(0) as i64);
             Ok(())
         } else {
             Err(anyhow!("error"))

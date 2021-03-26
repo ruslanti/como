@@ -7,6 +7,7 @@ use tracing::{debug, Level};
 use warp::ws::WebSocket;
 use warp::{Filter, Rejection, Reply};
 
+use como::context::SessionContext;
 use como::metric::metrics_handler;
 use como::service;
 use como::settings::Settings;
@@ -40,6 +41,7 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber).expect("no global subscriber has been set");
 
     debug!("{:?}", settings);
+    let context = SessionContext::new(settings)?;
 
     let metrics_route = warp::path!("metrics").and_then(metrics_handler);
     let ws_route = warp::path("ws")
@@ -49,7 +51,7 @@ async fn main() -> Result<()> {
 
     tokio::spawn(warp::serve(metrics_route.or(ws_route)).run(([0, 0, 0, 0], 8080)));
 
-    service::run(settings, signal::ctrl_c()).await
+    service::run(context, signal::ctrl_c()).await
 }
 
 async fn ws_handler(ws: warp::ws::Ws, id: String) -> Result<impl Reply, Rejection> {

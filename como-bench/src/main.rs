@@ -19,14 +19,14 @@ struct PublicationBatch {
     address: String,
     publication: Publication,
     start: Arc<Barrier>,
-    stop: mpsc::Sender<()>,
+    shutdown_complete: mpsc::Sender<()>,
 }
 
 #[derive(Clone)]
 struct SubscriptionBatch {
     address: String,
     subscription: Subscription,
-    stop: mpsc::Sender<()>,
+    shutdown_complete: mpsc::Sender<()>,
 }
 
 async fn publish(rate: LeakyBucket, client: &mut MqttClient, topic: &str, payload: Vec<u8>) {
@@ -114,14 +114,14 @@ async fn main() {
         .unwrap();
 
     let barrier = Arc::new(Barrier::new(client_num));
-    let (shutdown_complete_tx, mut shutdown_complete_rx) = mpsc::channel(1);
+    let (shutdown_complete_tx, mut shutdown_complete_rx) = mpsc::channel(1024);
 
     for publication in publications.into_iter() {
         let pub_batch = PublicationBatch {
             address: address.to_owned(),
             publication,
             start: barrier.clone(),
-            stop: shutdown_complete_tx.clone(),
+            shutdown_complete: shutdown_complete_tx.clone(),
         };
         for id in 0..pub_batch.publication.clients {
             let mut batch = pub_batch.clone();
@@ -136,7 +136,7 @@ async fn main() {
         let sub_batch = SubscriptionBatch {
             address: address.to_owned(),
             subscription,
-            stop: shutdown_complete_tx.clone(),
+            shutdown_complete: shutdown_complete_tx.clone(),
         };
         for _ in 0..sub_batch.subscription.clients {
             let mut batch = sub_batch.clone();

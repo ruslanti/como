@@ -10,7 +10,6 @@ use tracing::{error, info, instrument, warn};
 
 use crate::connection::ConnectionHandler;
 use crate::context::SessionContext;
-use crate::settings::Settings;
 use crate::shutdown::Shutdown;
 use crate::tls_service::TlsTransport;
 
@@ -29,19 +28,17 @@ struct TcpTransport {
     ready: Arc<Barrier>,
 }
 
-pub async fn run(settings: Arc<Settings>, shutdown: impl Future) -> Result<()> {
+pub async fn run(context: SessionContext, shutdown: impl Future) -> Result<()> {
     let ready = Arc::new(Barrier::new(1));
-    run_with_ready(settings, shutdown, ready).await
+    run_with_ready(context, shutdown, ready).await
 }
 
 pub async fn run_with_ready(
-    settings: Arc<Settings>,
+    context: SessionContext,
     shutdown: impl Future,
     ready: Arc<Barrier>,
 ) -> Result<()> {
-    let limit_connections = Arc::new(Semaphore::new(settings.service.max_connections));
-
-    let context = SessionContext::new(settings)?;
+    let limit_connections = Arc::new(Semaphore::new(context.settings().service.max_connections));
 
     let (notify_shutdown, _) = broadcast::channel(1);
     let (shutdown_complete_tx, shutdown_complete_rx) = mpsc::channel(1);

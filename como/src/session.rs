@@ -27,6 +27,7 @@ use crate::context::{
     subscribe_topic, SessionContext, SessionState, SessionStore, SubscriptionsStore,
 };
 use crate::exactly_once::{exactly_once_client, exactly_once_server};
+use crate::metric;
 use crate::topic::{NewTopicSubscriber, PubMessage, TopicManager};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -92,6 +93,8 @@ impl Session {
         context: SessionContext,
     ) -> Self {
         info!("new session: {:?}", id);
+        metric::ACTIVE_SESSIONS.with_label_values(&[]).inc();
+
         let (session_event_tx, session_event_rx) = mpsc::channel(32);
         let topic_event = context.watch_new_topic();
         Self {
@@ -711,6 +714,7 @@ impl Drop for Session {
     #[instrument(skip(self), fields(peer = field::display(& self.peer),
     client_id = field::debug(& self.client_id)))]
     fn drop(&mut self) {
-        info!("drop session")
+        info!("drop session");
+        metric::ACTIVE_SESSIONS.with_label_values(&[]).dec();
     }
 }

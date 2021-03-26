@@ -1,4 +1,4 @@
-pub_rate = 10
+pub_rate = 10000
 
 [[publications]]
 clients = 5

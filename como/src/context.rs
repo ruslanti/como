@@ -65,9 +65,9 @@ pub struct SessionState {
 }
 
 #[derive(Clone)]
-pub(crate) struct SessionContext(Arc<SessionContextInner>);
+pub struct SessionContext(Arc<SessionContextInner>);
 
-pub(crate) struct SessionContextInner {
+pub struct SessionContextInner {
     settings: Arc<Settings>,
     topic_manager: TopicManager,
     db: Db,
