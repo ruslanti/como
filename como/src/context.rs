@@ -5,8 +5,8 @@ use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use anyhow::{Context, Error};
 use anyhow::Result;
+use anyhow::{Context, Error};
 use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
 use sled::{Batch, Db, Event, IVec, Subscriber, Tree};
@@ -18,7 +18,7 @@ use como_mqtt::v5::types::{Publish, QoS, ReasonCode, SubscriptionOptions};
 
 use crate::session::{SessionEvent, SubscribedTopics, TopicMessage};
 use crate::settings::Settings;
-use crate::topic::{NewTopicSubscriber, PubMessage, TopicManager};
+use crate::topic::{NewTopicSubscriber, TopicManager, Values};
 
 pub(crate) trait SessionStore {
     fn get(&self, client_id: &str) -> Result<Option<SessionState>>;
@@ -242,65 +242,22 @@ impl SessionContextInner {
             QoS::ExactlyOnce => ReasonCode::GrantedQoS2,
         };
 
-        for (topic_name, log, retained) in channels {
-            if let Some(id) = retained {
-                match log.get(id.to_be_bytes()) {
-                    Ok(Some(value)) => {
-                        match bincode::deserialize::<PubMessage>(value.as_ref()) {
-                            Ok(msg) => {
-                                if msg.retain && !msg.payload.is_empty() {
-                                    if let Err(err) = session_event_tx
-                                        .send(SessionEvent::TopicMessage(TopicMessage::new(
-                                            id,
-                                            topic_name.to_owned(),
-                                            options.clone(),
-                                            msg,
-                                        )))
-                                        .await
-                                    {
-                                        warn!(cause = ?err, "subscription send");
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                warn!(cause = ?err, "deserialization error");
-                                break;
-                            }
-                        };
+        for (topic_name, subscriber, retained) in channels {
+            if let Some((id, msg)) = retained {
+                if msg.retain && !msg.payload.is_empty() {
+                    if let Err(err) = session_event_tx
+                        .send(SessionEvent::TopicMessage(TopicMessage::new(
+                            id,
+                            topic_name.to_owned(),
+                            options.clone(),
+                            msg,
+                        )))
+                        .await
+                    {
+                        warn!(cause = ?err, "subscription send");
                     }
-                    Ok(None) => debug!("topic load retain none"),
-                    Err(err) => warn!(cause = ?err, "topic load retain error"),
                 }
             }
-            /*let mut last = log.last().ok().flatten();
-            while let Some((key, value)) = last {
-                let id = key.as_ref().read_u64::<BigEndian>().unwrap_or(0);
-                match bincode::deserialize::<PubMessage>(value.as_ref()) {
-                    Ok(msg) => {
-                        if msg.retain {
-                            if !msg.payload.is_empty() {
-                                if let Err(err) = session_event_tx
-                                    .send(SessionEvent::TopicMessage(TopicMessage::new(
-                                        id,
-                                        topic_name.to_owned(),
-                                        options.clone(),
-                                        msg,
-                                    )))
-                                    .await
-                                {
-                                    warn!(cause = ?err, "subscription send");
-                                }
-                            }
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        warn!(cause = ?err, "deserialization error");
-                        break;
-                    }
-                };
-                last = log.get_lt(key).ok().flatten();
-            }*/
 
             unsubscribes.insert(
                 topic_name.to_owned(),
@@ -309,12 +266,20 @@ impl SessionContextInner {
                     topic_name.to_owned(),
                     options.to_owned(),
                     session_event_tx.clone(),
-                    log.watch_prefix(vec![]),
+                    subscriber,
                 ),
             );
         }
 
         Ok((reason_code, unsubscribes))
+    }
+
+    pub fn topic_values(&self, topic_name: &str) -> Result<Values> {
+        self.topic_manager.values(topic_name)
+    }
+
+    pub fn topic_subscriber(&self, topic_name: &str) -> Result<Subscriber> {
+        self.topic_manager.subscriber(topic_name)
     }
 }
 

@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 
 use anyhow::{anyhow, Context, Error, Result};
-use byteorder::{BigEndian, ReadBytesExt};
+
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use sled::Tree;
+
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, Duration};
@@ -179,7 +179,7 @@ impl Session {
         }
     }
 
-    async fn handle_topic_event(&mut self, topic_name: String, log: Tree) {
+    async fn handle_topic_event(&mut self, topic_name: String) {
         debug!("new topic event: {}", topic_name);
         let subscription_tx = self.session_event_tx.clone();
         let client_id = self.client_id.to_owned();
@@ -193,11 +193,8 @@ impl Session {
                             topic_filter.as_str()
                         );
 
-                        if let Some((key, value)) = log.last().ok().flatten() {
-                            let id = key.as_ref().read_u64::<BigEndian>().unwrap_or(0);
-                            if let Ok(msg) = bincode::deserialize::<PubMessage>(value.as_ref())
-                                .context("deserialize event")
-                            {
+                        if let Ok(values) = self.context.topic_values(topic_name.as_str()) {
+                            for (id, msg) in values {
                                 if let Err(err) = self
                                     .session_event_tx
                                     .send(SessionEvent::TopicMessage(TopicMessage::new(
@@ -211,18 +208,22 @@ impl Session {
                                     warn!(cause = ?err, "subscription send");
                                 }
                             }
-                        };
+                        }
 
-                        unsubscribes.insert(
-                            topic_name.to_owned(),
-                            subscribe_topic(
-                                client_id.to_owned(),
+                        if let Ok(subscriber) = self.context.topic_subscriber(topic_name.as_str()) {
+                            unsubscribes.insert(
                                 topic_name.to_owned(),
-                                options.to_owned(),
-                                subscription_tx.clone(),
-                                log.watch_prefix(vec![]),
-                            ),
-                        );
+                                subscribe_topic(
+                                    client_id.to_owned(),
+                                    topic_name.to_owned(),
+                                    options.to_owned(),
+                                    subscription_tx.clone(),
+                                    subscriber,
+                                ),
+                            );
+                        } else {
+                            warn!("subscribe topic {} error", topic_name);
+                        }
                     } else {
                         debug!(
                             "already subscribed topic: {} match topic filter: {}",
@@ -264,7 +265,7 @@ impl Session {
                 },
                 res = new_topic_subscriber.recv() => {
                     match res {
-                        Ok((topic_name, log)) => self.handle_topic_event(topic_name, log).await,
+                        Ok(topic_name) => self.handle_topic_event(topic_name).await,
                         Err(err) => warn!(cause=?err, "new topic event recv error")
                     };
                     Ok(None)
