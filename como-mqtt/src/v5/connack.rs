@@ -9,7 +9,7 @@ use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::encode_utf8_string;
 use crate::v5::encoder::RemainingLength;
 use crate::v5::property::*;
-use crate::v5::types::{ConnAck, ControlPacket, MQTTCodec};
+use crate::v5::types::{ConnAck, ControlPacket, MqttCodec};
 
 pub fn decode_connack(mut reader: Bytes) -> Result<Option<ControlPacket>> {
     end_of_stream!(reader.remaining() < 3, "connack flags");
@@ -93,7 +93,7 @@ pub fn decode_connack_properties(mut reader: Bytes) -> Result<ConnAckProperties>
     Ok(builder.connack())
 }
 
-impl Encoder<ConnAckProperties> for MQTTCodec {
+impl Encoder<ConnAckProperties> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(
@@ -128,7 +128,7 @@ impl Encoder<ConnAckProperties> for MQTTCodec {
     }
 }
 
-impl Encoder<ConnAck> for MQTTCodec {
+impl Encoder<ConnAck> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, msg: ConnAck, writer: &mut BytesMut) -> Result<(), Self::Error> {

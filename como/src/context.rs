@@ -18,7 +18,7 @@ use como_mqtt::v5::types::{Publish, QoS, ReasonCode, SubscriptionOptions};
 
 use crate::session::{SessionEvent, SubscribedTopics, TopicMessage};
 use crate::settings::Settings;
-use crate::topic::{NewTopicSubscriber, PubMessage, TopicManager};
+use crate::topic::{NewTopicSubscriber, TopicManager, Values};
 
 pub(crate) trait SessionStore {
     fn get(&self, client_id: &str) -> Result<Option<SessionState>>;
@@ -65,9 +65,9 @@ pub struct SessionState {
 }
 
 #[derive(Clone)]
-pub(crate) struct SessionContext(Arc<SessionContextInner>);
+pub struct SessionContext(Arc<SessionContextInner>);
 
-pub(crate) struct SessionContextInner {
+pub struct SessionContextInner {
     settings: Arc<Settings>,
     topic_manager: TopicManager,
     db: Db,
@@ -218,13 +218,14 @@ impl SessionContextInner {
     }
 
     pub fn generate_id(&self) -> u64 {
-        self.db.generate_id().unwrap_or(rand::random())
+        self.db.generate_id().unwrap_or_else(|_| rand::random())
     }
 
     pub(crate) async fn publish(&self, msg: Publish) -> Result<()> {
         self.topic_manager.publish(msg).await
     }
 
+    #[instrument(skip(self, options, session_event_tx), err)]
     pub(crate) async fn subscribe(
         &self,
         client_id: &str,
@@ -234,42 +235,28 @@ impl SessionContextInner {
     ) -> Result<(ReasonCode, SubscribedTopics)> {
         let mut unsubscribes = HashMap::new();
         let channels = self.topic_manager.subscribe(topic_filter).await?;
-        trace!("subscribe returns {} subscriptions", channels.len());
+        debug!("subscribe returns {} subscriptions", channels.len());
         let reason_code = match options.qos {
             QoS::AtMostOnce => ReasonCode::Success,
             QoS::AtLeastOnce => ReasonCode::GrantedQoS1,
             QoS::ExactlyOnce => ReasonCode::GrantedQoS2,
         };
 
-        for (topic_name, log) in channels {
-            let mut last = log.last().ok().flatten();
-            while let Some((key, value)) = last {
-                let id = key.as_ref().read_u64::<BigEndian>().unwrap_or(0);
-                match bincode::deserialize::<PubMessage>(value.as_ref()) {
-                    Ok(msg) => {
-                        if msg.retain {
-                            if !msg.payload.is_empty() {
-                                if let Err(err) = session_event_tx
-                                    .send(SessionEvent::TopicMessage(TopicMessage::new(
-                                        id,
-                                        topic_name.to_owned(),
-                                        options.clone(),
-                                        msg,
-                                    )))
-                                    .await
-                                {
-                                    warn!(cause = ?err, "subscription send");
-                                }
-                            }
-                            break;
-                        }
+        for (topic_name, subscriber, retained) in channels {
+            if let Some((id, msg)) = retained {
+                if msg.retain && !msg.payload.is_empty() {
+                    if let Err(err) = session_event_tx
+                        .send(SessionEvent::TopicMessage(TopicMessage::new(
+                            id,
+                            topic_name.to_owned(),
+                            options.clone(),
+                            msg,
+                        )))
+                        .await
+                    {
+                        warn!(cause = ?err, "subscription send");
                     }
-                    Err(err) => {
-                        warn!(cause = ?err, "deserialization error");
-                        break;
-                    }
-                };
-                last = log.get_lt(key).ok().flatten();
+                }
             }
 
             unsubscribes.insert(
@@ -279,12 +266,20 @@ impl SessionContextInner {
                     topic_name.to_owned(),
                     options.to_owned(),
                     session_event_tx.clone(),
-                    log.watch_prefix(vec![]),
+                    subscriber,
                 ),
             );
         }
 
         Ok((reason_code, unsubscribes))
+    }
+
+    pub fn topic_values(&self, topic_name: &str) -> Result<Values> {
+        self.topic_manager.values(topic_name)
+    }
+
+    pub fn topic_subscriber(&self, topic_name: &str) -> Result<Subscriber> {
+        self.topic_manager.subscriber(topic_name)
     }
 }
 

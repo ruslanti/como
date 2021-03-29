@@ -123,21 +123,21 @@ impl From<Retain> for u8 {
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub enum PacketType {
-    CONNECT,
-    CONNACK,
-    PUBLISH { dup: bool, qos: QoS, retain: bool },
-    PUBACK,
-    PUBREC,
-    PUBREL,
-    PUBCOMP,
-    SUBSCRIBE,
-    SUBACK,
-    UNSUBSCRIBE,
-    UNSUBACK,
-    PINGREQ,
-    PINGRESP,
-    DISCONNECT,
-    AUTH,
+    Connect,
+    ConnAck,
+    Publish { dup: bool, qos: QoS, retain: bool },
+    PubAck,
+    PubRec,
+    PubRel,
+    PubComp,
+    Subscribe,
+    SubAck,
+    UnSubscribe,
+    UnSubAck,
+    PingReq,
+    PingResp,
+    Disconnect,
+    Auth,
 }
 
 impl TryFrom<u8> for PacketType {
@@ -145,50 +145,50 @@ impl TryFrom<u8> for PacketType {
 
     fn try_from(v: u8) -> anyhow::Result<Self> {
         match v {
-            0x10 => Ok(PacketType::CONNECT),
-            0x20 => Ok(PacketType::CONNACK),
-            0x30..=0x3F => Ok(PacketType::PUBLISH {
+            0x10 => Ok(PacketType::Connect),
+            0x20 => Ok(PacketType::ConnAck),
+            0x30..=0x3F => Ok(PacketType::Publish {
                 dup: v & 0b0000_1000 != 0,
                 qos: ((v & 0b0000_0110) >> 1).try_into()?,
                 retain: v & 0b0000_0001 != 0,
             }),
-            0x40 => Ok(PacketType::PUBACK),
-            0x50 => Ok(PacketType::PUBREC),
-            0x62 => Ok(PacketType::PUBREL),
-            0x70 => Ok(PacketType::PUBCOMP),
-            0x82 => Ok(PacketType::SUBSCRIBE),
-            0x90 => Ok(PacketType::SUBACK),
-            0xA2 => Ok(PacketType::UNSUBSCRIBE),
-            0xB0 => Ok(PacketType::UNSUBACK),
-            0xC0 => Ok(PacketType::PINGREQ),
-            0xD0 => Ok(PacketType::PINGRESP),
-            0xE0 => Ok(PacketType::DISCONNECT),
-            0xF0 => Ok(PacketType::AUTH),
+            0x40 => Ok(PacketType::PubAck),
+            0x50 => Ok(PacketType::PubRec),
+            0x62 => Ok(PacketType::PubRel),
+            0x70 => Ok(PacketType::PubComp),
+            0x82 => Ok(PacketType::Subscribe),
+            0x90 => Ok(PacketType::SubAck),
+            0xA2 => Ok(PacketType::UnSubscribe),
+            0xB0 => Ok(PacketType::UnSubAck),
+            0xC0 => Ok(PacketType::PingReq),
+            0xD0 => Ok(PacketType::PingResp),
+            0xE0 => Ok(PacketType::Disconnect),
+            0xF0 => Ok(PacketType::Auth),
             _ => Err(anyhow!("malformed control packet type: {}", v)),
         }
     }
 }
 
-impl Into<u8> for PacketType {
-    fn into(self) -> u8 {
-        match self {
-            PacketType::CONNECT => 0x10,
-            PacketType::CONNACK => 0x20,
-            PacketType::PUBLISH { dup, qos, retain } => {
+impl From<PacketType> for u8 {
+    fn from(p: PacketType) -> Self {
+        match p {
+            PacketType::Connect => 0x10,
+            PacketType::ConnAck => 0x20,
+            PacketType::Publish { dup, qos, retain } => {
                 0x30 | ((dup as u8) << 3) | ((qos as u8) << 1) | (retain as u8)
             }
-            PacketType::PUBACK => 0x40,
-            PacketType::PUBREC => 0x50,
-            PacketType::PUBREL => 0x62,
-            PacketType::PUBCOMP => 0x70,
-            PacketType::SUBSCRIBE => 0x82,
-            PacketType::SUBACK => 0x90,
-            PacketType::UNSUBSCRIBE => 0xA2,
-            PacketType::UNSUBACK => 0xB0,
-            PacketType::PINGREQ => 0xC0,
-            PacketType::PINGRESP => 0xD0,
-            PacketType::DISCONNECT => 0xE0,
-            PacketType::AUTH => 0xF0,
+            PacketType::PubAck => 0x40,
+            PacketType::PubRec => 0x50,
+            PacketType::PubRel => 0x62,
+            PacketType::PubComp => 0x70,
+            PacketType::Subscribe => 0x82,
+            PacketType::SubAck => 0x90,
+            PacketType::UnSubscribe => 0xA2,
+            PacketType::UnSubAck => 0xB0,
+            PacketType::PingReq => 0xC0,
+            PacketType::PingResp => 0xD0,
+            PacketType::Disconnect => 0xE0,
+            PacketType::Auth => 0xF0,
         }
     }
 }
@@ -273,9 +273,9 @@ impl TryFrom<u8> for ReasonCode {
     }
 }
 
-impl Into<u8> for ReasonCode {
-    fn into(self) -> u8 {
-        match self {
+impl From<ReasonCode> for u8 {
+    fn from(r: ReasonCode) -> Self {
+        match r {
             ReasonCode::Success => 0x00,
             ReasonCode::GrantedQoS1 => 0x01,
             ReasonCode::GrantedQoS2 => 0x02,
@@ -427,7 +427,7 @@ pub enum PacketPart {
 }
 
 #[derive(Debug)]
-pub struct MQTTCodec {
+pub struct MqttCodec {
     pub part: PacketPart,
 }
 
@@ -475,6 +475,28 @@ impl fmt::Debug for PacketPart {
                 .field("remaining", &remaining)
                 .field("packet_type", &packet_type)
                 .finish(),
+        }
+    }
+}
+
+impl From<&ControlPacket> for &str {
+    fn from(c: &ControlPacket) -> Self {
+        match c {
+            ControlPacket::Connect(_) => "CONNECT",
+            ControlPacket::ConnAck(_) => "CONNACK",
+            ControlPacket::Publish(_) => "PUBLISH",
+            ControlPacket::PubAck(_) => "PUBACK",
+            ControlPacket::PubRec(_) => "PUBREC",
+            ControlPacket::PubRel(_) => "PUBREL",
+            ControlPacket::PubComp(_) => "PUBCOMP",
+            ControlPacket::Subscribe(_) => "SUBSCRIBE",
+            ControlPacket::SubAck(_) => "SUBACK",
+            ControlPacket::UnSubscribe(_) => "UNSUBSCRIBE",
+            ControlPacket::UnSubAck(_) => "UNSUBACK",
+            ControlPacket::PingReq => "PINGREQ",
+            ControlPacket::PingResp => "PINGRESP",
+            ControlPacket::Disconnect(_) => "DISCONNECT",
+            ControlPacket::Auth(_) => "AUTH",
         }
     }
 }
@@ -626,9 +648,9 @@ impl TryFrom<&[u8]> for SubscriptionOptions {
     }
 }
 
-impl Default for MQTTCodec {
+impl Default for MqttCodec {
     fn default() -> Self {
-        MQTTCodec {
+        MqttCodec {
             part: PacketPart::FixedHeader,
         }
     }

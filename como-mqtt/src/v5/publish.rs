@@ -10,7 +10,7 @@ use crate::v5::encoder::encode_utf8_string;
 use crate::v5::encoder::encode_variable_integer;
 use crate::v5::encoder::RemainingLength;
 use crate::v5::property::{PropertiesBuilder, PropertiesSize, Property, PublishProperties};
-use crate::v5::types::{ControlPacket, MQTTCodec, Publish, QoS};
+use crate::v5::types::{ControlPacket, MqttCodec, Publish, QoS};
 
 pub fn decode_publish(
     dup: bool,
@@ -85,7 +85,7 @@ pub fn decode_publish_properties(mut reader: Bytes) -> Result<PublishProperties>
     Ok(builder.publish())
 }
 
-impl Encoder<Publish> for MQTTCodec {
+impl Encoder<Publish> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, msg: Publish, writer: &mut BytesMut) -> Result<(), Self::Error> {
@@ -151,7 +151,7 @@ impl PropertiesSize for PublishProperties {
     }
 }
 
-impl Encoder<PublishProperties> for MQTTCodec {
+impl Encoder<PublishProperties> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(

@@ -8,7 +8,7 @@ use tokio_util::codec::Encoder;
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::{encode_utf8_string, RemainingLength};
 use crate::v5::property::{DisconnectProperties, PropertiesBuilder, PropertiesSize, Property};
-use crate::v5::types::{ControlPacket, Disconnect, MQTTCodec, ReasonCode};
+use crate::v5::types::{ControlPacket, Disconnect, MqttCodec, ReasonCode};
 
 pub fn decode_disconnect(mut reader: Bytes) -> Result<Option<ControlPacket>> {
     let reason_code = if reader.remaining() > 0 {
@@ -65,7 +65,7 @@ impl RemainingLength for Disconnect {
     }
 }
 
-impl Encoder<Disconnect> for MQTTCodec {
+impl Encoder<Disconnect> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, msg: Disconnect, writer: &mut BytesMut) -> Result<(), Self::Error> {
@@ -88,7 +88,7 @@ impl PropertiesSize for DisconnectProperties {
     }
 }
 
-impl Encoder<DisconnectProperties> for MQTTCodec {
+impl Encoder<DisconnectProperties> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(

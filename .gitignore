@@ -4,3 +4,4 @@ Cargo.lock
 /logs/*
 /data/
 /nohup.out
+/scripts/prometheus/*

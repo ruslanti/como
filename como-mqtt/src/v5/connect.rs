@@ -11,7 +11,7 @@ use crate::v5::property::{
     ConnectProperties, PropertiesBuilder, PropertiesSize, Property, WillProperties,
 };
 use crate::v5::string::MqttString;
-use crate::v5::types::{Connect, MQTTCodec, Will, MQTT, VERSION};
+use crate::v5::types::{Connect, MqttCodec, Will, MQTT, VERSION};
 
 impl TryFrom<Bytes> for Connect {
     type Error = anyhow::Error;
@@ -148,7 +148,7 @@ impl TryFrom<Bytes> for ConnectProperties {
     }
 }
 
-impl Encoder<ConnectProperties> for MQTTCodec {
+impl Encoder<ConnectProperties> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(
@@ -185,7 +185,7 @@ impl Encoder<ConnectProperties> for MQTTCodec {
     }
 }
 
-impl Encoder<Connect> for MQTTCodec {
+impl Encoder<Connect> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, msg: Connect, writer: &mut BytesMut) -> Result<(), Self::Error> {

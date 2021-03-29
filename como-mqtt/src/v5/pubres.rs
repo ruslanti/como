@@ -7,7 +7,7 @@ use tokio_util::codec::Encoder;
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::{encode_utf8_string, RemainingLength};
 use crate::v5::property::{PropertiesBuilder, PropertiesSize, Property, ResponseProperties};
-use crate::v5::types::{MQTTCodec, PublishResponse, ReasonCode};
+use crate::v5::types::{MqttCodec, PublishResponse, ReasonCode};
 
 impl TryFrom<Bytes> for PublishResponse {
     type Error = anyhow::Error;
@@ -60,7 +60,7 @@ impl TryFrom<Bytes> for ResponseProperties {
     }
 }
 
-impl Encoder<PublishResponse> for MQTTCodec {
+impl Encoder<PublishResponse> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, msg: PublishResponse, writer: &mut BytesMut) -> Result<(), Self::Error> {
@@ -70,7 +70,7 @@ impl Encoder<PublishResponse> for MQTTCodec {
     }
 }
 
-impl Encoder<ResponseProperties> for MQTTCodec {
+impl Encoder<ResponseProperties> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(

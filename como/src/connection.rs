@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::Sender;
@@ -15,13 +16,15 @@ use tokio_util::codec::Framed;
 use tracing::{debug, field, instrument, trace};
 use uuid::Uuid;
 
-use como_mqtt::v5::types::{Auth, Connect, ControlPacket, Disconnect, MQTTCodec, ReasonCode};
+use como_mqtt::v5::types::{Auth, Connect, ControlPacket, Disconnect, MqttCodec, ReasonCode};
 
 use crate::context::SessionContext;
+use crate::metric;
 use crate::session::Session;
 use crate::shutdown::Shutdown;
 
 pub struct ConnectionHandler {
+    proto: &'static str,
     pub(crate) peer: SocketAddr,
     limit_connections: Arc<Semaphore>,
     _shutdown_complete: mpsc::Sender<()>,
@@ -32,12 +35,17 @@ pub struct ConnectionHandler {
 
 impl ConnectionHandler {
     pub(crate) fn new(
+        proto: &'static str,
         peer: SocketAddr,
         limit_connections: Arc<Semaphore>,
         shutdown_complete: mpsc::Sender<()>,
         context: SessionContext,
     ) -> Self {
+        metric::ACTIVE_CONNECTIONS
+            .with_label_values(&[proto, peer.ip().to_string().as_str()])
+            .inc();
         ConnectionHandler {
+            proto,
             peer,
             limit_connections,
             _shutdown_complete: shutdown_complete,
@@ -93,6 +101,13 @@ impl ConnectionHandler {
         response_tx: &Sender<ControlPacket>,
     ) -> Result<Option<ControlPacket>> {
         //trace!("{:?}", packet);
+        let labels = [msg.borrow().into()];
+        let _time = metric::RESPONSE_TIME
+            .with_label_values(&labels)
+            .start_timer();
+
+        metric::PACKETS_RECEIVED.with_label_values(&labels).inc();
+
         match (self.session.borrow_mut(), msg) {
             (None, ControlPacket::Connect(connect)) => {
                 let session = self.prepare_session(&connect, response_tx.clone()).await?;
@@ -135,9 +150,10 @@ impl ConnectionHandler {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        let framed = Framed::new(socket, MQTTCodec::default());
+        let framed = Framed::new(socket, MqttCodec::default());
         let (mut sink, mut stream) = framed.split::<ControlPacket>();
         let (response_tx, mut response_rx) = mpsc::channel::<ControlPacket>(32);
+
         while !shutdown.is_shutdown() {
             // While reading a request frame, also listen for the shutdown signal.
             //trace!("select with timeout {} ms", duration.as_millis());
@@ -149,8 +165,7 @@ impl ConnectionHandler {
                                 let p = res?;
                                 debug!("received {:?}", p);
                                 if let Some(msg) = self.recv(p, response_tx.borrow()).await? {
-                                    debug!("sending {:?}", msg);
-                                    sink.send(msg).await.context("socket send error")?
+                                    send(sink.borrow_mut(), msg).await?;
                                 }
                             } else {
                                 debug!("Client disconnected");
@@ -162,9 +177,8 @@ impl ConnectionHandler {
                     }
                 }
                 res = response_rx.recv() => {
-                    if let Some(res) = res {
-                        debug!("sending {:?}", res);
-                        sink.send(res).await.context("socket send error")?
+                    if let Some(msg) = res {
+                        send(sink.borrow_mut(), msg).await?;
                     } else {
                         debug!("None response. Disconnected");
                         break;
@@ -176,8 +190,7 @@ impl ConnectionHandler {
                         if let ControlPacket::Disconnect(_) = msg {
                             self.keep_alive = Duration::from_millis(0); // close socket and session
                         }
-                        debug!("sending {:?}", msg);
-                        sink.send(msg).await.context("socket send error")?;
+                        send(sink.borrow_mut(), msg).await?;
                     }
                 }
                 _ = shutdown.recv() => {
@@ -187,8 +200,7 @@ impl ConnectionHandler {
                     }
                     let msg = ControlPacket::Disconnect(Disconnect {reason_code:
                     ReasonCode::ServerShuttingDown, properties: Default::default()});
-                    debug!("sending {:?}", msg);
-                    sink.send(msg).await.context("socket send error")?;
+                    send(sink.borrow_mut(), msg).await?;
                     break;
                 }
             }
@@ -200,8 +212,26 @@ impl ConnectionHandler {
     }
 }
 
+#[instrument(skip(sink))]
+async fn send<S>(
+    sink: &mut SplitSink<Framed<S, MqttCodec>, ControlPacket>,
+    msg: ControlPacket,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    debug!("sending");
+    metric::PACKETS_SENT
+        .with_label_values(&[msg.borrow().into()])
+        .inc();
+    sink.send(msg).await.context("socket send error")
+}
+
 impl Drop for ConnectionHandler {
     fn drop(&mut self) {
+        metric::ACTIVE_CONNECTIONS
+            .with_label_values(&[self.proto, self.peer.ip().to_string().as_str()])
+            .dec();
         self.limit_connections.add_permits(1);
     }
 }

@@ -198,6 +198,10 @@ mod tests {
                 Token::Topic("Test".as_bytes().to_vec())
             ]
         );
+        assert_eq!(
+            parse_topic_name("topic/Test/").unwrap(),
+            parse_topic_name("topic/Test").unwrap(),
+        );
         assert!(parse_topic_name("topic/+/").is_err(),);
         assert!(parse_topic_name("+/topic/").is_err(),);
         assert!(parse_topic_name("+/+/").is_err(),);

@@ -41,7 +41,31 @@ impl FromStr for TopicName {
 }
 
 impl<T> TopicNode<T> {
-    pub fn get(&mut self, topic_name: TopicName) -> Result<&mut Option<T>> {
+    /*    pub fn get(&self, topic_name: TopicName) -> Option<&T> {
+        if let Some(token) = topic_name.tokens.first() {
+            self.nodes.get(token).and_then(|node| {
+                node.get(TopicName {
+                    tokens: topic_name.tokens[1..].to_vec(),
+                })
+            })
+        } else {
+            self.topic.as_ref()
+        }
+    }*/
+
+    pub fn get_mut(&mut self, topic_name: TopicName) -> Option<&mut T> {
+        if let Some(token) = topic_name.tokens.first() {
+            self.nodes.get_mut(token).and_then(|node| {
+                node.get_mut(TopicName {
+                    tokens: topic_name.tokens[1..].to_vec(),
+                })
+            })
+        } else {
+            self.topic.as_mut()
+        }
+    }
+
+    pub fn get_or_insert(&mut self, topic_name: TopicName) -> &mut Option<T> {
         if let Some(token) = topic_name.tokens.first() {
             self.nodes
                 .entry(token.to_owned())
@@ -49,11 +73,11 @@ impl<T> TopicNode<T> {
                     topic: None,
                     nodes: Default::default(),
                 })
-                .get(TopicName {
+                .get_or_insert(TopicName {
                     tokens: topic_name.tokens[1..].to_vec(),
                 })
         } else {
-            Ok(self.topic.borrow_mut())
+            self.topic.borrow_mut()
         }
     }
 
@@ -117,64 +141,56 @@ mod tests {
         assert_eq!(
             "aaa",
             topics
-                .get("aaa".parse().unwrap())
-                .unwrap()
+                .get_or_insert("aaa".parse().unwrap())
                 .get_or_insert(aaa)
                 .test
         );
         assert_eq!(
             "aaa",
             topics
-                .get("aaa".parse().unwrap())
-                .unwrap()
+                .get_or_insert("aaa".parse().unwrap())
                 .get_or_insert(bbb)
                 .test
         );
         assert_eq!(
             "$aaa",
             topics
-                .get("$aaa".parse().unwrap())
-                .unwrap()
+                .get_or_insert("$aaa".parse().unwrap())
                 .get_or_insert(_aaa)
                 .test
         );
         assert_eq!(
             "/aaa/bbb",
             topics
-                .get("/aaa/bbb".parse().unwrap())
-                .unwrap()
+                .get_or_insert("/aaa/bbb".parse().unwrap())
                 .get_or_insert(bbb)
                 .test
         );
         assert_eq!(
             "/aaa",
             topics
-                .get("/aaa".parse().unwrap())
-                .unwrap()
+                .get_or_insert("/aaa".parse().unwrap())
                 .get_or_insert(aaa_)
                 .test
         );
         assert_eq!(
             "aaa/ddd",
             topics
-                .get("aaa/ddd".parse().unwrap())
-                .unwrap()
+                .get_or_insert("aaa/ddd".parse().unwrap())
                 .get_or_insert(ddd)
                 .test
         );
         assert_eq!(
             "/aaa/ccc",
             topics
-                .get("/aaa/ccc".parse().unwrap())
-                .unwrap()
+                .get_or_insert("/aaa/ccc".parse().unwrap())
                 .get_or_insert(ccc)
                 .test
         );
         assert_eq!(
             "/aaa/ccc",
             topics
-                .get("/aaa/ccc/".parse().unwrap())
-                .unwrap()
+                .get_or_insert("/aaa/ccc/".parse().unwrap())
                 .get_or_insert(ccc_)
                 .test
         );

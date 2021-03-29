@@ -3,4 +3,5 @@
 members = [
     "como",
     "como-mqtt",
+    "como-bench"
 ]

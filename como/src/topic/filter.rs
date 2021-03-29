@@ -62,12 +62,12 @@ impl TopicMatcher {
 
         if let Some(MatchToken::MultiLevel) = self.tokens.get(match_index) {
             Status::Match
-        } else if self.tokens.len() == match_index {
-            Status::Match
-        } else if self.tokens.len() > match_index {
-            Status::PartialMatch
         } else {
-            Status::NoMatch
+            match self.tokens.len() {
+                l if l == match_index => Status::Match,
+                l if l > match_index => Status::PartialMatch,
+                _ => Status::NoMatch,
+            }
         }
     }
 }

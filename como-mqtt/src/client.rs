@@ -13,12 +13,13 @@ use crate::identifier::PacketIdentifier;
 use crate::v5::property::{PropertiesBuilder, SubscribeProperties};
 use crate::v5::string::MqttString;
 use crate::v5::types::{
-    ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, Publish, PublishResponse, QoS,
+    ConnAck, Connect, ControlPacket, Disconnect, MqttCodec, Publish, PublishResponse, QoS,
     ReasonCode, Retain, SubAck, Subscribe, SubscriptionOptions, Will,
 };
+use std::fmt;
 
 pub struct MqttClient {
-    stream: Framed<TcpStream, MQTTCodec>,
+    stream: Framed<TcpStream, MqttCodec>,
     client_id: Option<MqttString>,
     keep_alive: u16,
     properties_builder: PropertiesBuilder,
@@ -60,18 +61,27 @@ impl<'a> MqttClient {
         };
         trace!("send {}", connect);
         self.stream.send(ControlPacket::Connect(connect)).await?;
-        self.recv().await.and_then(|packet| match packet {
+        self.timeout_recv().await.and_then(|packet| match packet {
             ControlPacket::ConnAck(ack) => Ok(ack),
             _ => Err(anyhow!("unexpected: {}", packet)),
         })
     }
 
-    pub async fn recv(&mut self) -> Result<ControlPacket, Error> {
+    pub async fn timeout_recv(&mut self) -> Result<ControlPacket, Error> {
         timeout(self.timeout, self.stream.next())
             .await
             .map_err(Error::msg)
             .and_then(|r| r.ok_or_else(|| anyhow!("none message")))
             .and_then(|r| r)
+    }
+
+    pub async fn recv(&mut self) -> Result<ControlPacket, Error> {
+        self.stream
+            .next()
+            .await
+            .transpose()
+            .and_then(|r| r.ok_or_else(|| anyhow!("none message")))
+            .map_err(Error::msg)
     }
 
     pub async fn disconnect(&mut self) -> Result<Option<ControlPacket>> {
@@ -116,9 +126,9 @@ impl<'a> MqttClient {
 
     pub async fn publish_least_once(
         &mut self,
-        retain: bool,
         topic_name: &str,
         payload: Vec<u8>,
+        retain: bool,
     ) -> Result<PublishResponse> {
         let packet_identifier = self.packet_identifier.next();
         let publish = Publish {
@@ -132,7 +142,7 @@ impl<'a> MqttClient {
         };
         trace!("send {}", publish);
         self.stream.send(ControlPacket::Publish(publish)).await?;
-        self.recv().await.and_then(|packet| match packet {
+        self.timeout_recv().await.and_then(|packet| match packet {
             ControlPacket::PubAck(ack) => Ok(ack),
             _ => Err(anyhow!("unexpected: {}", packet)),
         })
@@ -157,10 +167,16 @@ impl<'a> MqttClient {
         self.stream
             .send(ControlPacket::Subscribe(subscribe))
             .await?;
-        self.recv().await.and_then(|packet| match packet {
+        self.timeout_recv().await.and_then(|packet| match packet {
             ControlPacket::SubAck(ack) => Ok(ack),
             _ => Err(anyhow!("unexpected: {}", packet)),
         })
+    }
+}
+
+impl fmt::Display for MqttClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.stream.get_ref().local_addr().unwrap())
     }
 }
 
@@ -202,7 +218,7 @@ impl ClientBuilder<'_> {
         };
 
         let stream = socket.connect(peer).await?;
-        let stream = Framed::new(stream, MQTTCodec::default());
+        let stream = Framed::new(stream, MqttCodec::default());
 
         Ok(MqttClient {
             stream,

@@ -1,0 +1,28 @@
+[package]
+name = "como-bench"
+version = "0.1.0"
+authors = ["Ruslan Pislari <ruslanti@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+como-mqtt = { path = "../como-mqtt" }
+como = { path = "../como" }
+tokio = { version = "1.2.0", features = ["rt-multi-thread", "net", "signal", "sync", "time", "macros"] }
+tracing = "0.1.25"
+tracing-futures = "0.2.5"
+tracing-appender = "0.1.2"
+tracing-subscriber = "0.2.16"
+config = { version = "0.10.1", features = ["toml"] }
+serde = { version = "1.0.123", features = ["derive"] }
+anyhow = "1.0.39"
+leaky-bucket = "0.10.0"
+prometheus = { version = "0.12" }
+lazy_static = "1.4"
+#tracing = "0.1.25"
+#tracing-timing = "0.4.3"
+#clap = "2.33.3"
+#rand = "0.8.3"
+#rand_distr = "0.4.0"
+#bytes = "1.0.1"

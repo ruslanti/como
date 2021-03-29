@@ -1,0 +1,19 @@
+[[publications]]
+clients = 50
+topic_name = "/topic/01"
+rate = 100
+qos = 1
+
+[[publications]]
+clients = 50
+topic_name = "/topic/02"
+rate = 100
+qos = 1
+
+[[subscriptions]]
+clients = 1
+topic_filter = "/topic/01/+"
+
+[[subscriptions]]
+clients = 1
+topic_filter = "/topic/02/+"

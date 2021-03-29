@@ -4,29 +4,29 @@ use tokio_util::codec::Encoder;
 
 use crate::v5::property::PropertiesSize;
 use crate::v5::string::MqttString;
-use crate::v5::types::{ControlPacket, MQTTCodec, PacketType};
+use crate::v5::types::{ControlPacket, MqttCodec, PacketType};
 
 pub trait RemainingLength {
     fn remaining_length(&self) -> usize;
 }
 
-impl Encoder<ControlPacket> for MQTTCodec {
+impl Encoder<ControlPacket> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, packet: ControlPacket, writer: &mut BytesMut) -> Result<(), Self::Error> {
         match packet {
             ControlPacket::Connect(connect) => {
-                encode_fixed_header(writer, PacketType::CONNECT, connect.remaining_length())?;
+                encode_fixed_header(writer, PacketType::Connect, connect.remaining_length())?;
                 self.encode(connect, writer)?
             }
             ControlPacket::ConnAck(connack) => {
-                encode_fixed_header(writer, PacketType::CONNACK, connack.remaining_length())?;
+                encode_fixed_header(writer, PacketType::ConnAck, connack.remaining_length())?;
                 self.encode(connack, writer)?
             }
             ControlPacket::Publish(publish) => {
                 encode_fixed_header(
                     writer,
-                    PacketType::PUBLISH {
+                    PacketType::Publish {
                         dup: publish.dup,
                         qos: publish.qos,
                         retain: publish.retain,
@@ -36,55 +36,55 @@ impl Encoder<ControlPacket> for MQTTCodec {
                 self.encode(publish, writer)?
             }
             ControlPacket::PubAck(response) => {
-                encode_fixed_header(writer, PacketType::PUBACK, response.remaining_length())?;
+                encode_fixed_header(writer, PacketType::PubAck, response.remaining_length())?;
                 self.encode(response, writer)?
             }
             ControlPacket::PubRec(response) => {
-                encode_fixed_header(writer, PacketType::PUBREC, response.remaining_length())?;
+                encode_fixed_header(writer, PacketType::PubRec, response.remaining_length())?;
                 self.encode(response, writer)?
             }
             ControlPacket::PubRel(response) => {
-                encode_fixed_header(writer, PacketType::PUBREL, response.remaining_length())?;
+                encode_fixed_header(writer, PacketType::PubRel, response.remaining_length())?;
                 self.encode(response, writer)?
             }
             ControlPacket::PubComp(response) => {
-                encode_fixed_header(writer, PacketType::PUBCOMP, response.remaining_length())?;
+                encode_fixed_header(writer, PacketType::PubComp, response.remaining_length())?;
                 self.encode(response, writer)?
             }
             ControlPacket::Subscribe(subscribe) => {
-                encode_fixed_header(writer, PacketType::SUBSCRIBE, subscribe.remaining_length())?;
+                encode_fixed_header(writer, PacketType::Subscribe, subscribe.remaining_length())?;
                 self.encode(subscribe, writer)?
             }
             ControlPacket::SubAck(response) => {
-                encode_fixed_header(writer, PacketType::SUBACK, response.remaining_length())?;
+                encode_fixed_header(writer, PacketType::SubAck, response.remaining_length())?;
                 self.encode(response, writer)?
             }
             ControlPacket::UnSubscribe(unsubscribe) => {
                 encode_fixed_header(
                     writer,
-                    PacketType::UNSUBSCRIBE,
+                    PacketType::UnSubscribe,
                     unsubscribe.remaining_length(),
                 )?;
                 self.encode(unsubscribe, writer)?
             }
             ControlPacket::UnSubAck(response) => {
-                encode_fixed_header(writer, PacketType::UNSUBACK, response.remaining_length())?;
+                encode_fixed_header(writer, PacketType::UnSubAck, response.remaining_length())?;
                 self.encode(response, writer)?
             }
             ControlPacket::PingReq => {
                 writer.reserve(2);
-                writer.put_u8(PacketType::PINGREQ.into()); // packet type
+                writer.put_u8(PacketType::PingReq.into()); // packet type
                 writer.put_u8(0); // remaining length
             }
             ControlPacket::PingResp => {
                 writer.reserve(2);
-                writer.put_u8(PacketType::PINGRESP.into()); // packet type
+                writer.put_u8(PacketType::PingResp.into()); // packet type
                 writer.put_u8(0); // remaining length
             }
             ControlPacket::Disconnect(disconnect) => {
                 encode_fixed_header(
                     writer,
-                    PacketType::DISCONNECT,
+                    PacketType::Disconnect,
                     disconnect.remaining_length(),
                 )?;
                 self.encode(disconnect, writer)?
@@ -95,7 +95,7 @@ impl Encoder<ControlPacket> for MQTTCodec {
     }
 }
 
-impl Encoder<usize> for MQTTCodec {
+impl Encoder<usize> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, v: usize, writer: &mut BytesMut) -> Result<(), Self::Error> {
@@ -117,7 +117,7 @@ impl Encoder<usize> for MQTTCodec {
     }
 }
 
-impl Encoder<Bytes> for MQTTCodec {
+impl Encoder<Bytes> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, b: Bytes, writer: &mut BytesMut) -> Result<(), Self::Error> {
@@ -127,7 +127,7 @@ impl Encoder<Bytes> for MQTTCodec {
     }
 }
 
-impl Encoder<MqttString> for MQTTCodec {
+impl Encoder<MqttString> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, s: MqttString, writer: &mut BytesMut) -> Result<(), Self::Error> {

@@ -1,9 +1,10 @@
 mod connection;
-mod context;
+pub mod context;
 mod exactly_once;
+pub mod metric;
 pub mod service;
 mod session;
 pub mod settings;
-mod shutdown;
+pub mod shutdown;
 mod tls_service;
 mod topic;

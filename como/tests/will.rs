@@ -54,7 +54,7 @@ async fn will_message_close() -> anyhow::Result<()> {
     //assert_none!(client.disconnect().await?);
     drop(client);
     /*assert_ok!(client2.recv().await);*/
-    assert_matches!(assert_ok!(client2.recv().await), ControlPacket::Publish(p) if p == Publish {
+    assert_matches!(assert_ok!(client2.timeout_recv().await), ControlPacket::Publish(p) if p == Publish {
         dup: false,
         qos: QoS::AtMostOnce,
         retain: false,
@@ -113,7 +113,7 @@ async fn will_message_disconnect_failure() -> anyhow::Result<()> {
             .await?
     );
     /*assert_ok!(client2.recv().await);*/
-    assert_matches!(assert_ok!(client2.recv().await), ControlPacket::Publish(p) if p == Publish {
+    assert_matches!(assert_ok!(client2.timeout_recv().await), ControlPacket::Publish(p) if p == Publish {
         dup: false,
         qos: QoS::AtMostOnce,
         retain: false,

@@ -13,7 +13,7 @@ use crate::v5::property::{
 };
 use crate::v5::string::MqttString;
 use crate::v5::types::{
-    ControlPacket, MQTTCodec, ReasonCode, SubAck, Subscribe, SubscriptionOptions,
+    ControlPacket, MqttCodec, ReasonCode, SubAck, Subscribe, SubscriptionOptions,
 };
 
 pub fn decode_subscribe(mut reader: Bytes) -> Result<Option<ControlPacket>> {
@@ -97,7 +97,7 @@ impl PropertiesSize for SubscribeProperties {
     }
 }
 
-impl Encoder<Subscribe> for MQTTCodec {
+impl Encoder<Subscribe> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, msg: Subscribe, writer: &mut BytesMut) -> Result<(), Self::Error> {
@@ -111,7 +111,7 @@ impl Encoder<Subscribe> for MQTTCodec {
     }
 }
 
-impl Encoder<SubscribeProperties> for MQTTCodec {
+impl Encoder<SubscribeProperties> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(
@@ -143,7 +143,7 @@ impl RemainingLength for SubAck {
     }
 }
 
-impl Encoder<SubAck> for MQTTCodec {
+impl Encoder<SubAck> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, msg: SubAck, writer: &mut BytesMut) -> Result<(), Self::Error> {

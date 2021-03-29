@@ -1,13 +1,13 @@
-use std::borrow::Borrow;
+use std::borrow::{Borrow, BorrowMut};
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 
 use anyhow::{anyhow, Context, Error, Result};
-use byteorder::{BigEndian, ReadBytesExt};
+
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use sled::Tree;
+
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, Duration};
@@ -27,6 +27,7 @@ use crate::context::{
     subscribe_topic, SessionContext, SessionState, SessionStore, SubscriptionsStore,
 };
 use crate::exactly_once::{exactly_once_client, exactly_once_server};
+use crate::metric;
 use crate::topic::{NewTopicSubscriber, PubMessage, TopicManager};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,7 +69,7 @@ pub(crate) struct Session {
     packet_identifier: PacketIdentifier,
     context: SessionContext,
     topic_filters: HashMap<String, SubscriptionValue>,
-    new_topic_subscriber: NewTopicSubscriber,
+    new_topic_subscriber: Option<NewTopicSubscriber>,
 }
 
 impl TopicMessage {
@@ -92,8 +93,10 @@ impl Session {
         context: SessionContext,
     ) -> Self {
         info!("new session: {:?}", id);
+        metric::ACTIVE_SESSIONS.with_label_values(&[]).inc();
+
         let (session_event_tx, session_event_rx) = mpsc::channel(32);
-        let topic_event = context.watch_new_topic();
+        //let topic_event = context.watch_new_topic();
         Self {
             unique_id: context.generate_id(),
             client_id: id,
@@ -110,7 +113,7 @@ impl Session {
             packet_identifier: Default::default(),
             context,
             topic_filters: HashMap::new(),
-            new_topic_subscriber: topic_event,
+            new_topic_subscriber: None,
         }
     }
 
@@ -176,7 +179,7 @@ impl Session {
         }
     }
 
-    async fn handle_topic_event(&mut self, topic_name: String, log: Tree) {
+    async fn handle_topic_event(&mut self, topic_name: String) {
         debug!("new topic event: {}", topic_name);
         let subscription_tx = self.session_event_tx.clone();
         let client_id = self.client_id.to_owned();
@@ -190,11 +193,8 @@ impl Session {
                             topic_filter.as_str()
                         );
 
-                        if let Some((key, value)) = log.last().ok().flatten() {
-                            let id = key.as_ref().read_u64::<BigEndian>().unwrap_or(0);
-                            if let Ok(msg) = bincode::deserialize::<PubMessage>(value.as_ref())
-                                .context("deserialize event")
-                            {
+                        if let Ok(values) = self.context.topic_values(topic_name.as_str()) {
+                            for (id, msg) in values {
                                 if let Err(err) = self
                                     .session_event_tx
                                     .send(SessionEvent::TopicMessage(TopicMessage::new(
@@ -208,18 +208,22 @@ impl Session {
                                     warn!(cause = ?err, "subscription send");
                                 }
                             }
-                        };
+                        }
 
-                        unsubscribes.insert(
-                            topic_name.to_owned(),
-                            subscribe_topic(
-                                client_id.to_owned(),
+                        if let Ok(subscriber) = self.context.topic_subscriber(topic_name.as_str()) {
+                            unsubscribes.insert(
                                 topic_name.to_owned(),
-                                options.to_owned(),
-                                subscription_tx.clone(),
-                                log.watch_prefix(vec![]),
-                            ),
-                        );
+                                subscribe_topic(
+                                    client_id.to_owned(),
+                                    topic_name.to_owned(),
+                                    options.to_owned(),
+                                    subscription_tx.clone(),
+                                    subscriber,
+                                ),
+                            );
+                        } else {
+                            warn!("subscribe topic {} error", topic_name);
+                        }
                     } else {
                         debug!(
                             "already subscribed topic: {} match topic filter: {}",
@@ -237,31 +241,41 @@ impl Session {
         }
     }
 
+    async fn handle_session_event(&mut self, event: SessionEvent) -> Result<Option<ControlPacket>> {
+        trace!("subscription event: {:?}", event);
+        Ok(match event {
+            SessionEvent::SessionTakenOver(_taken) => Some(ControlPacket::Disconnect(Disconnect {
+                reason_code: ReasonCode::SessionTakenOver,
+                properties: Default::default(),
+            })),
+            SessionEvent::TopicMessage(message) => self.publish_client(message).await,
+        })
+    }
+
     #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)), err)]
     pub async fn session(&mut self) -> Result<Option<ControlPacket>> {
-        tokio::select! {
-            res = self.session_event_rx.recv() => {
-                if let Some(event) = res {
-                    trace!("subscription event: {:?}", event);
-                    let response = match event {
-                        SessionEvent::SessionTakenOver(_taken) =>
-                            Some(ControlPacket::Disconnect(Disconnect {reason_code: ReasonCode::SessionTakenOver, properties: Default::default()}))
-                        ,
-                        SessionEvent::TopicMessage(message) => self
-                            .publish_client(message)
-                            .await,
+        if let Some(new_topic_subscriber) = self.new_topic_subscriber.borrow_mut() {
+            tokio::select! {
+                res = self.session_event_rx.recv() => {
+                    if let Some(event) = res {
+                        self.handle_session_event(event).await
+                    } else {
+                        Ok(None)
+                    }
+                },
+                res = new_topic_subscriber.recv() => {
+                    match res {
+                        Ok(topic_name) => self.handle_topic_event(topic_name).await,
+                        Err(err) => warn!(cause=?err, "new topic event recv error")
                     };
-                    return Ok(response);
+                    Ok(None)
                 }
             }
-            res = self.new_topic_subscriber.recv() => {
-                match res {
-                    Ok((topic_name, log)) => self.handle_topic_event(topic_name, log).await,
-                    Err(err) => warn!(cause=?err, "new topic event recv error")
-                }
-            }
+        } else if let Some(event) = self.session_event_rx.recv().await {
+            self.handle_session_event(event).await
+        } else {
+            Ok(None)
         }
-        Ok(None)
     }
 
     #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)), err)]
@@ -424,7 +438,7 @@ impl Session {
                                 error!(cause = ?err, "QoS 2 protocol error: {}", err);
                             }
                         });
-                        self.server_flows.insert(packet_identifier, tx.clone());
+                        self.server_flows.insert(packet_identifier, tx);
 
                         Ok(Some(ControlPacket::PubRec(PublishResponse {
                             packet_identifier,
@@ -444,13 +458,13 @@ impl Session {
         }
     }
 
-    #[instrument(skip(self), err)]
+    #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)), err)]
     async fn puback(&self, msg: PublishResponse) -> Result<Option<ControlPacket>> {
         trace!("{:?}", msg);
         Ok(None)
     }
 
-    #[instrument(skip(self), err)]
+    #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)), err)]
     async fn pubrel(&self, msg: PublishResponse) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.server_flows.get(&msg.packet_identifier) {
             tx.clone()
@@ -467,7 +481,7 @@ impl Session {
         }
     }
 
-    #[instrument(skip(self), err)]
+    #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)), err)]
     async fn pubrec(&self, msg: PublishResponse) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.client_flows.get(&msg.packet_identifier) {
             tx.clone()
@@ -484,7 +498,7 @@ impl Session {
         }
     }
 
-    #[instrument(skip(self), err)]
+    #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)), err)]
     async fn pubcomp(&self, msg: PublishResponse) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.client_flows.get(&msg.packet_identifier) {
             tx.clone()
@@ -501,9 +515,14 @@ impl Session {
         }
     }
 
-    #[instrument(skip(self, msg), err)]
+    #[instrument(skip(self, msg), fields(client_id = field::debug(& self.client_id)), err)]
     async fn subscribe(&mut self, msg: Subscribe) -> Result<Option<ControlPacket>> {
         debug!("subscribe topic filters: {:?}", msg.topic_filters);
+
+        if self.new_topic_subscriber.is_none() {
+            self.new_topic_subscriber = Some(self.context.watch_new_topic());
+        }
+
         let mut reason_codes = Vec::new();
         for (topic_filter, options) in msg.topic_filters {
             // add a subscription record in sled db
@@ -538,23 +557,22 @@ impl Session {
                 }
             }
         }
-
+        debug!("send suback");
         let suback = ControlPacket::SubAck(SubAck {
             packet_identifier: msg.packet_identifier,
             properties: Default::default(),
             reason_codes,
         });
         Ok(Some(suback))
-        //self.response_tx.send(suback).await.map_err(Error::msg)
     }
 
-    #[instrument(skip(self), err)]
+    #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)), err)]
     async fn suback(&self, msg: SubAck) -> Result<Option<ControlPacket>> {
         trace!("{:?}", msg);
         Ok(None)
     }
 
-    #[instrument(skip(self, msg), err)]
+    #[instrument(skip(self, msg), fields(client_id = field::debug(& self.client_id)), err)]
     async fn unsubscribe(&mut self, msg: UnSubscribe) -> Result<Option<ControlPacket>> {
         debug!("topic filters: {:?}", msg.topic_filters);
         let mut reason_codes = Vec::new();
@@ -585,13 +603,13 @@ impl Session {
         // trace!("send {:?}", suback);
     }
 
-    #[instrument(skip(self), err)]
+    #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)), err)]
     async fn unsuback(&self, msg: SubAck) -> Result<Option<ControlPacket>> {
         trace!("{:?}", msg);
         Ok(None)
     }
 
-    #[instrument(skip(self, msg))]
+    #[instrument(skip(self, msg), fields(client_id = field::debug(& self.client_id)))]
     async fn disconnect(&mut self, msg: Disconnect) -> Result<Option<ControlPacket>> {
         match (
             self.session_expire_interval,
@@ -711,6 +729,7 @@ impl Drop for Session {
     #[instrument(skip(self), fields(peer = field::display(& self.peer),
     client_id = field::debug(& self.client_id)))]
     fn drop(&mut self) {
-        trace!("drop session")
+        //info!("drop session");
+        metric::ACTIVE_SESSIONS.with_label_values(&[]).dec();
     }
 }
