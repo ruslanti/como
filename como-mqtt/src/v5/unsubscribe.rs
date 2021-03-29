@@ -8,7 +8,7 @@ use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::RemainingLength;
 use crate::v5::property::{PropertiesBuilder, Property, UnSubscribeProperties};
 use crate::v5::string::MqttString;
-use crate::v5::types::{ControlPacket, MQTTCodec, UnSubscribe};
+use crate::v5::types::{ControlPacket, MqttCodec, UnSubscribe};
 
 pub fn decode_unsubscribe(mut reader: Bytes) -> Result<Option<ControlPacket>> {
     end_of_stream!(reader.remaining() < 2, "unsubscribe packet identifier");
@@ -55,7 +55,7 @@ pub fn decode_unsubscribe_payload(mut reader: Bytes) -> Result<Vec<MqttString>> 
     Ok(topic_filter)
 }
 
-impl Encoder<UnSubscribe> for MQTTCodec {
+impl Encoder<UnSubscribe> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, _item: UnSubscribe, _dst: &mut BytesMut) -> Result<(), Self::Error> {

@@ -438,7 +438,7 @@ impl Session {
                                 error!(cause = ?err, "QoS 2 protocol error: {}", err);
                             }
                         });
-                        self.server_flows.insert(packet_identifier, tx.clone());
+                        self.server_flows.insert(packet_identifier, tx);
 
                         Ok(Some(ControlPacket::PubRec(PublishResponse {
                             packet_identifier,

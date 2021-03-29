@@ -183,7 +183,7 @@ fn output_metrics() {
 
     let mut buffer = Vec::new();
     if let Err(e) = encoder.encode(&prometheus::gather(), &mut buffer) {
-        eprintln!("could not encode metrics: {}", e);
+        eprintln!("could not encode metrics: {:?}", e);
     };
     let res = match String::from_utf8(buffer.clone()) {
         Ok(v) => v,

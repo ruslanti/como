@@ -218,7 +218,7 @@ impl SessionContextInner {
     }
 
     pub fn generate_id(&self) -> u64 {
-        self.db.generate_id().unwrap_or(rand::random())
+        self.db.generate_id().unwrap_or_else(|_| rand::random())
     }
 
     pub(crate) async fn publish(&self, msg: Publish) -> Result<()> {

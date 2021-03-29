@@ -8,7 +8,7 @@ use tokio_util::codec::Encoder;
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::encode_utf8_string;
 use crate::v5::property::{PropertiesBuilder, PropertiesSize, Property, WillProperties};
-use crate::v5::types::{MQTTCodec, Will};
+use crate::v5::types::{MqttCodec, Will};
 
 impl TryFrom<Bytes> for WillProperties {
     type Error = anyhow::Error;
@@ -76,7 +76,7 @@ impl PropertiesSize for Will {
     }
 }
 
-impl Encoder<Will> for MQTTCodec {
+impl Encoder<Will> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(&mut self, msg: Will, writer: &mut BytesMut) -> Result<(), Self::Error> {
@@ -103,7 +103,7 @@ impl PropertiesSize for WillProperties {
     }
 }
 
-impl Encoder<WillProperties> for MQTTCodec {
+impl Encoder<WillProperties> for MqttCodec {
     type Error = anyhow::Error;
 
     fn encode(

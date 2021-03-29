@@ -13,13 +13,13 @@ use crate::identifier::PacketIdentifier;
 use crate::v5::property::{PropertiesBuilder, SubscribeProperties};
 use crate::v5::string::MqttString;
 use crate::v5::types::{
-    ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, Publish, PublishResponse, QoS,
+    ConnAck, Connect, ControlPacket, Disconnect, MqttCodec, Publish, PublishResponse, QoS,
     ReasonCode, Retain, SubAck, Subscribe, SubscriptionOptions, Will,
 };
 use std::fmt;
 
 pub struct MqttClient {
-    stream: Framed<TcpStream, MQTTCodec>,
+    stream: Framed<TcpStream, MqttCodec>,
     client_id: Option<MqttString>,
     keep_alive: u16,
     properties_builder: PropertiesBuilder,
@@ -218,7 +218,7 @@ impl ClientBuilder<'_> {
         };
 
         let stream = socket.connect(peer).await?;
-        let stream = Framed::new(stream, MQTTCodec::default());
+        let stream = Framed::new(stream, MqttCodec::default());
 
         Ok(MqttClient {
             stream,

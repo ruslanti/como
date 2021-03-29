@@ -11,13 +11,13 @@ use crate::v5::publish::decode_publish;
 use crate::v5::string::MqttString;
 use crate::v5::subscribe::decode_subscribe;
 use crate::v5::types::{
-    Auth, Connect, ControlPacket, MQTTCodec, PacketPart, PacketType, PublishResponse, SubAck,
+    Auth, Connect, ControlPacket, MqttCodec, PacketPart, PacketType, PublishResponse, SubAck,
 };
 use crate::v5::unsubscribe::decode_unsubscribe;
 
 const MIN_FIXED_HEADER_LEN: usize = 2;
 
-impl Decoder for MQTTCodec {
+impl Decoder for MqttCodec {
     type Item = ControlPacket;
     type Error = anyhow::Error;
 
@@ -52,30 +52,30 @@ impl Decoder for MQTTCodec {
                 self.part = PacketPart::FixedHeader;
                 let packet = reader.split_to(remaining).freeze();
                 match packet_type {
-                    PacketType::CONNECT => Connect::try_from(packet)
+                    PacketType::Connect => Connect::try_from(packet)
                         .map(|connect| Some(ControlPacket::Connect(connect))),
-                    PacketType::CONNACK => decode_connack(packet),
-                    PacketType::PUBLISH { dup, qos, retain } => {
+                    PacketType::ConnAck => decode_connack(packet),
+                    PacketType::Publish { dup, qos, retain } => {
                         decode_publish(dup, qos, retain, packet)
                     }
-                    PacketType::PUBACK => PublishResponse::try_from(packet)
+                    PacketType::PubAck => PublishResponse::try_from(packet)
                         .map(|response| Some(ControlPacket::PubAck(response))),
-                    PacketType::PUBREC => PublishResponse::try_from(packet)
+                    PacketType::PubRec => PublishResponse::try_from(packet)
                         .map(|response| Some(ControlPacket::PubRec(response))),
-                    PacketType::PUBREL => PublishResponse::try_from(packet)
+                    PacketType::PubRel => PublishResponse::try_from(packet)
                         .map(|response| Some(ControlPacket::PubRel(response))),
-                    PacketType::PUBCOMP => PublishResponse::try_from(packet)
+                    PacketType::PubComp => PublishResponse::try_from(packet)
                         .map(|response| Some(ControlPacket::PubComp(response))),
-                    PacketType::SUBSCRIBE => decode_subscribe(packet),
-                    PacketType::SUBACK => {
+                    PacketType::Subscribe => decode_subscribe(packet),
+                    PacketType::SubAck => {
                         SubAck::try_from(packet).map(|s| Some(ControlPacket::SubAck(s)))
                     }
-                    PacketType::UNSUBSCRIBE => decode_unsubscribe(packet),
-                    PacketType::UNSUBACK => unimplemented!(),
-                    PacketType::PINGREQ => Ok(Some(ControlPacket::PingReq)),
-                    PacketType::PINGRESP => Ok(Some(ControlPacket::PingResp)),
-                    PacketType::DISCONNECT => decode_disconnect(packet),
-                    PacketType::AUTH => {
+                    PacketType::UnSubscribe => decode_unsubscribe(packet),
+                    PacketType::UnSubAck => unimplemented!(),
+                    PacketType::PingReq => Ok(Some(ControlPacket::PingReq)),
+                    PacketType::PingResp => Ok(Some(ControlPacket::PingResp)),
+                    PacketType::Disconnect => decode_disconnect(packet),
+                    PacketType::Auth => {
                         Auth::try_from(packet).map(|a| Some(ControlPacket::Auth(a)))
                     }
                 }

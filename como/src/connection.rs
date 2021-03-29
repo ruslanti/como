@@ -16,7 +16,7 @@ use tokio_util::codec::Framed;
 use tracing::{debug, field, instrument, trace};
 use uuid::Uuid;
 
-use como_mqtt::v5::types::{Auth, Connect, ControlPacket, Disconnect, MQTTCodec, ReasonCode};
+use como_mqtt::v5::types::{Auth, Connect, ControlPacket, Disconnect, MqttCodec, ReasonCode};
 
 use crate::context::SessionContext;
 use crate::metric;
@@ -150,7 +150,7 @@ impl ConnectionHandler {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        let framed = Framed::new(socket, MQTTCodec::default());
+        let framed = Framed::new(socket, MqttCodec::default());
         let (mut sink, mut stream) = framed.split::<ControlPacket>();
         let (response_tx, mut response_rx) = mpsc::channel::<ControlPacket>(32);
 
@@ -214,7 +214,7 @@ impl ConnectionHandler {
 
 #[instrument(skip(sink))]
 async fn send<S>(
-    sink: &mut SplitSink<Framed<S, MQTTCodec>, ControlPacket>,
+    sink: &mut SplitSink<Framed<S, MqttCodec>, ControlPacket>,
     msg: ControlPacket,
 ) -> Result<()>
 where
