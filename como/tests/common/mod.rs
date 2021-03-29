@@ -5,6 +5,7 @@ use tokio::sync::oneshot::Sender;
 use tokio::sync::{oneshot, Barrier};
 use tokio::task::JoinHandle;
 
+use como::context::SessionContext;
 use como::service;
 use como::settings::Settings;
 
@@ -22,8 +23,9 @@ pub async fn start_test_broker() -> (u16, Sender<()>, JoinHandle<Result<(), Erro
     let handle = tokio::spawn(async move {
         let mut settings = Settings::default();
         settings.service.port = port;
+        let context = SessionContext::new(Arc::new(settings))?;
 
-        service::run_with_ready(Arc::new(settings), shutdown, ready).await
+        service::run_with_ready(context, shutdown, ready).await
     });
     barrier.wait().await;
     (port, shutdown_notify, handle)

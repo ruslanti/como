@@ -140,52 +140,58 @@ mod tests {
         let ddd = TestTopic { test: "aaa/ddd" };
         assert_eq!(
             "aaa",
-            topics.get("aaa".parse().unwrap()).get_or_insert(&aaa).test
+            topics
+                .get_or_insert("aaa".parse().unwrap())
+                .get_or_insert(aaa)
+                .test
         );
         assert_eq!(
             "aaa",
-            topics.get("aaa".parse().unwrap()).get_or_insert(&bbb).test
+            topics
+                .get_or_insert("aaa".parse().unwrap())
+                .get_or_insert(bbb)
+                .test
         );
         assert_eq!(
             "$aaa",
             topics
-                .get("$aaa".parse().unwrap())
-                .get_or_insert(&_aaa)
+                .get_or_insert("$aaa".parse().unwrap())
+                .get_or_insert(_aaa)
                 .test
         );
         assert_eq!(
             "/aaa/bbb",
             topics
-                .get("/aaa/bbb".parse().unwrap())
-                .get_or_insert(&bbb)
+                .get_or_insert("/aaa/bbb".parse().unwrap())
+                .get_or_insert(bbb)
                 .test
         );
         assert_eq!(
             "/aaa",
             topics
-                .get("/aaa".parse().unwrap())
-                .get_or_insert(&aaa_)
+                .get_or_insert("/aaa".parse().unwrap())
+                .get_or_insert(aaa_)
                 .test
         );
         assert_eq!(
             "aaa/ddd",
             topics
-                .get("aaa/ddd".parse().unwrap())
-                .get_or_insert(&ddd)
+                .get_or_insert("aaa/ddd".parse().unwrap())
+                .get_or_insert(ddd)
                 .test
         );
         assert_eq!(
             "/aaa/ccc",
             topics
-                .get("/aaa/ccc".parse().unwrap())
-                .get_or_insert(&ccc)
+                .get_or_insert("/aaa/ccc".parse().unwrap())
+                .get_or_insert(ccc)
                 .test
         );
         assert_eq!(
             "/aaa/ccc",
             topics
-                .get("/aaa/ccc/".parse().unwrap())
-                .get_or_insert(&ccc_)
+                .get_or_insert("/aaa/ccc/".parse().unwrap())
+                .get_or_insert(ccc_)
                 .test
         );
 
