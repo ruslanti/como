@@ -33,6 +33,7 @@ pub struct PubMessage {
 struct Topic {
     name: String,
     log: Tree,
+    retained: Option<u64>,
 }
 
 pub(crate) struct Topics {
@@ -103,10 +104,12 @@ impl Topics {
             debug!("init topic: {:?}", name);
             let log = db.open_tree(name)?;
             //let name = name.borrow();
+            //TODO find last retained message
             nodes.get(name.parse()?).map(|topic| {
                 topic.get_or_insert(Topic {
                     name: name.to_string(),
                     log,
+                    retained: None,
                 })
             })?;
         }
@@ -127,6 +130,7 @@ impl Topics {
     #[instrument(skip(self, msg))]
     pub async fn publish(&self, msg: Publish) -> Result<()> {
         let topic_name = std::str::from_utf8(&msg.topic_name[..])?;
+
         let mut nodes = self.nodes.write().await;
         let topic = nodes.get(topic_name.parse()?)?;
 
@@ -140,6 +144,7 @@ impl Topics {
             *topic = Some(Topic {
                 name: topic_name.to_owned(),
                 log,
+                retained: None,
             });
 
             if let Some(topic) = topic {
@@ -156,6 +161,9 @@ impl Topics {
         };
 
         if let Some(topic) = topic {
+            if msg.retain {
+                topic.retained.replace(id);
+            };
             let m: PubMessage = msg.into();
             let value = bincode::serialize(&m)?;
             trace!("append {} - {:?} bytes", id, value);
@@ -165,18 +173,18 @@ impl Topics {
                 .set(self.db.size_on_disk().unwrap_or(0) as i64);
             Ok(())
         } else {
-            Err(anyhow!("error"))
+            unreachable!()
         }
     }
 
     #[instrument(skip(self))]
-    pub async fn subscribe(&self, topic_filter: &str) -> Result<Vec<(String, Tree)>> {
+    pub async fn subscribe(&self, topic_filter: &str) -> Result<Vec<(String, Tree, Option<u64>)>> {
         let node = self.nodes.read().await;
         let topic_filter = topic_filter.parse()?;
         Ok(node
             .filter(topic_filter)
             .into_iter()
-            .map(|t| (t.name.to_owned(), t.log.clone()))
+            .map(|t| (t.name.to_owned(), t.log.clone(), t.retained))
             .collect())
     }
 }

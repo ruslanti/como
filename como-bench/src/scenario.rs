@@ -1,3 +1,4 @@
+use como_mqtt::v5::types::QoS;
 use config::{Config, ConfigError, File};
 use serde::Deserialize;
 
@@ -7,6 +8,8 @@ pub struct Publication {
     pub clients: usize,
     pub topic_name: String,
     pub payload_size: usize,
+    pub rate: usize,
+    pub qos: QoS,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -31,6 +34,8 @@ impl Default for Publication {
             clients: 10,
             topic_name: "/topics".to_string(),
             payload_size: 32,
+            rate: 10,
+            qos: QoS::AtMostOnce,
         }
     }
 }

@@ -5,8 +5,8 @@ use std::net::SocketAddr;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use anyhow::Result;
 use anyhow::{Context, Error};
+use anyhow::Result;
 use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
 use sled::{Batch, Db, Event, IVec, Subscriber, Tree};
@@ -225,6 +225,7 @@ impl SessionContextInner {
         self.topic_manager.publish(msg).await
     }
 
+    #[instrument(skip(self, options, session_event_tx), err)]
     pub(crate) async fn subscribe(
         &self,
         client_id: &str,
@@ -234,15 +235,44 @@ impl SessionContextInner {
     ) -> Result<(ReasonCode, SubscribedTopics)> {
         let mut unsubscribes = HashMap::new();
         let channels = self.topic_manager.subscribe(topic_filter).await?;
-        trace!("subscribe returns {} subscriptions", channels.len());
+        debug!("subscribe returns {} subscriptions", channels.len());
         let reason_code = match options.qos {
             QoS::AtMostOnce => ReasonCode::Success,
             QoS::AtLeastOnce => ReasonCode::GrantedQoS1,
             QoS::ExactlyOnce => ReasonCode::GrantedQoS2,
         };
 
-        for (topic_name, log) in channels {
-            let mut last = log.last().ok().flatten();
+        for (topic_name, log, retained) in channels {
+            if let Some(id) = retained {
+                match log.get(id.to_be_bytes()) {
+                    Ok(Some(value)) => {
+                        match bincode::deserialize::<PubMessage>(value.as_ref()) {
+                            Ok(msg) => {
+                                if msg.retain && !msg.payload.is_empty() {
+                                    if let Err(err) = session_event_tx
+                                        .send(SessionEvent::TopicMessage(TopicMessage::new(
+                                            id,
+                                            topic_name.to_owned(),
+                                            options.clone(),
+                                            msg,
+                                        )))
+                                        .await
+                                    {
+                                        warn!(cause = ?err, "subscription send");
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                warn!(cause = ?err, "deserialization error");
+                                break;
+                            }
+                        };
+                    }
+                    Ok(None) => debug!("topic load retain none"),
+                    Err(err) => warn!(cause = ?err, "topic load retain error"),
+                }
+            }
+            /*let mut last = log.last().ok().flatten();
             while let Some((key, value)) = last {
                 let id = key.as_ref().read_u64::<BigEndian>().unwrap_or(0);
                 match bincode::deserialize::<PubMessage>(value.as_ref()) {
@@ -270,7 +300,7 @@ impl SessionContextInner {
                     }
                 };
                 last = log.get_lt(key).ok().flatten();
-            }
+            }*/
 
             unsubscribes.insert(
                 topic_name.to_owned(),

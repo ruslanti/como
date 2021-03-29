@@ -16,6 +16,7 @@ use crate::v5::types::{
     ConnAck, Connect, ControlPacket, Disconnect, MQTTCodec, Publish, PublishResponse, QoS,
     ReasonCode, Retain, SubAck, Subscribe, SubscriptionOptions, Will,
 };
+use std::fmt;
 
 pub struct MqttClient {
     stream: Framed<TcpStream, MQTTCodec>,
@@ -125,9 +126,9 @@ impl<'a> MqttClient {
 
     pub async fn publish_least_once(
         &mut self,
-        retain: bool,
         topic_name: &str,
         payload: Vec<u8>,
+        retain: bool,
     ) -> Result<PublishResponse> {
         let packet_identifier = self.packet_identifier.next();
         let publish = Publish {
@@ -170,6 +171,12 @@ impl<'a> MqttClient {
             ControlPacket::SubAck(ack) => Ok(ack),
             _ => Err(anyhow!("unexpected: {}", packet)),
         })
+    }
+}
+
+impl fmt::Display for MqttClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.stream.get_ref().local_addr().unwrap())
     }
 }
 

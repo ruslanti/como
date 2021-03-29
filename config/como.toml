@@ -1,6 +1,6 @@
 [log]
-level = "info"
-#file = "como.log"
+level = "debug"
+file = "como.log"
 
 #[service.tls]
 #bind = "127.0.0.1"
