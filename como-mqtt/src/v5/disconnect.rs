@@ -1,16 +1,18 @@
 use std::convert::TryInto;
 use std::mem::size_of_val;
 
-use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::{encode_utf8_string, RemainingLength};
+use crate::v5::error::MqttError;
+use crate::v5::error::MqttError::EndOfStream;
+use crate::v5::error::MqttError::UnacceptableProperty;
 use crate::v5::property::{DisconnectProperties, PropertiesBuilder, PropertiesSize, Property};
 use crate::v5::types::{ControlPacket, Disconnect, MqttCodec, ReasonCode};
 
-pub fn decode_disconnect(mut reader: Bytes) -> Result<Option<ControlPacket>> {
+pub fn decode_disconnect(mut reader: Bytes) -> Result<Option<ControlPacket>, MqttError> {
     let reason_code = if reader.remaining() > 0 {
         reader.get_u8().try_into()?
     } else {
@@ -28,11 +30,12 @@ pub fn decode_disconnect(mut reader: Bytes) -> Result<Option<ControlPacket>> {
     })))
 }
 
-fn decode_disconnect_properties(mut reader: Bytes) -> Result<DisconnectProperties> {
+fn decode_disconnect_properties(mut reader: Bytes) -> Result<DisconnectProperties, MqttError> {
     let mut builder = PropertiesBuilder::default();
     while reader.has_remaining() {
         let id = decode_variable_integer(&mut reader)?;
-        match id.try_into()? {
+        let property = id.try_into()?;
+        match property {
             Property::SessionExpireInterval => {
                 end_of_stream!(reader.remaining() < 4, "session expire interval");
                 builder = builder.session_expire_interval(reader.get_u32())?;
@@ -52,7 +55,7 @@ fn decode_disconnect_properties(mut reader: Bytes) -> Result<DisconnectPropertie
             Property::ServerReference => {
                 builder = builder.server_reference(decode_utf8_string(&mut reader)?)?;
             }
-            _ => bail!("unknown connect property: {:x}", id),
+            _ => return Err(UnacceptableProperty(property)),
         }
     }
     Ok(builder.disconnect())
@@ -66,7 +69,7 @@ impl RemainingLength for Disconnect {
 }
 
 impl Encoder<Disconnect> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(&mut self, msg: Disconnect, writer: &mut BytesMut) -> Result<(), Self::Error> {
         writer.put_u8(msg.reason_code.into());
@@ -89,7 +92,7 @@ impl PropertiesSize for DisconnectProperties {
 }
 
 impl Encoder<DisconnectProperties> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(
         &mut self,

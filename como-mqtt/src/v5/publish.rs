@@ -1,7 +1,6 @@
 use std::convert::TryInto;
 use std::mem::size_of_val;
 
-use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
@@ -9,6 +8,9 @@ use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::encode_utf8_string;
 use crate::v5::encoder::encode_variable_integer;
 use crate::v5::encoder::RemainingLength;
+use crate::v5::error::MqttError;
+use crate::v5::error::MqttError::TopicFilterInvalid;
+use crate::v5::error::MqttError::{EndOfStream, UnacceptableProperty, UndefinedPacketIdentifier};
 use crate::v5::property::{PropertiesBuilder, PropertiesSize, Property, PublishProperties};
 use crate::v5::types::{ControlPacket, MqttCodec, Publish, QoS};
 
@@ -17,12 +19,10 @@ pub fn decode_publish(
     qos: QoS,
     retain: bool,
     mut reader: Bytes,
-) -> Result<Option<ControlPacket>> {
+) -> Result<Option<ControlPacket>, MqttError> {
     end_of_stream!(reader.remaining() < 3, "publish topic name");
-    let topic_name = match decode_utf8_string(&mut reader)? {
-        Some(v) => v,
-        None => bail!("missing topic in publish message"),
-    };
+    let topic_name = decode_utf8_string(&mut reader)?.ok_or(TopicFilterInvalid("".to_string()))?;
+
     let packet_identifier = if qos == QoS::AtMostOnce {
         None
     } else {
@@ -42,11 +42,12 @@ pub fn decode_publish(
     })))
 }
 
-pub fn decode_publish_properties(mut reader: Bytes) -> Result<PublishProperties> {
+pub fn decode_publish_properties(mut reader: Bytes) -> Result<PublishProperties, MqttError> {
     let mut builder = PropertiesBuilder::default();
     while reader.has_remaining() {
         let id = decode_variable_integer(&mut reader)?;
-        match id.try_into()? {
+        let property = id.try_into()?;
+        match property {
             Property::PayloadFormatIndicator => {
                 end_of_stream!(reader.remaining() < 1, "payload format indicator");
                 builder = builder.payload_format_indicator(reader.get_u8())?;
@@ -79,14 +80,14 @@ pub fn decode_publish_properties(mut reader: Bytes) -> Result<PublishProperties>
                 end_of_stream!(reader.remaining() < 4, "subscription identifier");
                 builder = builder.subscription_identifier(decode_variable_integer(&mut reader)?)?;
             }
-            _ => bail!("unknown publish property: {:x}", id),
+            _ => return Err(UnacceptableProperty(property)),
         }
     }
     Ok(builder.publish())
 }
 
 impl Encoder<Publish> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(&mut self, msg: Publish, writer: &mut BytesMut) -> Result<(), Self::Error> {
         self.encode(msg.topic_name, writer)?;
@@ -94,10 +95,7 @@ impl Encoder<Publish> for MqttCodec {
             if let Some(packet_identifier) = msg.packet_identifier {
                 writer.put_u16(packet_identifier); // packet identifier
             } else {
-                return Err(anyhow!(
-                    "undefined packet identifier with qos: {:?}",
-                    msg.qos
-                ));
+                return Err(UndefinedPacketIdentifier(msg.qos));
             }
         }
         self.encode(msg.properties, writer)?;
@@ -152,7 +150,7 @@ impl PropertiesSize for PublishProperties {
 }
 
 impl Encoder<PublishProperties> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(
         &mut self,

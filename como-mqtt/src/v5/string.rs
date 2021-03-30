@@ -2,7 +2,11 @@ use std::convert::TryInto;
 use std::ops::Deref;
 use std::string::FromUtf8Error;
 
-use bytes::{Buf, Bytes};
+use crate::v5::error::MqttError;
+use crate::v5::error::MqttError::EndOfStream;
+use crate::v5::types::MqttCodec;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use tokio_util::codec::Encoder;
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct MqttString(Bytes);
@@ -75,5 +79,17 @@ impl MqttString {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+}
+
+impl Encoder<MqttString> for MqttCodec {
+    type Error = MqttError;
+
+    fn encode(&mut self, s: MqttString, writer: &mut BytesMut) -> Result<(), Self::Error> {
+        end_of_stream!(writer.capacity() < 2, "encode utf2 string len");
+        writer.put_u16(s.len() as u16);
+        end_of_stream!(writer.capacity() < s.len(), "encode utf2 string");
+        writer.put(s);
+        Ok(())
     }
 }

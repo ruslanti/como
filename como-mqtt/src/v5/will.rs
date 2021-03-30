@@ -1,56 +1,43 @@
 use std::convert::{TryFrom, TryInto};
 use std::mem::size_of_val;
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::encode_utf8_string;
+use crate::v5::error::MqttError;
+use crate::v5::error::MqttError::EndOfStream;
+use crate::v5::error::MqttError::UnacceptableProperty;
 use crate::v5::property::{PropertiesBuilder, PropertiesSize, Property, WillProperties};
 use crate::v5::types::{MqttCodec, Will};
 
 impl TryFrom<Bytes> for WillProperties {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn try_from(mut reader: Bytes) -> Result<Self, Self::Error> {
         let mut builder = PropertiesBuilder::default();
         while reader.has_remaining() {
             let id = decode_variable_integer(&mut reader)?;
-            match id.try_into()? {
+            let property = id.try_into()?;
+            match property {
                 Property::WillDelayInterval => {
                     end_of_stream!(reader.remaining() < 4, "will delay interval");
-                    builder = builder
-                        .will_delay_interval(reader.get_u32())
-                        .context("will_delay_interval")?;
+                    builder = builder.will_delay_interval(reader.get_u32())?;
                 }
                 Property::PayloadFormatIndicator => {
                     end_of_stream!(reader.remaining() < 1, "will payload format indicator");
-                    builder = builder
-                        .payload_format_indicator(reader.get_u8())
-                        .context("payload_format_indicator")?;
+                    builder = builder.payload_format_indicator(reader.get_u8())?;
                 }
                 Property::MessageExpireInterval => {
                     end_of_stream!(reader.remaining() < 4, "will message expire interval");
-                    builder = builder
-                        .message_expire_interval(reader.get_u32())
-                        .context("message_expire_interval")?;
+                    builder = builder.message_expire_interval(reader.get_u32())?;
                 }
                 Property::ContentType => {
-                    builder = builder
-                        .content_type(
-                            decode_utf8_string(&mut reader)
-                                .context("decode_utf8_string content_type")?,
-                        )
-                        .context("content_type")?;
+                    builder = builder.content_type(decode_utf8_string(&mut reader)?)?;
                 }
                 Property::ResponseTopic => {
-                    builder = builder
-                        .response_topic(
-                            decode_utf8_string(&mut reader)
-                                .context("decode_utf8_string response_topic")?,
-                        )
-                        .context("response_topic")?;
+                    builder = builder.response_topic(decode_utf8_string(&mut reader)?)?;
                 }
                 Property::CorrelationData => unimplemented!(),
                 Property::UserProperty => {
@@ -62,7 +49,7 @@ impl TryFrom<Bytes> for WillProperties {
                         builder = builder.user_properties((key, value));
                     }
                 }
-                _ => bail!("unknown will property: {:x}", id),
+                _ => return Err(UnacceptableProperty(property)),
             }
         }
         Ok(builder.will())
@@ -72,16 +59,17 @@ impl TryFrom<Bytes> for WillProperties {
 impl PropertiesSize for Will {
     fn size(&self) -> usize {
         let properties_length = self.properties.size();
-        properties_length.size() + properties_length + self.topic.len() + 2 + self.payload.len()
+        properties_length.size() + properties_length + self.topic.len() + 4 + self.payload.len()
     }
 }
 
 impl Encoder<Will> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(&mut self, msg: Will, writer: &mut BytesMut) -> Result<(), Self::Error> {
         self.encode(msg.properties, writer)?;
         self.encode(msg.topic, writer)?;
+        writer.put_u16(msg.payload.len() as u16);
         self.encode(msg.payload, writer)
     }
 }
@@ -104,7 +92,7 @@ impl PropertiesSize for WillProperties {
 }
 
 impl Encoder<WillProperties> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(
         &mut self,

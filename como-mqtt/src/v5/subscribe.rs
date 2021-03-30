@@ -1,6 +1,5 @@
 use std::convert::{TryFrom, TryInto};
 
-use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
@@ -8,6 +7,8 @@ use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::encode_utf8_string;
 use crate::v5::encoder::encode_variable_integer;
 use crate::v5::encoder::RemainingLength;
+use crate::v5::error::MqttError;
+use crate::v5::error::MqttError::{EndOfStream, TopicFilterInvalid, UnacceptableProperty};
 use crate::v5::property::{
     PropertiesBuilder, PropertiesSize, Property, ResponseProperties, SubscribeProperties,
 };
@@ -16,7 +17,7 @@ use crate::v5::types::{
     ControlPacket, MqttCodec, ReasonCode, SubAck, Subscribe, SubscriptionOptions,
 };
 
-pub fn decode_subscribe(mut reader: Bytes) -> Result<Option<ControlPacket>> {
+pub fn decode_subscribe(mut reader: Bytes) -> Result<Option<ControlPacket>, MqttError> {
     end_of_stream!(reader.remaining() < 2, "subscribe packet identifier");
     let packet_identifier = reader.get_u16();
     let properties_length = decode_variable_integer(&mut reader)? as usize;
@@ -29,11 +30,12 @@ pub fn decode_subscribe(mut reader: Bytes) -> Result<Option<ControlPacket>> {
     })))
 }
 
-pub fn decode_subscribe_properties(mut reader: Bytes) -> Result<SubscribeProperties> {
+pub fn decode_subscribe_properties(mut reader: Bytes) -> Result<SubscribeProperties, MqttError> {
     let mut builder = PropertiesBuilder::default();
     while reader.has_remaining() {
         let id = decode_variable_integer(&mut reader)?;
-        match id.try_into()? {
+        let property = id.try_into()?;
+        match property {
             Property::SubscriptionIdentifier => {
                 end_of_stream!(reader.remaining() < 4, "subscription identifier");
                 builder = builder.subscription_identifier(decode_variable_integer(&mut reader)?)?;
@@ -47,7 +49,7 @@ pub fn decode_subscribe_properties(mut reader: Bytes) -> Result<SubscribePropert
                     builder = builder.user_properties((key, value));
                 }
             }
-            _ => bail!("unknown subscribe property: {:x}", id),
+            _ => return Err(UnacceptableProperty(property)),
         }
     }
     Ok(builder.subscribe())
@@ -55,7 +57,7 @@ pub fn decode_subscribe_properties(mut reader: Bytes) -> Result<SubscribePropert
 
 pub fn decode_subscribe_payload(
     mut reader: Bytes,
-) -> Result<Vec<(MqttString, SubscriptionOptions)>> {
+) -> Result<Vec<(MqttString, SubscriptionOptions)>, MqttError> {
     let mut topic_filter = vec![];
     while reader.has_remaining() {
         if let Some(topic) = decode_utf8_string(&mut reader)? {
@@ -63,7 +65,7 @@ pub fn decode_subscribe_payload(
             let subscription_option = SubscriptionOptions::try_from(reader.get_u8())?;
             topic_filter.push((topic, subscription_option))
         } else {
-            bail!("empty topic filter");
+            return Err(TopicFilterInvalid("".to_owned()));
         }
     }
     Ok(topic_filter)
@@ -98,7 +100,7 @@ impl PropertiesSize for SubscribeProperties {
 }
 
 impl Encoder<Subscribe> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(&mut self, msg: Subscribe, writer: &mut BytesMut) -> Result<(), Self::Error> {
         writer.put_u16(msg.packet_identifier);
@@ -112,7 +114,7 @@ impl Encoder<Subscribe> for MqttCodec {
 }
 
 impl Encoder<SubscribeProperties> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(
         &mut self,
@@ -144,7 +146,7 @@ impl RemainingLength for SubAck {
 }
 
 impl Encoder<SubAck> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(&mut self, msg: SubAck, writer: &mut BytesMut) -> Result<(), Self::Error> {
         writer.put_u16(msg.packet_identifier);
@@ -157,7 +159,7 @@ impl Encoder<SubAck> for MqttCodec {
 }
 
 impl TryFrom<Bytes> for SubAck {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn try_from(mut reader: Bytes) -> Result<Self, Self::Error> {
         end_of_stream!(reader.remaining() < 2, "suback packet_identifier");

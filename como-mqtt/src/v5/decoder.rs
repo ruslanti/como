@@ -1,12 +1,14 @@
 use std::convert::TryFrom;
 
-use anyhow::{anyhow, ensure, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::Decoder;
 use tracing::{instrument, trace};
 
 use crate::v5::connack::decode_connack;
 use crate::v5::disconnect::decode_disconnect;
+use crate::v5::error::MqttError;
+use crate::v5::error::MqttError::EndOfStream;
+use crate::v5::error::MqttError::MalformedVariableInteger;
 use crate::v5::publish::decode_publish;
 use crate::v5::string::MqttString;
 use crate::v5::subscribe::decode_subscribe;
@@ -19,7 +21,7 @@ const MIN_FIXED_HEADER_LEN: usize = 2;
 
 impl Decoder for MqttCodec {
     type Item = ControlPacket;
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     #[instrument(skip(self), err)]
     fn decode(&mut self, reader: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -84,19 +86,22 @@ impl Decoder for MqttCodec {
     }
 }
 
-pub fn decode_variable_integer<T>(reader: &mut T) -> Result<u32>
+pub fn decode_variable_integer<T>(reader: &mut T) -> Result<u32, MqttError>
 where
     T: Buf,
 {
     let mut multiplier = 1;
     let mut value = 0;
     loop {
-        ensure!(reader.remaining() > 0, anyhow!("end of stream"));
+        ensure!(
+            reader.remaining() > 0,
+            EndOfStream("decode_variable_integer")
+        );
         let encoded_byte: u8 = reader.get_u8();
         value += (encoded_byte & 0x7F) as u32 * multiplier;
         ensure!(
             multiplier <= (0x80 * 0x80 * 0x80),
-            anyhow!("malformed variable integer: {}", value)
+            MalformedVariableInteger(value)
         );
         multiplier *= 0x80;
         if (encoded_byte & 0x80) == 0 {
@@ -106,7 +111,7 @@ where
     Ok(value)
 }
 
-pub fn decode_utf8_string(reader: &mut Bytes) -> Result<Option<MqttString>> {
+pub fn decode_utf8_string(reader: &mut Bytes) -> Result<Option<MqttString>, MqttError> {
     if reader.remaining() >= 2 {
         let len = reader.get_u16() as usize;
         if reader.remaining() >= len {
@@ -116,9 +121,9 @@ pub fn decode_utf8_string(reader: &mut Bytes) -> Result<Option<MqttString>> {
                 Ok(None)
             }
         } else {
-            Err(anyhow!("end of stream"))
+            Err(EndOfStream("decode_utf8_string"))
         }
     } else {
-        Err(anyhow!("end of stream"))
+        Err(EndOfStream("decode_utf8_string"))
     }
 }

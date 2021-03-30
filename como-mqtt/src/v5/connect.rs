@@ -1,12 +1,14 @@
 use std::convert::{TryFrom, TryInto};
 use std::mem::size_of_val;
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::{encode_utf8_string, RemainingLength};
+use crate::v5::error::MqttError;
+use crate::v5::error::MqttError::{EndOfStream, UnacceptableProperty};
+use crate::v5::error::MqttError::{UnspecifiedError, UnsupportedProtocolVersion};
 use crate::v5::property::{
     ConnectProperties, PropertiesBuilder, PropertiesSize, Property, WillProperties,
 };
@@ -14,15 +16,21 @@ use crate::v5::string::MqttString;
 use crate::v5::types::{Connect, MqttCodec, Will, MQTT, VERSION};
 
 impl TryFrom<Bytes> for Connect {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn try_from(mut reader: Bytes) -> Result<Self, Self::Error> {
-        if Some(MqttString::from(MQTT)) != decode_utf8_string(&mut reader)? {
-            bail!("wrong protocol name");
+        if let Some(protocol) = decode_utf8_string(&mut reader)? {
+            let protocol = protocol.try_into()?;
+            if MQTT != protocol {
+                return Err(UnsupportedProtocolVersion(protocol));
+            }
+        } else {
+            return Err(UnsupportedProtocolVersion(String::new()));
         }
         end_of_stream!(reader.remaining() < 4, "connect version");
-        if VERSION != reader.get_u8() {
-            bail!("wrong protocol version");
+        let version = reader.get_u8();
+        if VERSION != version {
+            return Err(UnsupportedProtocolVersion(version.to_string()));
         }
 
         let flags = reader.get_u8();
@@ -31,31 +39,25 @@ impl TryFrom<Bytes> for Connect {
             will_flag,
             will_qos_flag,
             will_retain_flag,
-            _password_flag,
-            _username_flag,
+            password_flag,
+            username_flag,
         ) = Connect::set_flags(flags)?;
 
         let keep_alive = reader.get_u16();
 
-        let properties_length = decode_variable_integer(&mut reader)
-            .context("connect properties length decode error")?
-            as usize;
-        let properties = ConnectProperties::try_from(reader.split_to(properties_length))
-            .context("connect properties decode error")?;
+        let properties_length = decode_variable_integer(&mut reader)? as usize;
+        let properties = ConnectProperties::try_from(reader.split_to(properties_length))?;
 
-        let client_identifier =
-            decode_utf8_string(&mut reader).context("client_identifier decode error")?;
+        let client_identifier = decode_utf8_string(&mut reader)?;
 
         let will = if will_flag {
-            let will_properties_length = decode_variable_integer(&mut reader)
-                .context("will properties length decode error")?
-                as usize;
-            let properties = WillProperties::try_from(reader.split_to(will_properties_length))
-                .context("will properties decode error")?;
-            let topic = decode_utf8_string(&mut reader)
-                .context("will topic decode error")?
-                .ok_or_else(|| anyhow!("will topic is missing"))?;
-            let payload = reader;
+            let will_properties_length = decode_variable_integer(&mut reader)? as usize;
+            let properties = WillProperties::try_from(reader.split_to(will_properties_length))?;
+            let topic = decode_utf8_string(&mut reader)?
+                .ok_or_else(|| UnspecifiedError("will topic is missing".to_owned()))?;
+            let payload_len = reader.get_u16();
+            let payload = reader.split_to(payload_len as usize);
+
             Some(Will {
                 qos: will_qos_flag,
                 retain: will_retain_flag,
@@ -67,40 +69,39 @@ impl TryFrom<Bytes> for Connect {
             None
         };
 
-        /*
-            TODO: get username and password
-            let username = if username_flag {
-                decode_utf8_string(&mut reader)?
-            } else {
-                None
-            };
+        let username = if username_flag {
+            decode_utf8_string(&mut reader)?
+        } else {
+            None
+        };
 
-            let password = if password_flag {
-                decode_utf8_string(&mut reader)?
-            } else {
-                None
-            };
-        */
+        let password = if password_flag {
+            Some(reader.clone())
+        } else {
+            None
+        };
+
         Ok(Connect {
             clean_start_flag,
             keep_alive,
             properties,
             client_identifier,
-            username: None,
-            password: None,
+            username,
+            password,
             will,
         })
     }
 }
 
 impl TryFrom<Bytes> for ConnectProperties {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn try_from(mut reader: Bytes) -> Result<Self, Self::Error> {
         let mut builder = PropertiesBuilder::default();
         while reader.has_remaining() {
             let id = decode_variable_integer(&mut reader)?;
-            match id.try_into()? {
+            let property = id.try_into()?;
+            match property {
                 Property::SessionExpireInterval => {
                     end_of_stream!(reader.remaining() < 4, "session expire interval");
                     builder = builder.session_expire_interval(reader.get_u32())?;
@@ -137,11 +138,9 @@ impl TryFrom<Bytes> for ConnectProperties {
                 Property::AuthenticationMethod => {
                     if let Some(authentication_method) = decode_utf8_string(&mut reader)? {
                         builder = builder.authentication_method(authentication_method)?
-                    } else {
-                        bail!("missing authentication method");
                     }
                 }
-                _ => bail!("unknown connect property: {:x}", id),
+                _ => return Err(UnacceptableProperty(property)),
             }
         }
         Ok(builder.connect())
@@ -149,7 +148,7 @@ impl TryFrom<Bytes> for ConnectProperties {
 }
 
 impl Encoder<ConnectProperties> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(
         &mut self,
@@ -186,7 +185,7 @@ impl Encoder<ConnectProperties> for MqttCodec {
 }
 
 impl Encoder<Connect> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(&mut self, msg: Connect, writer: &mut BytesMut) -> Result<(), Self::Error> {
         self.encode(MqttString::from(MQTT), writer)?;

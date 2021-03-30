@@ -1,7 +1,8 @@
-use anyhow::{anyhow, ensure, Result};
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
+use crate::v5::error::MqttError;
+use crate::v5::error::MqttError::EndOfStream;
 use crate::v5::property::PropertiesSize;
 use crate::v5::string::MqttString;
 use crate::v5::types::{ControlPacket, MqttCodec, PacketType};
@@ -11,7 +12,7 @@ pub trait RemainingLength {
 }
 
 impl Encoder<ControlPacket> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(&mut self, packet: ControlPacket, writer: &mut BytesMut) -> Result<(), Self::Error> {
         match packet {
@@ -96,7 +97,7 @@ impl Encoder<ControlPacket> for MqttCodec {
 }
 
 impl Encoder<usize> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(&mut self, v: usize, writer: &mut BytesMut) -> Result<(), Self::Error> {
         let mut value = v;
@@ -107,7 +108,7 @@ impl Encoder<usize> for MqttCodec {
             if value > 0 {
                 encoded_byte |= 0x80;
             }
-            ensure!(writer.capacity() > 0, anyhow!("end of stream"));
+            end_of_stream!(writer.capacity() < 1, "encode variable integer");
             writer.put_u8(encoded_byte);
             if value == 0 {
                 break;
@@ -118,7 +119,7 @@ impl Encoder<usize> for MqttCodec {
 }
 
 impl Encoder<Bytes> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(&mut self, b: Bytes, writer: &mut BytesMut) -> Result<(), Self::Error> {
         end_of_stream!(writer.capacity() < b.len(), "encode bytes");
@@ -127,23 +128,11 @@ impl Encoder<Bytes> for MqttCodec {
     }
 }
 
-impl Encoder<MqttString> for MqttCodec {
-    type Error = anyhow::Error;
-
-    fn encode(&mut self, s: MqttString, writer: &mut BytesMut) -> Result<(), Self::Error> {
-        end_of_stream!(writer.capacity() < 2, "encode utf2 string len");
-        writer.put_u16(s.len() as u16);
-        end_of_stream!(writer.capacity() < s.len(), "encode utf2 string");
-        writer.put(s);
-        Ok(())
-    }
-}
-
 fn encode_fixed_header(
     writer: &mut BytesMut,
     packet_type: PacketType,
     remaining_length: usize,
-) -> Result<()> {
+) -> Result<(), MqttError> {
     writer.reserve(1 + remaining_length.size() + remaining_length);
     writer.put_u8(packet_type.into()); // packet type
     encode_variable_integer(writer, remaining_length) // remaining length
@@ -160,7 +149,7 @@ impl PropertiesSize for usize {
     }
 }
 
-pub fn encode_utf8_string(writer: &mut BytesMut, s: MqttString) -> Result<()> {
+pub fn encode_utf8_string(writer: &mut BytesMut, s: MqttString) -> Result<(), MqttError> {
     end_of_stream!(writer.capacity() < 2, "encode utf2 string len");
     writer.put_u16(s.len() as u16);
     end_of_stream!(writer.capacity() < s.len(), "encode utf2 string");
@@ -168,7 +157,7 @@ pub fn encode_utf8_string(writer: &mut BytesMut, s: MqttString) -> Result<()> {
     Ok(())
 }
 
-pub fn encode_variable_integer(writer: &mut BytesMut, v: usize) -> Result<()> {
+pub fn encode_variable_integer(writer: &mut BytesMut, v: usize) -> Result<(), MqttError> {
     let mut value = v;
     loop {
         let mut encoded_byte = (value % 0x80) as u8;
@@ -177,7 +166,7 @@ pub fn encode_variable_integer(writer: &mut BytesMut, v: usize) -> Result<()> {
         if value > 0 {
             encoded_byte |= 0x80;
         }
-        ensure!(writer.capacity() > 0, anyhow!("end of stream"));
+        end_of_stream!(writer.capacity() < 1, "encode variable integer");
         writer.put_u8(encoded_byte);
         if value == 0 {
             break;

@@ -1,15 +1,17 @@
 use std::convert::{TryFrom, TryInto};
 
-use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
+use crate::v5::error::MqttError;
+use crate::v5::error::MqttError::EndOfStream;
+use crate::v5::error::MqttError::UnacceptableProperty;
 use crate::v5::property::{AuthProperties, PropertiesBuilder, Property};
 use crate::v5::types::{Auth, MqttCodec};
 
 impl TryFrom<Bytes> for Auth {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn try_from(mut reader: Bytes) -> Result<Self, Self::Error> {
         end_of_stream!(reader.remaining() < 1, "auth reason code");
@@ -24,18 +26,17 @@ impl TryFrom<Bytes> for Auth {
 }
 
 impl TryFrom<Bytes> for AuthProperties {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn try_from(mut reader: Bytes) -> Result<Self, Self::Error> {
         let mut builder = PropertiesBuilder::default();
         while reader.has_remaining() {
             let id = decode_variable_integer(&mut reader)?;
-            match id.try_into()? {
+            let property = id.try_into()?;
+            match property {
                 Property::AuthenticationMethod => {
                     if let Some(authentication_method) = decode_utf8_string(&mut reader)? {
                         builder = builder.authentication_method(authentication_method)?
-                    } else {
-                        bail!("missing authentication method");
                     }
                 }
                 Property::AuthenticationData => unimplemented!(),
@@ -51,7 +52,7 @@ impl TryFrom<Bytes> for AuthProperties {
                         builder = builder.user_properties((key, value));
                     }
                 }
-                _ => bail!("unknown subscribe property: {:x}", id),
+                _ => return Err(UnacceptableProperty(property)),
             }
         }
         Ok(builder.auth())
@@ -59,7 +60,7 @@ impl TryFrom<Bytes> for AuthProperties {
 }
 
 impl Encoder<Auth> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(&mut self, _msg: Auth, _writer: &mut BytesMut) -> Result<(), Self::Error> {
         unimplemented!()

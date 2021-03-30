@@ -1,16 +1,19 @@
 use std::convert::{TryFrom, TryInto};
 
-use anyhow::{anyhow, Result};
 use bytes::Bytes;
 
+use crate::v5::error::MqttError;
+use crate::v5::error::MqttError::MoreThanOnceProperty;
+use crate::v5::error::MqttError::{EmptyPropertyValue, MalformedPropertyType};
 use crate::v5::string::MqttString;
 use crate::v5::types::QoS;
+use std::fmt;
 
 macro_rules! check_and_set {
     ($self:ident, $property:ident, $value: expr) => {
         match $self.$property.replace($value) {
             None => Ok($self),
-            Some(_) => Err(anyhow!("protocol error")),
+            Some(_) => Err(MoreThanOnceProperty),
         }
     };
 }
@@ -134,7 +137,7 @@ pub enum Property {
 }
 
 impl TryFrom<u32> for Property {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
@@ -165,7 +168,7 @@ impl TryFrom<u32> for Property {
             0x28 => Ok(Property::WildcardSubscriptionAvailable),
             0x29 => Ok(Property::SubscriptionIdentifierAvailable),
             0x2A => Ok(Property::SharedSubscriptionAvailable),
-            _ => Err(anyhow!("invalid property: {:x}", value)),
+            _ => Err(MalformedPropertyType(value)),
         }
     }
 }
@@ -407,93 +410,96 @@ impl Default for WillProperties {
 }
 
 impl PropertiesBuilder {
-    pub fn session_expire_interval(mut self, value: u32) -> Result<Self> {
+    pub fn session_expire_interval(mut self, value: u32) -> Result<Self, MqttError> {
         check_and_set!(self, session_expire_interval, value)
     }
-    pub fn receive_maximum(mut self, value: u16) -> Result<Self> {
+    pub fn receive_maximum(mut self, value: u16) -> Result<Self, MqttError> {
         check_and_set!(self, receive_maximum, value)
     }
-    pub fn maximum_packet_size(mut self, value: u32) -> Result<Self> {
+    pub fn maximum_packet_size(mut self, value: u32) -> Result<Self, MqttError> {
         check_and_set!(self, maximum_packet_size, value)
     }
-    pub fn topic_alias_maximum(mut self, value: u16) -> Result<Self> {
+    pub fn topic_alias_maximum(mut self, value: u16) -> Result<Self, MqttError> {
         check_and_set!(self, topic_alias_maximum, value)
     }
-    pub fn request_response_information(mut self, value: u8) -> Result<Self> {
+    pub fn request_response_information(mut self, value: u8) -> Result<Self, MqttError> {
         check_and_set!(self, request_response_information, value != 0)
     }
-    pub fn request_problem_information(mut self, value: u8) -> Result<Self> {
+    pub fn request_problem_information(mut self, value: u8) -> Result<Self, MqttError> {
         check_and_set!(self, request_problem_information, value != 0)
     }
     pub fn user_properties(mut self, value: (MqttString, MqttString)) -> Self {
         self.user_properties.push(value);
         self
     }
-    pub fn authentication_method(mut self, value: MqttString) -> Result<Self> {
+    pub fn authentication_method(mut self, value: MqttString) -> Result<Self, MqttError> {
         check_and_set!(self, authentication_method, value)
     }
-    pub fn will_delay_interval(mut self, value: u32) -> Result<Self> {
+    pub fn will_delay_interval(mut self, value: u32) -> Result<Self, MqttError> {
         check_and_set!(self, will_delay_interval, value)
     }
-    pub fn payload_format_indicator(mut self, value: u8) -> Result<Self> {
+    pub fn payload_format_indicator(mut self, value: u8) -> Result<Self, MqttError> {
         check_and_set!(self, payload_format_indicator, value != 0)
     }
-    pub fn message_expire_interval(mut self, value: u32) -> Result<Self> {
+    pub fn message_expire_interval(mut self, value: u32) -> Result<Self, MqttError> {
         check_and_set!(self, message_expire_interval, value)
     }
-    pub fn content_type(mut self, value: Option<MqttString>) -> Result<Self> {
+    pub fn content_type(mut self, value: Option<MqttString>) -> Result<Self, MqttError> {
         if let Some(v) = value {
             check_and_set!(self, content_type, v)
         } else {
-            Err(anyhow!("empty content type"))
+            Err(EmptyPropertyValue("ContentType"))
         }
     }
-    pub fn response_topic(mut self, value: Option<MqttString>) -> Result<Self> {
+    pub fn response_topic(mut self, value: Option<MqttString>) -> Result<Self, MqttError> {
         if let Some(v) = value {
             check_and_set!(self, response_topic, v)
         } else {
-            Err(anyhow!("empty response topic"))
+            Err(EmptyPropertyValue("ResponseTopic"))
         }
     }
-    pub fn server_reference(mut self, value: Option<MqttString>) -> Result<Self> {
+    pub fn server_reference(mut self, value: Option<MqttString>) -> Result<Self, MqttError> {
         if let Some(v) = value {
             check_and_set!(self, server_reference, v)
         } else {
-            Err(anyhow!("empty server reference"))
+            Err(EmptyPropertyValue("ServerReference"))
         }
     }
-    pub fn _correlation_data(mut self, value: MqttString) -> Result<Self> {
+    pub fn _correlation_data(mut self, value: MqttString) -> Result<Self, MqttError> {
         check_and_set!(self, correlation_data, value)
     }
-    pub fn maximum_qos(mut self, value: u8) -> Result<Self> {
+    pub fn maximum_qos(mut self, value: u8) -> Result<Self, MqttError> {
         check_and_set!(self, maximum_qos, value.try_into()?)
     }
-    pub fn retain_available(mut self, value: u8) -> Result<Self> {
+    pub fn retain_available(mut self, value: u8) -> Result<Self, MqttError> {
         check_and_set!(self, retain_available, value != 0)
     }
-    pub fn wildcard_subscription_available(mut self, value: u8) -> Result<Self> {
+    pub fn wildcard_subscription_available(mut self, value: u8) -> Result<Self, MqttError> {
         check_and_set!(self, wildcard_subscription_available, value != 0)
     }
-    pub fn subscription_identifier_available(mut self, value: u8) -> Result<Self> {
+    pub fn subscription_identifier_available(mut self, value: u8) -> Result<Self, MqttError> {
         check_and_set!(self, subscription_identifier_available, value != 0)
     }
-    pub fn shared_subscription_available(mut self, value: u8) -> Result<Self> {
+    pub fn shared_subscription_available(mut self, value: u8) -> Result<Self, MqttError> {
         check_and_set!(self, shared_subscription_available, value != 0)
     }
-    pub fn server_keep_alive(mut self, value: u16) -> Result<Self> {
+    pub fn server_keep_alive(mut self, value: u16) -> Result<Self, MqttError> {
         check_and_set!(self, server_keep_alive, value)
     }
-    pub fn topic_alias(mut self, value: u16) -> Result<Self> {
+    pub fn topic_alias(mut self, value: u16) -> Result<Self, MqttError> {
         check_and_set!(self, topic_alias, value)
     }
-    pub fn subscription_identifier(mut self, value: u32) -> Result<Self> {
+    pub fn subscription_identifier(mut self, value: u32) -> Result<Self, MqttError> {
         check_and_set!(self, subscription_identifier, value)
     }
-    pub fn assigned_client_identifier(mut self, value: Option<MqttString>) -> Result<Self> {
+    pub fn assigned_client_identifier(
+        mut self,
+        value: Option<MqttString>,
+    ) -> Result<Self, MqttError> {
         if let Some(v) = value {
             check_and_set!(self, assigned_client_identifier, v)
         } else {
-            Err(anyhow!("empty assigned client identifier"))
+            Err(EmptyPropertyValue("AssignedClientIdentifier"))
         }
     }
 
@@ -593,6 +599,12 @@ impl PropertiesBuilder {
             reason_string: self.reason_string,
             user_properties: self.user_properties,
         }
+    }
+}
+
+impl fmt::Display for Property {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", stringify!(self))
     }
 }
 

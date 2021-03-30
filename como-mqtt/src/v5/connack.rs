@@ -1,17 +1,18 @@
 use std::convert::TryInto;
 use std::mem::size_of_val;
 
-use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::encode_utf8_string;
 use crate::v5::encoder::RemainingLength;
+use crate::v5::error::MqttError;
+use crate::v5::error::MqttError::{EndOfStream, UnacceptableProperty};
 use crate::v5::property::*;
 use crate::v5::types::{ConnAck, ControlPacket, MqttCodec};
 
-pub fn decode_connack(mut reader: Bytes) -> Result<Option<ControlPacket>> {
+pub fn decode_connack(mut reader: Bytes) -> Result<Option<ControlPacket>, MqttError> {
     end_of_stream!(reader.remaining() < 3, "connack flags");
     let flags = reader.get_u8();
     let session_present = (flags & 0b00000001) != 0;
@@ -25,11 +26,12 @@ pub fn decode_connack(mut reader: Bytes) -> Result<Option<ControlPacket>> {
     })))
 }
 
-pub fn decode_connack_properties(mut reader: Bytes) -> Result<ConnAckProperties> {
+pub fn decode_connack_properties(mut reader: Bytes) -> Result<ConnAckProperties, MqttError> {
     let mut builder = PropertiesBuilder::default();
     while reader.has_remaining() {
         let id = decode_variable_integer(&mut reader)?;
-        match id.try_into()? {
+        let property = id.try_into()?;
+        match property {
             Property::SessionExpireInterval => {
                 end_of_stream!(reader.remaining() < 4, "session expire interval");
                 builder = builder.session_expire_interval(reader.get_u32())?;
@@ -87,14 +89,14 @@ pub fn decode_connack_properties(mut reader: Bytes) -> Result<ConnAckProperties>
             }
             Property::AuthenticationMethod => unimplemented!(),
             Property::AuthenticationData => unimplemented!(),
-            _ => bail!("unknown connack property: {:x}", id),
+            _ => return Err(UnacceptableProperty(property)),
         }
     }
     Ok(builder.connack())
 }
 
 impl Encoder<ConnAckProperties> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(
         &mut self,
@@ -129,7 +131,7 @@ impl Encoder<ConnAckProperties> for MqttCodec {
 }
 
 impl Encoder<ConnAck> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(&mut self, msg: ConnAck, writer: &mut BytesMut) -> Result<(), Self::Error> {
         writer.put_u8(msg.session_present as u8); // connack flags

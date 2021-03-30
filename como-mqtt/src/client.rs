@@ -1,8 +1,7 @@
-use std::net::SocketAddr;
-
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
+use std::net::SocketAddr;
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::time::timeout;
 use tokio::time::Duration;
@@ -72,7 +71,7 @@ impl<'a> MqttClient {
             .await
             .map_err(Error::msg)
             .and_then(|r| r.ok_or_else(|| anyhow!("none message")))
-            .and_then(|r| r)
+            .and_then(|r| r.map_err(Error::msg))
     }
 
     pub async fn recv(&mut self) -> Result<ControlPacket, Error> {
@@ -80,6 +79,7 @@ impl<'a> MqttClient {
             .next()
             .await
             .transpose()
+            .map_err(Error::msg)
             .and_then(|r| r.ok_or_else(|| anyhow!("none message")))
             .map_err(Error::msg)
     }
@@ -102,7 +102,7 @@ impl<'a> MqttClient {
             .send(ControlPacket::Disconnect(disconnect))
             .await?;
         // expected None on socket close
-        self.stream.next().await.transpose()
+        self.stream.next().await.transpose().map_err(Error::msg)
     }
 
     pub async fn publish_most_once(
@@ -121,7 +121,10 @@ impl<'a> MqttClient {
             payload: Bytes::from(payload),
         };
         trace!("send {}", publish);
-        self.stream.send(ControlPacket::Publish(publish)).await
+        self.stream
+            .send(ControlPacket::Publish(publish))
+            .await
+            .map_err(Error::msg)
     }
 
     pub async fn publish_least_once(

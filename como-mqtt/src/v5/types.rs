@@ -1,11 +1,13 @@
 use core::fmt;
 use std::convert::{TryFrom, TryInto};
 
-use anyhow::{anyhow, Error};
 use bytes::Bytes;
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::v5::error::MqttError;
+use crate::v5::error::MqttError::MalformedQoS;
+use crate::v5::error::MqttError::{MalformedPacketType, MalformedReasonCode, MalformedRetain};
 use crate::v5::property::{
     AuthProperties, ConnAckProperties, ConnectProperties, DisconnectProperties, PublishProperties,
     ResponseProperties, SubscribeProperties, UnSubscribeProperties, WillProperties,
@@ -13,9 +15,18 @@ use crate::v5::property::{
 use crate::v5::string::MqttString;
 
 #[macro_use]
+macro_rules! ensure {
+    ($condition: expr, $err:expr) => {
+        if !($condition) {
+            return Err($err);
+        }
+    };
+}
+
+#[macro_use]
 macro_rules! end_of_stream {
     ($condition: expr, $context: expr) => {
-        ensure!(!$condition, anyhow!("end of stream").context($context));
+        ensure!(!$condition, EndOfStream($context));
     };
 }
 
@@ -30,14 +41,14 @@ pub enum QoS {
 }
 
 impl TryFrom<u8> for QoS {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
-    fn try_from(v: u8) -> anyhow::Result<Self> {
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
         match v {
             0 => Ok(QoS::AtMostOnce),
             1 => Ok(QoS::AtLeastOnce),
             2 => Ok(QoS::ExactlyOnce),
-            _ => Err(anyhow!("malformed QoS: {}", v)),
+            _ => Err(MalformedQoS(v)),
         }
     }
 }
@@ -49,6 +60,12 @@ impl From<QoS> for u8 {
             QoS::AtLeastOnce => 1,
             QoS::ExactlyOnce => 2,
         }
+    }
+}
+
+impl fmt::Display for QoS {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", stringify!(self))
     }
 }
 
@@ -99,14 +116,14 @@ pub enum Retain {
 }
 
 impl TryFrom<u8> for Retain {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
-    fn try_from(v: u8) -> anyhow::Result<Self> {
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
         match v {
             0 => Ok(Retain::SendAtTime),
             1 => Ok(Retain::SendAtSubscribe),
             2 => Ok(Retain::DoNotSend),
-            _ => Err(anyhow!("malformed Retain: {}", v)),
+            _ => Err(MalformedRetain(v)),
         }
     }
 }
@@ -141,9 +158,9 @@ pub enum PacketType {
 }
 
 impl TryFrom<u8> for PacketType {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
-    fn try_from(v: u8) -> anyhow::Result<Self> {
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
         match v {
             0x10 => Ok(PacketType::Connect),
             0x20 => Ok(PacketType::ConnAck),
@@ -164,7 +181,7 @@ impl TryFrom<u8> for PacketType {
             0xD0 => Ok(PacketType::PingResp),
             0xE0 => Ok(PacketType::Disconnect),
             0xF0 => Ok(PacketType::Auth),
-            _ => Err(anyhow!("malformed control packet type: {}", v)),
+            _ => Err(MalformedPacketType(v)),
         }
     }
 }
@@ -231,7 +248,7 @@ pub enum ReasonCode {
 }
 
 impl TryFrom<u8> for ReasonCode {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn try_from(b: u8) -> Result<Self, Self::Error> {
         match b {
@@ -268,7 +285,7 @@ impl TryFrom<u8> for ReasonCode {
             0x9C => Ok(ReasonCode::UseAnotherServer),
             0x9D => Ok(ReasonCode::ServerMoved),
             0x9F => Ok(ReasonCode::ConnectionRateExceeded),
-            _ => Err(anyhow!("malformed control packet reason code: {}", b)),
+            _ => Err(MalformedReasonCode(b)),
         }
     }
 }
@@ -329,7 +346,7 @@ pub struct Connect {
     pub properties: ConnectProperties,
     pub client_identifier: Option<MqttString>,
     pub username: Option<MqttString>,
-    pub password: Option<MqttString>,
+    pub password: Option<Bytes>,
     pub will: Option<Will>,
 }
 
@@ -445,7 +462,7 @@ impl Connect {
         flags
     }
 
-    pub(crate) fn set_flags(flags: u8) -> anyhow::Result<(bool, bool, QoS, bool, bool, bool)> {
+    pub(crate) fn set_flags(flags: u8) -> Result<(bool, bool, QoS, bool, bool, bool), MqttError> {
         let clean_start_flag = ((flags & 0b00000010) >> 1) != 0;
         let will_flag = ((flags & 0b00000100) >> 2) != 0;
         let will_qos_flag: QoS = QoS::try_from((flags & 0b00011000) >> 3)?;
@@ -613,7 +630,7 @@ impl fmt::Display for Auth {
 }
 
 impl TryFrom<u8> for SubscriptionOptions {
-    type Error = Error;
+    type Error = MqttError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         let qos: QoS = (value & 0b00000011).try_into()?;
@@ -641,10 +658,10 @@ impl From<SubscriptionOptions> for u8 {
 }
 
 impl TryFrom<&[u8]> for SubscriptionOptions {
-    type Error = Error;
+    type Error = Box<bincode::ErrorKind>;
 
     fn try_from(encoded: &[u8]) -> Result<Self, Self::Error> {
-        bincode::deserialize(encoded).map_err(Error::msg)
+        bincode::deserialize(encoded)
     }
 }
 

@@ -1,7 +1,6 @@
 use std::borrow::{Borrow, BorrowMut};
 use std::convert::TryInto;
 use std::net::SocketAddr;
-use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -72,13 +71,14 @@ impl ConnectionHandler {
         } else {
             None
         };
+        // within one and a half times the Keep Alive time period
         self.keep_alive = self
             .context
             .settings()
             .connection
             .server_keep_alive
             .or(client_keep_alive)
-            .map(|d| Duration::from_secs(d as u64).add(Duration::from_millis(100)))
+            .map(|d| Duration::from_secs(d as u64).mul_f32(1.5))
             .unwrap_or_else(|| Duration::from_micros(u64::MAX));
         trace!("keep_alive: {:?}", self.keep_alive);
 
@@ -121,6 +121,10 @@ impl ConnectionHandler {
                 let context = format!("session: None, packet: {}", packet,);
                 Err(anyhow!("unacceptable event").context(context))
             }
+            (Some(_), ControlPacket::Connect(_)) => todo!(
+                "The Server MUST process a second \
+            CONNECT packet sent from a Client as a Protocol Error and close the Network Connection"
+            ),
             (Some(_), ControlPacket::PingReq) => Ok(Some(ControlPacket::PingResp)),
             (Some(session), ControlPacket::Disconnect(disconnect)) => {
                 session

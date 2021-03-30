@@ -1,16 +1,17 @@
 use std::convert::TryInto;
 
-use anyhow::{anyhow, bail, ensure, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::Encoder;
 
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::RemainingLength;
+use crate::v5::error::MqttError;
+use crate::v5::error::MqttError::{EndOfStream, TopicFilterInvalid, UnacceptableProperty};
 use crate::v5::property::{PropertiesBuilder, Property, UnSubscribeProperties};
 use crate::v5::string::MqttString;
 use crate::v5::types::{ControlPacket, MqttCodec, UnSubscribe};
 
-pub fn decode_unsubscribe(mut reader: Bytes) -> Result<Option<ControlPacket>> {
+pub fn decode_unsubscribe(mut reader: Bytes) -> Result<Option<ControlPacket>, MqttError> {
     end_of_stream!(reader.remaining() < 2, "unsubscribe packet identifier");
     let packet_identifier = reader.get_u16();
     let properties_length = decode_variable_integer(&mut reader)? as usize;
@@ -23,11 +24,14 @@ pub fn decode_unsubscribe(mut reader: Bytes) -> Result<Option<ControlPacket>> {
     })))
 }
 
-pub fn decode_unsubscribe_properties(mut reader: Bytes) -> Result<UnSubscribeProperties> {
+pub fn decode_unsubscribe_properties(
+    mut reader: Bytes,
+) -> Result<UnSubscribeProperties, MqttError> {
     let mut builder = PropertiesBuilder::default();
     while reader.has_remaining() {
         let id = decode_variable_integer(&mut reader)?;
-        match id.try_into()? {
+        let property = id.try_into()?;
+        match property {
             Property::UserProperty => {
                 let user_property = (
                     decode_utf8_string(&mut reader)?,
@@ -37,26 +41,26 @@ pub fn decode_unsubscribe_properties(mut reader: Bytes) -> Result<UnSubscribePro
                     builder = builder.user_properties((key, value));
                 }
             }
-            _ => bail!("unknown unsubscribe property: {:x}", id),
+            _ => return Err(UnacceptableProperty(property)),
         }
     }
     Ok(builder.unsubscribe())
 }
 
-pub fn decode_unsubscribe_payload(mut reader: Bytes) -> Result<Vec<MqttString>> {
+pub fn decode_unsubscribe_payload(mut reader: Bytes) -> Result<Vec<MqttString>, MqttError> {
     let mut topic_filter = vec![];
     while reader.has_remaining() {
         if let Some(topic) = decode_utf8_string(&mut reader)? {
             topic_filter.push(topic)
         } else {
-            bail!("empty topic filter");
+            return Err(TopicFilterInvalid("".to_owned()));
         }
     }
     Ok(topic_filter)
 }
 
 impl Encoder<UnSubscribe> for MqttCodec {
-    type Error = anyhow::Error;
+    type Error = MqttError;
 
     fn encode(&mut self, _item: UnSubscribe, _dst: &mut BytesMut) -> Result<(), Self::Error> {
         unimplemented!()
