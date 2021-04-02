@@ -1,7 +1,7 @@
 mod connection;
 pub mod context;
-mod exactly_once;
 pub mod metric;
+mod qos;
 pub mod service;
 mod session;
 pub mod settings;
