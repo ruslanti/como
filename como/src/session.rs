@@ -1,15 +1,14 @@
 use std::borrow::{Borrow, BorrowMut};
 use std::cmp::min;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use anyhow::{anyhow, Context, Error, Result};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, field, info, instrument, trace, warn};
 
@@ -26,29 +25,38 @@ use como_mqtt::v5::types::{
 use crate::context::{
     subscribe_topic, SessionContext, SessionState, SessionStore, SubscriptionsStore,
 };
-use crate::exactly_once::{exactly_once_client, exactly_once_server};
 use crate::metric;
+use crate::qos::{exactly_once_server, qos_client};
 use crate::topic::{NewTopicSubscriber, PubMessage, TopicManager};
+use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TopicMessage {
     id: u64,
-    topic_name: String,
-    option: SubscriptionOptions,
-    msg: PubMessage,
+    pub(crate) topic_name: String,
+    pub(crate) option: SubscriptionOptions,
+    pub(crate) msg: PubMessage,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
+pub enum QosEvent {
+    Response(ControlPacket),
+    End(u16),
+}
+
+#[derive(Debug)]
 pub enum SessionEvent {
     SessionTakenOver(SessionState),
     TopicMessage(TopicMessage),
+    QosEvent(QosEvent),
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum PublishEvent {
-    PubRec(PublishResponse),
-    PubRel(PublishResponse),
-    PubComp(PublishResponse),
+    Ack(PublishResponse),
+    Rec(PublishResponse),
+    Rel(PublishResponse),
+    Comp(PublishResponse),
 }
 
 pub(crate) type SubscribedTopics = HashMap<String, oneshot::Sender<()>>;
@@ -64,12 +72,13 @@ pub(crate) struct Session {
     properties: ConnectProperties,
     will: Option<Will>,
     session_expire_interval: Option<u32>,
-    server_flows: BTreeMap<u16, Sender<PublishEvent>>,
-    client_flows: BTreeMap<u16, Sender<PublishEvent>>,
+    server_flows: HashMap<u16, Sender<PublishEvent>>,
+    client_flows: HashMap<u16, Sender<PublishEvent>>,
     packet_identifier: PacketIdentifier,
     context: SessionContext,
     topic_filters: HashMap<String, SubscriptionValue>,
     new_topic_subscriber: Option<NewTopicSubscriber>,
+    client_receive_maximum: Arc<Semaphore>,
 }
 
 impl TopicMessage {
@@ -91,16 +100,16 @@ impl Session {
         properties: ConnectProperties,
         will: Option<Will>,
         context: SessionContext,
+        client_receive_maximum: Arc<Semaphore>,
     ) -> Self {
         info!("new session: {:?}", id);
         metric::ACTIVE_SESSIONS.with_label_values(&[]).inc();
 
         let (session_event_tx, session_event_rx) = mpsc::channel(32);
-        //let topic_event = context.watch_new_topic();
+
         Self {
             unique_id: context.generate_id(),
             client_id: id,
-            //created: Instant::now(),
             response_tx,
             session_event_tx,
             session_event_rx,
@@ -108,58 +117,69 @@ impl Session {
             properties,
             will,
             session_expire_interval: None,
-            server_flows: BTreeMap::new(),
-            client_flows: BTreeMap::new(),
+            server_flows: HashMap::new(),
+            client_flows: Default::default(),
             packet_identifier: Default::default(),
             context,
             topic_filters: HashMap::new(),
             new_topic_subscriber: None,
+            client_receive_maximum,
         }
     }
 
     #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)))]
     async fn publish_client(&mut self, event: TopicMessage) -> Option<ControlPacket> {
-        let msg = event.msg;
-        let qos = min(msg.qos, event.option.qos);
-        let packet_identifier = if QoS::AtMostOnce == qos {
-            None
-        } else {
-            self.packet_identifier.next()
-        };
+        let qos = min(event.msg.qos, event.option.qos);
+        if QoS::AtMostOnce == qos {
+            let msg = event.msg;
 
-        let publish = Publish {
-            dup: false,
-            qos,
-            retain: msg.retain,
-            topic_name: MqttString::from(event.topic_name),
-            packet_identifier,
-            properties: PublishProperties::default(),
-            payload: Bytes::from(msg.payload),
-        };
+            let publish = Publish {
+                dup: false,
+                qos,
+                retain: msg.retain,
+                topic_name: MqttString::from(event.topic_name),
+                packet_identifier: None,
+                properties: PublishProperties::default(),
+                payload: Bytes::from(msg.payload),
+            };
 
-        if let Some(maximum_packet_size) = self.properties.maximum_packet_size {
-            if publish.size() > maximum_packet_size as usize {
-                warn!("exceed maximum_packet_size: {}", publish);
-                return None;
+            /*
+             * The Server MUST NOT send packets exceeding Maximum Packet Size to the Client
+             * Where a Packet is too large to send, the Server MUST discard it without
+             * sending it and then behave as if it had completed sending that Application Message
+             */
+            if let Some(maximum_packet_size) = self.properties.maximum_packet_size {
+                if publish.size() > maximum_packet_size as usize {
+                    warn!("exceed maximum_packet_size: {}", publish);
+                    return None;
+                }
             }
-        }
-
-        if QoS::ExactlyOnce == qos {
-            let packet_identifier = packet_identifier.unwrap();
+            Some(ControlPacket::Publish(publish))
+        } else {
+            let packet_identifier = self.packet_identifier.next().unwrap();
             let (tx, rx) = mpsc::channel(1);
             self.client_flows.insert(packet_identifier, tx);
-            let response_tx = self.response_tx.clone();
+            let session_event_tx = self.session_event_tx.clone();
             let client_id = self.client_id.clone();
+            let client_receive_maximum = self.client_receive_maximum.clone();
+
             tokio::spawn(async move {
-                if let Err(error) =
-                    exactly_once_client(client_id, packet_identifier, rx, response_tx).await
+                if let Err(error) = qos_client(
+                    client_id,
+                    event,
+                    packet_identifier,
+                    client_receive_maximum,
+                    rx,
+                    session_event_tx,
+                )
+                .await
                 {
-                    error!(cause = ?error, "QoS 2 protocol error");
+                    error!(cause = ?error, "QoS protocol error");
                 }
             });
-        };
 
-        Some(ControlPacket::Publish(publish))
+            None
+        }
     }
 
     pub(crate) async fn handle_msg(&mut self, msg: ControlPacket) -> Result<Option<ControlPacket>> {
@@ -249,6 +269,12 @@ impl Session {
                 properties: Default::default(),
             })),
             SessionEvent::TopicMessage(message) => self.publish_client(message).await,
+            SessionEvent::QosEvent(QosEvent::Response(msg)) => Some(msg),
+            SessionEvent::QosEvent(QosEvent::End(packet_identifier)) => {
+                self.client_flows.remove(&packet_identifier);
+                self.packet_identifier.release(packet_identifier);
+                None
+            }
         })
     }
 
@@ -460,15 +486,26 @@ impl Session {
 
     #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)), err)]
     async fn puback(&self, msg: PublishResponse) -> Result<Option<ControlPacket>> {
-        trace!("{:?}", msg);
-        Ok(None)
+        if let Some(tx) = self.client_flows.get(&msg.packet_identifier) {
+            tx.clone()
+                .send(PublishEvent::Ack(msg))
+                .await
+                .context("PUBREC event")
+                .map_err(Error::msg)?;
+            Ok(None)
+        } else {
+            Err(anyhow!(
+                "protocol flow error: not found flow for packet identifier {}",
+                msg.packet_identifier
+            ))
+        }
     }
 
     #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)), err)]
     async fn pubrel(&self, msg: PublishResponse) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.server_flows.get(&msg.packet_identifier) {
             tx.clone()
-                .send(PublishEvent::PubRel(msg))
+                .send(PublishEvent::Rel(msg))
                 .await
                 .context("PUBREL event")
                 .map_err(Error::msg)?;
@@ -485,7 +522,7 @@ impl Session {
     async fn pubrec(&self, msg: PublishResponse) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.client_flows.get(&msg.packet_identifier) {
             tx.clone()
-                .send(PublishEvent::PubRec(msg))
+                .send(PublishEvent::Rec(msg))
                 .await
                 .context("PUBREC event")
                 .map_err(Error::msg)?;
@@ -502,7 +539,7 @@ impl Session {
     async fn pubcomp(&self, msg: PublishResponse) -> Result<Option<ControlPacket>> {
         if let Some(tx) = self.client_flows.get(&msg.packet_identifier) {
             tx.clone()
-                .send(PublishEvent::PubComp(msg))
+                .send(PublishEvent::Comp(msg))
                 .await
                 .context("PUBCOMP event")
                 .map_err(Error::msg)?;

@@ -147,7 +147,7 @@ impl<'a> MqttClient {
         self.stream.send(ControlPacket::Publish(publish)).await?;
         self.timeout_recv().await.and_then(|packet| match packet {
             ControlPacket::PubAck(ack) => Ok(ack),
-            _ => Err(anyhow!("unexpected: {}", packet)),
+            unexpected => Err(anyhow!("unexpected: {}", unexpected)),
         })
     }
 
@@ -175,6 +175,18 @@ impl<'a> MqttClient {
             _ => Err(anyhow!("unexpected: {}", packet)),
         })
     }
+
+    pub async fn puback(&mut self, packet_identifier: u16) -> Result<()> {
+        trace!("send PUBACK packet_identifier: {}", packet_identifier);
+        self.stream
+            .send(ControlPacket::PubAck(PublishResponse {
+                packet_identifier,
+                reason_code: ReasonCode::Success,
+                properties: Default::default(),
+            }))
+            .await
+            .map_err(Error::msg)
+    }
 }
 
 impl fmt::Display for MqttClient {
@@ -199,6 +211,11 @@ impl ClientBuilder<'_> {
             .properties_builder
             .session_expire_interval(value)
             .unwrap();
+        self
+    }
+
+    pub fn receive_maximum(mut self, value: u16) -> Self {
+        self.properties_builder = self.properties_builder.receive_maximum(value).unwrap();
         self
     }
 

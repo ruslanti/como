@@ -1,16 +1,16 @@
 #[macro_use]
 extern crate claim;
 
-use std::time::Duration;
-
 use bytes::Bytes;
 
 use como_mqtt::client::MqttClient;
-use como_mqtt::v5::property::WillProperties;
+
 use como_mqtt::v5::string::MqttString;
-use como_mqtt::v5::types::{ControlPacket, Disconnect, Publish, QoS, ReasonCode, Will};
+use como_mqtt::v5::types::{ControlPacket, Publish, QoS, ReasonCode};
 
 use crate::common::start_test_broker;
+use std::borrow::Borrow;
+use std::time::Duration;
 
 mod common;
 
@@ -265,71 +265,69 @@ async fn retained_publish_subscribe() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn broker_shutdown() -> anyhow::Result<()> {
+async fn publish_receive_maximum_qos1() -> anyhow::Result<()> {
     let (port, shutdown_notify, handle) = start_test_broker().await;
-
     let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
-        .session_expire_interval(2)
-        .with_will(Will {
-            qos: QoS::AtMostOnce,
-            retain: false,
-            properties: WillProperties {
-                will_delay_interval: 1,
-                payload_format_indicator: None,
-                message_expire_interval: None,
-                content_type: None,
-                response_topic: None,
-                correlation_data: None,
-                user_properties: vec![],
-            },
-            topic: MqttString::from("topic/will"),
-            payload: Bytes::from("WILL"),
-        })
+        .session_expire_interval(10)
+        .receive_maximum(10)
         .build()
         .await?;
 
-    let ack = assert_ok!(client.connect(true).await);
-    assert_eq!(ack.reason_code, ReasonCode::Success);
+    let ack = assert_ok!(client.connect(false).await);
     assert!(!ack.session_present);
+    assert_some!(ack.properties.assigned_client_identifier);
 
     let mut client2 = MqttClient::builder(&format!("127.0.0.1:{}", port))
-        .with_timeout(Duration::from_secs(2))
         .build()
         .await?;
-    // #2 connection take over the session from #1
-    assert_ok!(client2.connect(true).await);
-    let ack = assert_ok!(client2.subscribe(QoS::AtMostOnce, "topic/+").await);
-    assert_eq!(ack.reason_codes, vec![ReasonCode::Success]);
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let ack = assert_ok!(client2.connect(false).await);
+    assert!(!ack.session_present);
+    assert_some!(ack.properties.assigned_client_identifier);
+
+    let ack = assert_ok!(client.subscribe(QoS::AtLeastOnce, "topic/A").await);
+    assert_eq!(ack.reason_codes, vec![ReasonCode::GrantedQoS1]);
+
+    for _ in 1..=11 {
+        assert_ok!(
+            client2
+                .publish_least_once("topic/A", Vec::from("payload01"), false)
+                .await
+        );
+    }
+
+    for i in 1..=10 {
+        let res = assert_ok!(client.timeout_recv().await);
+        assert_matches!(res.borrow(), ControlPacket::Publish(p) if !p.dup);
+        assert_matches!(res.borrow(), ControlPacket::Publish(p) if p
+            .packet_identifier.eq(&Some(i)));
+    }
+    assert_err!(client.timeout_recv().await);
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    for i in 1..=10 {
+        let res = assert_ok!(client.timeout_recv().await);
+        assert_matches!(res.borrow(), ControlPacket::Publish(p) if p.dup);
+        assert_matches!(res.borrow(), ControlPacket::Publish(p) if p
+            .packet_identifier.eq(&Some(i)));
+    }
+
+    for i in 1..=10 {
+        assert_ok!(client.puback(i).await);
+    }
+    let res = assert_ok!(client.timeout_recv().await);
+    assert_matches!(res.borrow(), ControlPacket::Publish(p) if !p.dup);
+    assert_matches!(res.borrow(), ControlPacket::Publish(p) if p
+            .packet_identifier.eq(&Some(11)));
+    assert_ok!(client.puback(11).await);
+
+    assert_none!(client.disconnect().await?);
+    drop(client);
     drop(shutdown_notify);
-
-    assert_matches!(assert_ok!(client.timeout_recv().await), ControlPacket::Disconnect(d) if d == Disconnect {
-           reason_code: ReasonCode::ServerShuttingDown,
-           properties: Default::default()
-        }
-    );
-
-    let msg = assert_ok!(client2.timeout_recv().await);
-    match msg {
-        ControlPacket::Publish(p)
-            if p == Publish {
-                dup: false,
-                qos: QoS::AtMostOnce,
-                retain: false,
-                topic_name: MqttString::from("topic/will"),
-                packet_identifier: None,
-                properties: Default::default(),
-                payload: Bytes::from("WILL"),
-            } => {}
-        ControlPacket::Disconnect(d)
-            if d == Disconnect {
-                reason_code: ReasonCode::ServerShuttingDown,
-                properties: Default::default(),
-            } => {}
-        _ => panic!("unexpected {:?}", msg),
-    };
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
     handle.await?
+}
+
+#[tokio::test]
+async fn publish_receive_maximum_qos2() -> anyhow::Result<()> {
+    todo!("test publisg receive_maximum QoS 2")
 }

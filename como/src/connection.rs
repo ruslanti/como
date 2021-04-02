@@ -82,6 +82,10 @@ impl ConnectionHandler {
             .unwrap_or_else(|| Duration::from_micros(u64::MAX));
         trace!("keep_alive: {:?}", self.keep_alive);
 
+        let client_receive_maximum = Arc::new(Semaphore::new(
+            msg.properties.receive_maximum.unwrap_or(u16::MAX) as usize,
+        ));
+
         let session = Session::new(
             identifier.try_into()?,
             response_tx,
@@ -89,6 +93,7 @@ impl ConnectionHandler {
             msg.properties.clone(),
             msg.will.clone(),
             self.context.clone(),
+            client_receive_maximum,
         );
 
         Ok(session)
