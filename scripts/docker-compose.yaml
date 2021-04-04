@@ -1,13 +1,20 @@
 version: '3.7'
 
 services:
+  como:
+    container_name: como
+    build: como/
+    network_mode: "host"
+    environment:
+      - RUST_LOG=como=trace
+
   grafana:
     container_name: grafana
     image: grafana/grafana
     restart: always
     user: "0"
     volumes:
-      - ../data/grafana:/var/lib/grafana
+      - ./grafana/data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning/
     environment:
       - GF_SECURITY_ADMIN_USER=admin

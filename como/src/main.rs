@@ -1,9 +1,9 @@
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::signal;
-use tracing::{debug, Level};
+use tokio::signal::unix::{signal, SignalKind};
+use tracing::debug;
+use tracing_subscriber::EnvFilter;
 use warp::ws::WebSocket;
 use warp::{Filter, Rejection, Reply};
 
@@ -28,7 +28,8 @@ async fn main() -> Result<()> {
                 .delimited(", ");
     */
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(Level::from_str(settings.log.level.as_str())?)
+        //.with_max_level(Level::from_str(settings.log.level.as_str())?)
+        .with_env_filter(EnvFilter::from_default_env())
         .with_ansi(true)
         .with_writer(non_blocking)
         //.pretty()
@@ -51,7 +52,8 @@ async fn main() -> Result<()> {
 
     tokio::spawn(warp::serve(metrics_route.or(ws_route)).run(([0, 0, 0, 0], 8080)));
 
-    service::run(context, signal::ctrl_c()).await
+    let mut terminate = signal(SignalKind::terminate())?;
+    service::run(context, terminate.recv()).await
 }
 
 async fn ws_handler(ws: warp::ws::Ws, id: String) -> Result<impl Reply, Rejection> {

@@ -37,3 +37,11 @@ lazy_static = "1.4"
 
 [dev-dependencies]
 claim = "0.5.0"
+
+[package.metadata.deb]
+assets = [
+    ["target/release/como", "usr/bin/", "755"],
+    ["../como.toml", "etc/", "644"],
+    ["../README.md", "usr/share/doc/como/README", "644"],
+]
+conf-files = ["como.toml"]

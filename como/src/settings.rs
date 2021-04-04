@@ -109,7 +109,7 @@ impl Default for Logger {
     fn default() -> Self {
         Logger {
             file: None,
-            level: "debug".to_string(),
+            level: "info".to_string(),
         }
     }
 }
@@ -128,7 +128,12 @@ impl Default for Settings {
 impl Settings {
     pub fn new() -> Result<Self, ConfigError> {
         let mut cfg = Config::new();
-        cfg.merge(File::with_name("config/como"))?;
+        if let Err(err) = cfg.merge(File::with_name("/etc/como").required(false)) {
+            eprintln!("read config file: {}", err);
+        }
+        if let Err(err) = cfg.merge(File::with_name("como").required(false)) {
+            eprintln!("read config file: {}", err);
+        }
         cfg.try_into()
     }
 }

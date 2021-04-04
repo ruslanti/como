@@ -1,19 +1,20 @@
-use anyhow::{bail, Result};
-use tokio::sync::mpsc::{Receiver, Sender};
-use tracing::{instrument, trace, warn};
-
-use crate::session::{PublishEvent, SessionEvent, TopicMessage};
-use bytes::Bytes;
-use como_mqtt::v5::property::PublishProperties;
-use como_mqtt::v5::string::MqttString;
-use como_mqtt::v5::types::{ControlPacket, Publish, PublishResponse, QoS, ReasonCode};
 use std::cmp::min;
-
-use crate::session::QosEvent::{End, Response};
 use std::sync::Arc;
+
+use anyhow::{bail, Result};
+use bytes::Bytes;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio::time::Duration;
+use tracing::{instrument, trace, warn};
+
+use como_mqtt::v5::property::PublishProperties;
+use como_mqtt::v5::string::MqttString;
+use como_mqtt::v5::types::{ControlPacket, Publish, PublishResponse, QoS, ReasonCode};
+
+use crate::session::QosEvent::{End, Response};
+use crate::session::{PublishEvent, SessionEvent, TopicMessage};
 
 #[macro_use]
 macro_rules! wait_response {
@@ -90,6 +91,11 @@ pub async fn qos_client(
         } else if wait_response!(rx, Rec, packet_identifier) {
             // REC response received
             loop {
+                if retry > 10 {
+                    warn!("Send PUBREL failed. Reached retry limit {}.", retry);
+                    break;
+                }
+
                 session_event_tx
                     .send(SessionEvent::QosEvent(Response(ControlPacket::PubRel(
                         PublishResponse {
@@ -99,6 +105,7 @@ pub async fn qos_client(
                         },
                     ))))
                     .await?;
+                retry += 1;
 
                 if wait_response!(rx, Comp, packet_identifier) {
                     // COMP response received
