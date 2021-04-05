@@ -1,12 +1,16 @@
 use std::borrow::Borrow;
-use std::io::Read;
+use std::fs::File;
+use std::io;
+use std::io::BufReader;
+use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use native_tls::Identity;
-use native_tls::TlsAcceptor;
+use anyhow::Result;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Barrier, Semaphore};
+use tokio_rustls::rustls::internal::pemfile::{certs, rsa_private_keys};
+use tokio_rustls::rustls::{Certificate, NoClientAuth, PrivateKey, ServerConfig};
+use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, instrument};
 
 use crate::connection::ConnectionHandler;
@@ -14,12 +18,24 @@ use crate::context::SessionContext;
 use crate::service::accept;
 use crate::shutdown::Shutdown;
 
+/*use native_tls::Identity;
+use native_tls::TlsAcceptor;*/
 pub(crate) struct TlsTransport {
     limit_connections: Arc<Semaphore>,
     notify_shutdown: broadcast::Sender<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
     context: SessionContext,
     ready: Arc<Barrier>,
+}
+
+fn load_certs(path: &Path) -> io::Result<Vec<Certificate>> {
+    certs(&mut BufReader::new(File::open(path)?))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid cert"))
+}
+
+fn load_keys(path: &Path) -> io::Result<Vec<PrivateKey>> {
+    rsa_private_keys(&mut BufReader::new(File::open(path)?))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid key"))
 }
 
 impl TlsTransport {
@@ -45,17 +61,14 @@ impl TlsTransport {
             let address = format!("{}:{}", tls.bind, tls.port);
             let listener = TcpListener::bind(&address).await?;
 
-            let cert = &tls.cert;
-            let mut file =
-                std::fs::File::open(cert).context(format!("could not open cert file: {}", cert))?;
-            let mut identity = vec![];
-            file.read_to_end(&mut identity)
-                .context(format!("could not read cert file: {}", cert))?;
-            let identity = Identity::from_pkcs12(&identity, tls.pass.as_str())
-                .context(format!("could not read identity from cert file: {}", cert))?;
+            let certs = load_certs(tls.cert.as_ref())?;
+            let mut keys = load_keys(tls.pass.as_ref())?;
 
-            let acceptor: TlsAcceptor = TlsAcceptor::new(identity).context("TLS acceptor fail")?;
-            let acceptor: tokio_native_tls::TlsAcceptor = acceptor.into();
+            let mut config = ServerConfig::new(NoClientAuth::new());
+            config
+                .set_single_cert(certs, keys.remove(0))
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+            let acceptor = TlsAcceptor::from(Arc::new(config));
 
             self.ready.wait().await;
             info!("accepting inbound TLS connections: {}", address);
