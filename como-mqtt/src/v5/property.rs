@@ -1,4 +1,5 @@
 use std::convert::{TryFrom, TryInto};
+use std::fmt;
 
 use bytes::Bytes;
 
@@ -7,7 +8,6 @@ use crate::v5::error::MqttError::MoreThanOnceProperty;
 use crate::v5::error::MqttError::{EmptyPropertyValue, MalformedPropertyType};
 use crate::v5::string::MqttString;
 use crate::v5::types::QoS;
-use std::fmt;
 
 macro_rules! check_and_set {
     ($self:ident, $property:ident, $value: expr) => {
@@ -28,6 +28,15 @@ macro_rules! check_size_of {
 }
 
 macro_rules! check_size_of_string {
+    ($self:ident, $property:ident) => {
+        match &$self.$property {
+            None => 0,
+            Some(v) => v.len() + 3,
+        }
+    };
+}
+
+macro_rules! check_size_of_bytes {
     ($self:ident, $property:ident) => {
         match &$self.$property {
             None => 0,
@@ -65,6 +74,19 @@ macro_rules! encode_property_u32 {
             $writer.put_u8(Property::$property as u8);
             end_of_stream!($writer.capacity() < 4, "$value");
             $writer.put_u32(value);
+        }
+    };
+}
+
+macro_rules! encode_property_bytes {
+    ($writer:ident, $property:ident, $value:expr) => {
+        if let Some(value) = $value {
+            end_of_stream!($writer.capacity() < 1, "$value id");
+            $writer.put_u8(Property::$property as u8);
+            end_of_stream!($writer.capacity() < 2, "$value");
+            $writer.put_u16(value.len() as u16);
+            end_of_stream!($writer.capacity() < value.len(), "$value");
+            $writer.put(value);
         }
     };
 }
@@ -180,7 +202,7 @@ pub struct WillProperties {
     pub message_expire_interval: Option<u32>,
     pub content_type: Option<MqttString>,
     pub response_topic: Option<MqttString>,
-    pub correlation_data: Option<MqttString>,
+    pub correlation_data: Option<Bytes>,
     pub user_properties: Vec<(MqttString, MqttString)>,
 }
 
@@ -194,6 +216,7 @@ pub struct ConnectProperties {
     pub request_problem_information: Option<bool>,
     pub user_properties: Vec<(MqttString, MqttString)>,
     pub authentication_method: Option<MqttString>,
+    pub authentication_data: Option<Bytes>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -223,7 +246,7 @@ pub struct PublishProperties {
     pub message_expire_interval: Option<u32>,
     pub topic_alias: Option<u16>,
     pub response_topic: Option<MqttString>,
-    pub correlation_data: Option<MqttString>,
+    pub correlation_data: Option<Bytes>,
     pub user_properties: Vec<(MqttString, MqttString)>,
     pub subscription_identifier: Option<u32>,
     pub content_type: Option<MqttString>,
@@ -336,7 +359,7 @@ pub struct PropertiesBuilder {
     message_expire_interval: Option<u32>,
     content_type: Option<MqttString>,
     response_topic: Option<MqttString>,
-    correlation_data: Option<MqttString>,
+    correlation_data: Option<Bytes>,
     subscription_identifier: Option<u32>,
     session_expire_interval: Option<u32>,
     assigned_client_identifier: Option<MqttString>,
@@ -465,8 +488,12 @@ impl PropertiesBuilder {
             Err(EmptyPropertyValue("ServerReference"))
         }
     }
-    pub fn _correlation_data(mut self, value: MqttString) -> Result<Self, MqttError> {
-        check_and_set!(self, correlation_data, value)
+    pub fn correlation_data(mut self, value: Option<Bytes>) -> Result<Self, MqttError> {
+        if let Some(v) = value {
+            check_and_set!(self, correlation_data, v)
+        } else {
+            Err(EmptyPropertyValue("CorrelationDate"))
+        }
     }
     pub fn maximum_qos(mut self, value: u8) -> Result<Self, MqttError> {
         check_and_set!(self, maximum_qos, value.try_into()?)
@@ -525,6 +552,7 @@ impl PropertiesBuilder {
             request_problem_information: self.request_problem_information,
             user_properties: self.user_properties,
             authentication_method: self.authentication_method,
+            authentication_data: self.authentication_data,
         }
     }
 
@@ -627,6 +655,7 @@ mod tests {
                 request_problem_information: None,
                 user_properties: vec![],
                 authentication_method: None,
+                authentication_data: None
             }
         );
     }
@@ -657,6 +686,7 @@ mod tests {
                     (MqttString::from("password"), MqttString::from("12345"))
                 ],
                 authentication_method: None,
+                authentication_data: None
             }
         );
     }

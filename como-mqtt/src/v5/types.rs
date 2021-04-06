@@ -445,7 +445,17 @@ pub enum PacketPart {
 
 #[derive(Debug)]
 pub struct MqttCodec {
+    pub maximum_packet_size: Option<u32>,
     pub part: PacketPart,
+}
+
+impl MqttCodec {
+    pub fn new(maximum_packet_size: Option<u32>) -> Self {
+        MqttCodec {
+            maximum_packet_size,
+            part: PacketPart::FixedHeader,
+        }
+    }
 }
 
 impl Connect {
@@ -662,13 +672,5 @@ impl TryFrom<&[u8]> for SubscriptionOptions {
 
     fn try_from(encoded: &[u8]) -> Result<Self, Self::Error> {
         bincode::deserialize(encoded)
-    }
-}
-
-impl Default for MqttCodec {
-    fn default() -> Self {
-        MqttCodec {
-            part: PacketPart::FixedHeader,
-        }
     }
 }

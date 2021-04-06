@@ -1,9 +1,10 @@
-use crate::v5::property::Property;
-use crate::v5::types::{QoS, ReasonCode};
-
 use std::io;
 use std::string::FromUtf8Error;
+
 use thiserror::Error;
+
+use crate::v5::property::Property;
+use crate::v5::types::{QoS, ReasonCode};
 
 #[derive(Error, Debug)]
 pub enum MqttError {
@@ -47,6 +48,8 @@ pub enum MqttError {
     UndefinedPacketIdentifier(QoS),
     #[error("More than once")]
     MoreThanOnceProperty,
+    #[error("Packet too large")]
+    PacketTooLarge,
 
     #[error("Implementation specific error")]
     ImplementationSpecificError,
@@ -98,6 +101,7 @@ impl From<MqttError> for ReasonCode {
             MqttError::EmptyPropertyValue(_) => ReasonCode::ProtocolError,
             MqttError::BincodeErrorKind { .. } => ReasonCode::ImplementationSpecificError,
             MqttError::FromUtf8Error { .. } => ReasonCode::MalformedPacket,
+            MqttError::PacketTooLarge => ReasonCode::PacketTooLarge,
         }
     }
 }

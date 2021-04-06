@@ -32,6 +32,7 @@ pub struct Connection {
     pub retain_available: Option<bool>,
     pub maximum_packet_size: Option<u32>,
     pub topic_alias_maximum: Option<u16>,
+    pub server_reference: Option<String>,
     pub db_path: Option<String>,
 }
 
@@ -100,6 +101,7 @@ impl Default for Connection {
             retain_available: None,
             maximum_packet_size: None,
             topic_alias_maximum: None,
+            server_reference: None,
             db_path: None,
         }
     }

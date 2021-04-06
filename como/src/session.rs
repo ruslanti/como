@@ -2,9 +2,9 @@ use std::borrow::{Borrow, BorrowMut};
 use std::cmp::min;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Error, Result};
-
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -28,7 +28,6 @@ use crate::context::{
 use crate::metric;
 use crate::qos::{exactly_once_server, qos_client};
 use crate::topic::{NewTopicSubscriber, PubMessage, TopicManager};
-use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TopicMessage {
@@ -100,12 +99,15 @@ impl Session {
         properties: ConnectProperties,
         will: Option<Will>,
         context: SessionContext,
-        client_receive_maximum: Arc<Semaphore>,
     ) -> Self {
         info!("new session: {:?}", id);
         metric::ACTIVE_SESSIONS.with_label_values(&[]).inc();
 
         let (session_event_tx, session_event_rx) = mpsc::channel(32);
+
+        let client_receive_maximum = Arc::new(Semaphore::new(
+            properties.receive_maximum.unwrap_or(u16::MAX) as usize,
+        ));
 
         Self {
             unique_id: context.generate_id(),
@@ -364,19 +366,45 @@ impl Session {
                     self.context.settings().connection.maximum_qos
                 };
 
-                let session_expire_interval = if let Some(server_expire) =
-                    self.context.settings().connection.session_expire_interval
-                {
-                    if let Some(client_expire) = msg.properties.session_expire_interval {
-                        Some(min(server_expire, client_expire))
-                    } else {
-                        Some(server_expire)
-                    }
-                } else {
-                    None
-                };
+                // If the Session Expiry Interval is absent the value in the CONNECT Packet used.
+                // The server uses this property to inform the Client that it is using a value other
+                // than that sent by the Client in the CONNACK. Refer to section 3.1.2.11.2 for a
+                // description of the use of Session Expiry Interval.
+                let session_expire_interval = self
+                    .context
+                    .settings()
+                    .connection
+                    .session_expire_interval
+                    .and_then(|server_session_expire_interval| {
+                        msg.properties.session_expire_interval.map(
+                            |client_session_expire_interval| {
+                                min(
+                                    server_session_expire_interval,
+                                    client_session_expire_interval,
+                                )
+                            },
+                        )
+                    });
+
                 self.session_expire_interval =
                     session_expire_interval.or(msg.properties.session_expire_interval);
+
+                // If the Server sends a Server Keep Alive on the CONNACK packet, the Client MUST
+                // use this value instead of the Keep Alive value the Client sent on CONNECT
+                // [MQTT-3.2.2-21]. If the Server does not send the Server Keep Alive, the Server
+                // MUST use the Keep Alive value set by the Client on CONNECT
+                let client_keep_alive = (msg.keep_alive != 0).then(|| msg.keep_alive);
+                let server_keep_alive =
+                    self.context
+                        .settings()
+                        .connection
+                        .server_keep_alive
+                        .map(|server_keep_alive| {
+                            client_keep_alive.map_or(server_keep_alive, |client_keep_alive| {
+                                min(server_keep_alive, client_keep_alive)
+                            })
+                        });
+
                 self.will = msg.will;
 
                 let ack = ControlPacket::ConnAck(ConnAck {
@@ -395,9 +423,15 @@ impl Session {
                         wildcard_subscription_available: None,
                         subscription_identifier_available: None,
                         shared_subscription_available: None,
-                        server_keep_alive: self.context.settings().connection.server_keep_alive,
+                        server_keep_alive,
                         response_information: None,
-                        server_reference: None,
+                        server_reference: self
+                            .context
+                            .settings()
+                            .connection
+                            .server_reference
+                            .clone()
+                            .map(MqttString::from),
                         authentication_method: None,
                         authentication_data: None,
                     },
@@ -412,7 +446,6 @@ impl Session {
                     properties: ConnAckProperties::default(),
                 });
                 Ok(Some(ack))
-                //self.response_tx.send(ack).await?;
             }
         }
     }

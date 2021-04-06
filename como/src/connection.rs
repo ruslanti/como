@@ -1,4 +1,5 @@
 use std::borrow::{Borrow, BorrowMut};
+use std::cmp::min;
 use std::convert::TryInto;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -66,25 +67,27 @@ impl ConnectionHandler {
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_simple().to_string().into());
 
-        let client_keep_alive = if msg.keep_alive != 0 {
-            Some(msg.keep_alive)
-        } else {
-            None
-        };
+        // If the Server sends a Server Keep Alive on the CONNACK packet, the Client MUST
+        // use this value instead of the Keep Alive value the Client sent on CONNECT
+        // [MQTT-3.2.2-21]. If the Server does not send the Server Keep Alive, the Server
+        // MUST use the Keep Alive value set by the Client on CONNECT
+        let client_keep_alive = (msg.keep_alive != 0).then(|| msg.keep_alive);
+        let keep_alive =
+            self.context
+                .settings()
+                .connection
+                .server_keep_alive
+                .map(|server_keep_alive| {
+                    client_keep_alive.map_or(server_keep_alive, |client_keep_alive| {
+                        min(server_keep_alive, client_keep_alive)
+                    })
+                });
+
         // within one and a half times the Keep Alive time period
-        self.keep_alive = self
-            .context
-            .settings()
-            .connection
-            .server_keep_alive
-            .or(client_keep_alive)
+        self.keep_alive = keep_alive
             .map(|d| Duration::from_secs(d as u64).mul_f32(1.5))
             .unwrap_or_else(|| Duration::from_micros(u64::MAX));
         trace!("keep_alive: {:?}", self.keep_alive);
-
-        let client_receive_maximum = Arc::new(Semaphore::new(
-            msg.properties.receive_maximum.unwrap_or(u16::MAX) as usize,
-        ));
 
         let session = Session::new(
             identifier.try_into()?,
@@ -93,7 +96,6 @@ impl ConnectionHandler {
             msg.properties.clone(),
             msg.will.clone(),
             self.context.clone(),
-            client_receive_maximum,
         );
 
         Ok(session)
@@ -159,7 +161,10 @@ impl ConnectionHandler {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        let framed = Framed::new(socket, MqttCodec::default());
+        let framed = Framed::new(
+            socket,
+            MqttCodec::new(self.context.settings().connection.maximum_packet_size),
+        );
         let (mut sink, mut stream) = framed.split::<ControlPacket>();
         let (response_tx, mut response_rx) = mpsc::channel::<ControlPacket>(32);
 
@@ -173,6 +178,7 @@ impl ConnectionHandler {
                             if let Some(res) = res {
                                 let p = res?;
                                 debug!("received {:?}", p);
+
                                 if let Some(msg) = self.recv(p, response_tx.borrow()).await? {
                                     send(sink.borrow_mut(), msg).await?;
                                 }
