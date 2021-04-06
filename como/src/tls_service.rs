@@ -18,8 +18,6 @@ use crate::context::SessionContext;
 use crate::service::accept;
 use crate::shutdown::Shutdown;
 
-/*use native_tls::Identity;
-use native_tls::TlsAcceptor;*/
 pub(crate) struct TlsTransport {
     limit_connections: Arc<Semaphore>,
     notify_shutdown: broadcast::Sender<()>,

@@ -1,7 +1,9 @@
+use std::fmt;
+use std::net::SocketAddr;
+
 use anyhow::{anyhow, Error, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use std::net::SocketAddr;
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::time::timeout;
 use tokio::time::Duration;
@@ -15,7 +17,6 @@ use crate::v5::types::{
     ConnAck, Connect, ControlPacket, Disconnect, MqttCodec, Publish, PublishResponse, QoS,
     ReasonCode, Retain, SubAck, Subscribe, SubscriptionOptions, Will,
 };
-use std::fmt;
 
 pub struct MqttClient {
     stream: Framed<TcpStream, MqttCodec>,
@@ -238,7 +239,7 @@ impl ClientBuilder<'_> {
         };
 
         let stream = socket.connect(peer).await?;
-        let stream = Framed::new(stream, MqttCodec::default());
+        let stream = Framed::new(stream, MqttCodec::new(None));
 
         Ok(MqttClient {
             stream,

@@ -81,7 +81,7 @@ impl PropertiesSize for WillProperties {
         len += check_size_of!(self, message_expire_interval);
         len += check_size_of_string!(self, content_type);
         len += check_size_of_string!(self, response_topic);
-        len += check_size_of_string!(self, correlation_data);
+        len += check_size_of_bytes!(self, correlation_data);
         len += self
             .user_properties
             .iter()
@@ -117,7 +117,7 @@ impl Encoder<WillProperties> for MqttCodec {
         );
         encode_property_string!(writer, ContentType, properties.content_type);
         encode_property_string!(writer, ResponseTopic, properties.response_topic);
-        encode_property_string!(writer, CorrelationData, properties.correlation_data);
+        encode_property_bytes!(writer, CorrelationData, properties.correlation_data);
         encode_property_user_properties!(writer, UserProperty, properties.user_properties);
         Ok(())
     }

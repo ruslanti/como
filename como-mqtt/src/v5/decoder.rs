@@ -7,8 +7,8 @@ use tracing::{instrument, trace};
 use crate::v5::connack::decode_connack;
 use crate::v5::disconnect::decode_disconnect;
 use crate::v5::error::MqttError;
-use crate::v5::error::MqttError::EndOfStream;
 use crate::v5::error::MqttError::MalformedVariableInteger;
+use crate::v5::error::MqttError::{EndOfStream, PacketTooLarge};
 use crate::v5::publish::decode_publish;
 use crate::v5::string::MqttString;
 use crate::v5::subscribe::decode_subscribe;
@@ -34,6 +34,11 @@ impl Decoder for MqttCodec {
                 }
                 let packet_type = PacketType::try_from(reader.get_u8())?;
                 let remaining = decode_variable_integer(reader)? as usize;
+                if let Some(maximum_packet_size) = self.maximum_packet_size {
+                    if remaining + MIN_FIXED_HEADER_LEN > maximum_packet_size as usize {
+                        return Err(PacketTooLarge);
+                    }
+                }
                 reader.reserve(remaining);
 
                 self.part = PacketPart::VariableHeader {
