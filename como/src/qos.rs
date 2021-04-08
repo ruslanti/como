@@ -1,10 +1,8 @@
 use std::cmp::min;
-use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use bytes::Bytes;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio::time::Duration;
 use tracing::{instrument, trace, warn};
@@ -14,7 +12,7 @@ use como_mqtt::v5::string::MqttString;
 use como_mqtt::v5::types::{ControlPacket, Publish, PublishResponse, QoS, ReasonCode};
 
 use crate::session::QosEvent::{End, Response};
-use crate::session::{PublishEvent, SessionEvent, TopicMessage};
+use crate::session::{PublishEvent, SessionEvent, SubscriptionMessage};
 
 #[macro_use]
 macro_rules! wait_response {
@@ -44,19 +42,18 @@ macro_rules! wait_response {
     };
 }
 
-#[instrument(skip(rx, session_event_tx, client_receive_maximum), err)]
+#[instrument(skip(rx, session_event_tx), err)]
 pub async fn qos_client(
     _client_id: String,
-    event: TopicMessage,
+    event: SubscriptionMessage,
     packet_identifier: u16,
-    client_receive_maximum: Arc<Semaphore>,
     mut rx: Receiver<PublishEvent>,
     session_event_tx: Sender<SessionEvent>,
 ) -> Result<()> {
     let msg = event.msg;
     let qos = min(msg.qos, event.option.qos);
     assert_ne!(qos, QoS::AtMostOnce);
-    let _semaphore = client_receive_maximum.acquire().await?;
+    /*    let _semaphore = client_receive_maximum.acquire().await?;*/
     let topic_name = MqttString::from(event.topic_name);
     let payload = Bytes::from(msg.payload);
     let mut retry: usize = 0;

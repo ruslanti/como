@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Error, Result};
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::time::{sleep, Duration};
@@ -22,15 +21,14 @@ use como_mqtt::v5::types::{
     Subscribe, SubscriptionOptions, UnSubscribe, Will,
 };
 
-use crate::context::{
-    subscribe_topic, SessionContext, SessionState, SessionStore, SubscriptionsStore,
-};
+use crate::context::{SessionContext, SessionState, SessionStore, SubscriptionsStore};
 use crate::metric;
 use crate::qos::{exactly_once_server, qos_client};
+use crate::subscription::{limit_client, subscribe_topic};
 use crate::topic::{NewTopicSubscriber, PubMessage, TopicManager};
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TopicMessage {
+#[derive(Debug)]
+pub struct SubscriptionMessage {
     id: u64,
     pub(crate) topic_name: String,
     pub(crate) option: SubscriptionOptions,
@@ -46,7 +44,7 @@ pub enum QosEvent {
 #[derive(Debug)]
 pub enum SessionEvent {
     SessionTakenOver(SessionState),
-    TopicMessage(TopicMessage),
+    SubscriptionEvent(SubscriptionMessage),
     QosEvent(QosEvent),
 }
 
@@ -77,12 +75,12 @@ pub(crate) struct Session {
     context: SessionContext,
     topic_filters: HashMap<String, SubscriptionValue>,
     new_topic_subscriber: Option<NewTopicSubscriber>,
-    client_receive_maximum: Arc<Semaphore>,
+    limit_client_publish: Arc<Semaphore>,
 }
 
-impl TopicMessage {
+impl SubscriptionMessage {
     pub fn new(id: u64, topic_name: String, option: SubscriptionOptions, msg: PubMessage) -> Self {
-        TopicMessage {
+        SubscriptionMessage {
             id,
             topic_name,
             option,
@@ -125,12 +123,12 @@ impl Session {
             context,
             topic_filters: HashMap::new(),
             new_topic_subscriber: None,
-            client_receive_maximum,
+            limit_client_publish: client_receive_maximum,
         }
     }
 
     #[instrument(skip(self), fields(client_id = field::debug(& self.client_id)))]
-    async fn publish_client(&mut self, event: TopicMessage) -> Option<ControlPacket> {
+    async fn publish_client(&mut self, event: SubscriptionMessage) -> Option<ControlPacket> {
         let qos = min(event.msg.qos, event.option.qos);
         if QoS::AtMostOnce == qos {
             let msg = event.msg;
@@ -163,18 +161,10 @@ impl Session {
             self.client_flows.insert(packet_identifier, tx);
             let session_event_tx = self.session_event_tx.clone();
             let client_id = self.client_id.clone();
-            let client_receive_maximum = self.client_receive_maximum.clone();
 
             tokio::spawn(async move {
-                if let Err(error) = qos_client(
-                    client_id,
-                    event,
-                    packet_identifier,
-                    client_receive_maximum,
-                    rx,
-                    session_event_tx,
-                )
-                .await
+                if let Err(error) =
+                    qos_client(client_id, event, packet_identifier, rx, session_event_tx).await
                 {
                     error!(cause = ?error, "QoS protocol error");
                 }
@@ -205,7 +195,7 @@ impl Session {
         debug!("new topic event: {}", topic_name);
         let subscription_tx = self.session_event_tx.clone();
         let client_id = self.client_id.to_owned();
-        for (topic_filter, (options, unsubscribes)) in self.topic_filters.iter_mut() {
+        for (topic_filter, (option, unsubscribes)) in self.topic_filters.iter_mut() {
             match TopicManager::match_filter(topic_name.as_str(), topic_filter.as_str()) {
                 Ok(true) => {
                     if !unsubscribes.contains_key(&topic_name) {
@@ -217,14 +207,18 @@ impl Session {
 
                         if let Ok(values) = self.context.topic_values(topic_name.as_str()) {
                             for (id, msg) in values {
+                                let qos = min(msg.qos, option.qos);
+                                limit_client(qos, self.limit_client_publish.borrow()).await;
                                 if let Err(err) = self
                                     .session_event_tx
-                                    .send(SessionEvent::TopicMessage(TopicMessage::new(
-                                        id,
-                                        topic_name.to_owned(),
-                                        options.clone(),
-                                        msg,
-                                    )))
+                                    .send(SessionEvent::SubscriptionEvent(
+                                        SubscriptionMessage::new(
+                                            id,
+                                            topic_name.to_owned(),
+                                            option.clone(),
+                                            msg,
+                                        ),
+                                    ))
                                     .await
                                 {
                                     warn!(cause = ?err, "subscription send");
@@ -233,16 +227,15 @@ impl Session {
                         }
 
                         if let Ok(subscriber) = self.context.topic_subscriber(topic_name.as_str()) {
-                            unsubscribes.insert(
+                            let unsubscribe_tx = subscribe_topic(
+                                client_id.to_owned(),
                                 topic_name.to_owned(),
-                                subscribe_topic(
-                                    client_id.to_owned(),
-                                    topic_name.to_owned(),
-                                    options.to_owned(),
-                                    subscription_tx.clone(),
-                                    subscriber,
-                                ),
+                                option.to_owned(),
+                                subscription_tx.clone(),
+                                subscriber,
+                                self.limit_client_publish.clone(),
                             );
+                            unsubscribes.insert(topic_name.to_owned(), unsubscribe_tx);
                         } else {
                             warn!("subscribe topic {} error", topic_name);
                         }
@@ -270,11 +263,12 @@ impl Session {
                 reason_code: ReasonCode::SessionTakenOver,
                 properties: Default::default(),
             })),
-            SessionEvent::TopicMessage(message) => self.publish_client(message).await,
+            SessionEvent::SubscriptionEvent(message) => self.publish_client(message).await,
             SessionEvent::QosEvent(QosEvent::Response(msg)) => Some(msg),
             SessionEvent::QosEvent(QosEvent::End(packet_identifier)) => {
                 self.client_flows.remove(&packet_identifier);
                 self.packet_identifier.release(packet_identifier);
+                self.limit_client_publish.add_permits(1);
                 None
             }
         })
@@ -610,6 +604,7 @@ impl Session {
                     topic_filter,
                     options.borrow(),
                     self.session_event_tx.borrow(),
+                    self.limit_client_publish.clone(),
                 )
                 .await
             {

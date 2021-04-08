@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::cmp::min;
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::net::SocketAddr;
@@ -7,17 +8,17 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use anyhow::{Context, Error};
-use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
 use sled::{Batch, Db, Event, IVec, Subscriber, Tree};
 use tokio::sync::mpsc::Sender;
-use tokio::sync::oneshot;
+use tokio::sync::Semaphore;
 use tracing::{debug, info, instrument, trace, warn};
 
 use como_mqtt::v5::types::{Publish, QoS, ReasonCode, SubscriptionOptions};
 
-use crate::session::{SessionEvent, SubscribedTopics, TopicMessage};
+use crate::session::{SessionEvent, SubscribedTopics, SubscriptionMessage};
 use crate::settings::Settings;
+use crate::subscription;
 use crate::topic::{NewTopicSubscriber, TopicManager, Values};
 
 pub(crate) trait SessionStore {
@@ -116,64 +117,6 @@ impl TryInto<Vec<u8>> for SessionState {
     }
 }
 
-#[instrument(skip(option, subscriber, session_event_tx))]
-async fn subscription(
-    option: SubscriptionOptions,
-    session_event_tx: Sender<SessionEvent>,
-    topic_name: String,
-    mut subscriber: Subscriber,
-) -> Result<()> {
-    //   tokio::pin!(stream);
-    trace!("start");
-    while let Some(event) = (&mut subscriber).await {
-        //debug!("receive subscription event {:?}", event);
-        match event {
-            Event::Insert { key, value } => match key.as_ref().read_u64::<BigEndian>() {
-                Ok(id) => {
-                    //debug!("id: {}, value: {:?}", id, value);
-                    let msg = bincode::deserialize(value.as_ref()).context("deserialize event")?;
-                    session_event_tx
-                        .send(SessionEvent::TopicMessage(TopicMessage::new(
-                            id,
-                            topic_name.to_owned(),
-                            option.clone(),
-                            msg,
-                        )))
-                        .await
-                        .context("subscription send")?
-                }
-                Err(_) => warn!("invalid log id: {:#x?}", key),
-            },
-            Event::Remove { .. } => unreachable!(),
-        }
-    }
-
-    trace!("end");
-    Ok(())
-}
-
-pub(crate) fn subscribe_topic(
-    client_id: String,
-    topic_name: String,
-    options: SubscriptionOptions,
-    subscription_tx: Sender<SessionEvent>,
-    subscriber: Subscriber,
-) -> oneshot::Sender<()> {
-    let (unsubscribe_tx, unsubscribe_rx) = oneshot::channel();
-    tokio::spawn(async move {
-        tokio::select! {
-            Err(err) = subscription(options, subscription_tx, topic_name.to_owned(), subscriber)
-            => {
-                warn!(cause = ? err, "subscription {} error", topic_name);
-            },
-            _ = unsubscribe_rx => {
-                debug!("{:?} unsubscribe {}", client_id, topic_name);
-            }
-        }
-    });
-    unsubscribe_tx
-}
-
 impl Deref for SessionContext {
     type Target = SessionContextInner;
     #[inline]
@@ -225,18 +168,19 @@ impl SessionContextInner {
         self.topic_manager.publish(msg).await
     }
 
-    #[instrument(skip(self, options, session_event_tx), err)]
+    #[instrument(skip(self, option, session_event_tx), err)]
     pub(crate) async fn subscribe(
         &self,
         client_id: &str,
         topic_filter: &str,
-        options: &SubscriptionOptions,
+        option: &SubscriptionOptions,
         session_event_tx: &Sender<SessionEvent>,
+        limit_client_publish: Arc<Semaphore>,
     ) -> Result<(ReasonCode, SubscribedTopics)> {
         let mut unsubscribes = HashMap::new();
         let channels = self.topic_manager.subscribe(topic_filter).await?;
         debug!("subscribe returns {} subscriptions", channels.len());
-        let reason_code = match options.qos {
+        let reason_code = match option.qos {
             QoS::AtMostOnce => ReasonCode::Success,
             QoS::AtLeastOnce => ReasonCode::GrantedQoS1,
             QoS::ExactlyOnce => ReasonCode::GrantedQoS2,
@@ -245,11 +189,13 @@ impl SessionContextInner {
         for (topic_name, subscriber, retained) in channels {
             if let Some((id, msg)) = retained {
                 if msg.retain && !msg.payload.is_empty() {
+                    let qos = min(msg.qos, option.qos);
+                    subscription::limit_client(qos, limit_client_publish.borrow()).await;
                     if let Err(err) = session_event_tx
-                        .send(SessionEvent::TopicMessage(TopicMessage::new(
+                        .send(SessionEvent::SubscriptionEvent(SubscriptionMessage::new(
                             id,
                             topic_name.to_owned(),
-                            options.clone(),
+                            option.clone(),
                             msg,
                         )))
                         .await
@@ -259,16 +205,15 @@ impl SessionContextInner {
                 }
             }
 
-            unsubscribes.insert(
+            let unsubscribe_tx = subscription::subscribe_topic(
+                client_id.to_owned(),
                 topic_name.to_owned(),
-                subscribe_topic(
-                    client_id.to_owned(),
-                    topic_name.to_owned(),
-                    options.to_owned(),
-                    session_event_tx.clone(),
-                    subscriber,
-                ),
+                option.to_owned(),
+                session_event_tx.clone(),
+                subscriber,
+                limit_client_publish.clone(),
             );
+            unsubscribes.insert(topic_name.to_owned(), unsubscribe_tx);
         }
 
         Ok((reason_code, unsubscribes))
