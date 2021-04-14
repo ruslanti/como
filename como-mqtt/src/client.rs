@@ -71,7 +71,7 @@ impl<'a> MqttClient {
         timeout(self.timeout, self.stream.next())
             .await
             .map_err(Error::msg)
-            .and_then(|r| r.ok_or_else(|| anyhow!("none message")))
+            .and_then(|r| r.ok_or_else(|| anyhow!("disconnected")))
             .and_then(|r| r.map_err(Error::msg))
     }
 
