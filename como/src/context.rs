@@ -1,5 +1,4 @@
 use std::borrow::Borrow;
-use std::cmp::min;
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::net::SocketAddr;
@@ -8,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use anyhow::{Context, Error};
+use byteorder::{BigEndian, ReadBytesExt};
 use serde::{Deserialize, Serialize};
 use sled::{Batch, Db, Event, IVec, Subscriber, Tree};
 use tokio::sync::mpsc::Sender;
@@ -20,6 +20,9 @@ use crate::session::{SessionEvent, SubscribedTopics, SubscriptionMessage};
 use crate::settings::Settings;
 use crate::subscription;
 use crate::topic::{NewTopicSubscriber, TopicManager, Values};
+use bytes::Bytes;
+use como_mqtt::v5::error::MqttError;
+use como_mqtt::v5::string::MqttString;
 
 pub(crate) trait SessionStore {
     fn get(&self, client_id: &str) -> Result<Option<SessionState>>;
@@ -168,19 +171,19 @@ impl SessionContextInner {
         self.topic_manager.publish(msg).await
     }
 
-    #[instrument(skip(self, option, session_event_tx), err)]
+    #[instrument(skip(self, options, session_event_tx), err)]
     pub(crate) async fn subscribe(
         &self,
         client_id: &str,
         topic_filter: &str,
-        option: &SubscriptionOptions,
+        options: &SubscriptionOptions,
         session_event_tx: &Sender<SessionEvent>,
         limit_client_publish: Arc<Semaphore>,
     ) -> Result<(ReasonCode, SubscribedTopics)> {
         let mut unsubscribes = HashMap::new();
         let channels = self.topic_manager.subscribe(topic_filter).await?;
         debug!("subscribe returns {} subscriptions", channels.len());
-        let reason_code = match option.qos {
+        let reason_code = match options.qos {
             QoS::AtMostOnce => ReasonCode::Success,
             QoS::AtLeastOnce => ReasonCode::GrantedQoS1,
             QoS::ExactlyOnce => ReasonCode::GrantedQoS2,
@@ -195,7 +198,7 @@ impl SessionContextInner {
                         .send(SessionEvent::SubscriptionEvent(SubscriptionMessage::new(
                             id,
                             topic_name.to_owned(),
-                            option.clone(),
+                            options.clone(),
                             msg,
                         )))
                         .await
@@ -225,6 +228,31 @@ impl SessionContextInner {
 
     pub fn topic_subscriber(&self, topic_name: &str) -> Result<Subscriber> {
         self.topic_manager.subscriber(topic_name)
+    }
+
+    pub fn auth(
+        &self,
+        username: Option<MqttString>,
+        password: Option<Bytes>,
+    ) -> Result<(), MqttError> {
+        let username = if let Some(username) = username.borrow() {
+            Some(
+                std::str::from_utf8(username.as_ref())
+                    .map_err(|_| MqttError::BadUserNameOrPassword)?,
+            )
+        } else {
+            None
+        };
+
+        let password = password.as_ref().map(|password| password.as_ref());
+
+        match (self.settings.service.allow_anonymous, username, password) {
+            (true, None, _) => Ok(()),
+            (false, None, _) => Err(MqttError::NotAuthorized),
+            (true, Some(_username), Some(_password)) => Ok(()),
+            (false, Some(_username), Some(_password)) => Ok(()),
+            (_, Some(_username), None) => Err(MqttError::BadUserNameOrPassword),
+        }
     }
 }
 

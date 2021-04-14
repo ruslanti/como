@@ -7,11 +7,13 @@ use tokio::task::JoinHandle;
 
 use como::context::SessionContext;
 use como::service;
-use como::settings::Settings;
+use config::Config;
 
 static ONCE: Once = Once::new();
 
-pub async fn start_test_broker() -> (u16, Sender<()>, JoinHandle<Result<(), Error>>) {
+pub async fn start_test_broker(
+    changes: Vec<(&str, &str)>,
+) -> (u16, Sender<()>, JoinHandle<Result<(), Error>>) {
     ONCE.call_once(|| {
         tracing_subscriber::fmt::init();
     });
@@ -19,10 +21,15 @@ pub async fn start_test_broker() -> (u16, Sender<()>, JoinHandle<Result<(), Erro
     let (shutdown_notify, shutdown) = oneshot::channel::<()>();
     let barrier = Arc::new(Barrier::new(2));
 
+    let mut cfg = Config::new();
+    cfg.set("service.port", port.to_string()).unwrap();
+    for (key, value) in changes.into_iter() {
+        cfg.set(key, value).unwrap();
+    }
+
+    let settings = cfg.try_into().unwrap();
     let ready = barrier.clone();
     let handle = tokio::spawn(async move {
-        let mut settings = Settings::default();
-        settings.service.port = port;
         let context = SessionContext::new(Arc::new(settings))?;
 
         service::run_with_ready(context, shutdown, ready).await

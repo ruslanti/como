@@ -16,7 +16,7 @@ mod common;
 
 #[tokio::test]
 async fn will_message_close() -> anyhow::Result<()> {
-    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let (port, shutdown_notify, handle) = start_test_broker(vec![]).await;
 
     let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .session_expire_interval(2)
@@ -73,7 +73,7 @@ async fn will_message_close() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn will_message_disconnect_failure() -> anyhow::Result<()> {
-    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let (port, shutdown_notify, handle) = start_test_broker(vec![]).await;
 
     let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .with_will(Will {
@@ -132,7 +132,7 @@ async fn will_message_disconnect_failure() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn will_message_disconnect_success() -> anyhow::Result<()> {
-    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let (port, shutdown_notify, handle) = start_test_broker(vec![]).await;
 
     let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .with_will(Will {
@@ -176,7 +176,7 @@ async fn will_message_disconnect_success() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn broker_shutdown() -> anyhow::Result<()> {
-    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let (port, shutdown_notify, handle) = start_test_broker(vec![]).await;
 
     let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .session_expire_interval(2)
