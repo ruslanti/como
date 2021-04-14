@@ -8,12 +8,15 @@ use std::sync::Arc;
 use anyhow::Result;
 use anyhow::{Context, Error};
 use byteorder::{BigEndian, ReadBytesExt};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sled::{Batch, Db, Event, IVec, Subscriber, Tree};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tracing::{debug, info, instrument, trace, warn};
 
+use como_mqtt::v5::error::MqttError;
+use como_mqtt::v5::string::MqttString;
 use como_mqtt::v5::types::{Publish, QoS, ReasonCode, SubscriptionOptions};
 
 use crate::session::{SessionEvent, SubscribedTopics, TopicMessage};
@@ -164,7 +167,7 @@ pub(crate) fn subscribe_topic(
         tokio::select! {
             Err(err) = subscription(options, subscription_tx, topic_name.to_owned(), subscriber)
             => {
-                warn!(cause = ? err, "subscription {} error", topic_name);
+                warn!(cause = ?err, "subscription {} error", topic_name);
             },
             _ = unsubscribe_rx => {
                 debug!("{:?} unsubscribe {}", client_id, topic_name);
@@ -280,6 +283,31 @@ impl SessionContextInner {
 
     pub fn topic_subscriber(&self, topic_name: &str) -> Result<Subscriber> {
         self.topic_manager.subscriber(topic_name)
+    }
+
+    pub fn auth(
+        &self,
+        username: Option<MqttString>,
+        password: Option<Bytes>,
+    ) -> Result<(), MqttError> {
+        let username = if let Some(username) = username.borrow() {
+            Some(
+                std::str::from_utf8(username.as_ref())
+                    .map_err(|_| MqttError::BadUserNameOrPassword)?,
+            )
+        } else {
+            None
+        };
+
+        let password = password.as_ref().map(|password| password.as_ref());
+
+        match (self.settings.allow_anonymous, username, password) {
+            (true, None, None) => Ok(()),
+            (true, None, Some(_)) => Err(MqttError::NotAuthorized),
+            (false, None, _) => Err(MqttError::NotAuthorized),
+            (_, Some(_username), Some(_password)) => Ok(()),
+            (_, Some(_username), None) => Err(MqttError::BadUserNameOrPassword),
+        }
     }
 }
 

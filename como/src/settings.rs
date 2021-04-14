@@ -57,6 +57,8 @@ pub struct Settings {
     pub service: Transport,
     pub connection: Connection,
     pub log: Logger,
+    pub allow_anonymous: bool,
+    pub allow_empty_id: bool,
 }
 
 impl Default for Topics {
@@ -123,6 +125,8 @@ impl Default for Settings {
             service: Default::default(),
             connection: Default::default(),
             log: Default::default(),
+            allow_anonymous: true,
+            allow_empty_id: false,
         }
     }
 }

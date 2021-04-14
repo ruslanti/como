@@ -7,7 +7,7 @@ use tokio_util::codec::Encoder;
 use crate::v5::decoder::{decode_utf8_string, decode_variable_integer};
 use crate::v5::encoder::{encode_utf8_string, RemainingLength};
 use crate::v5::error::MqttError;
-use crate::v5::error::MqttError::{EndOfStream, UnacceptableProperty};
+use crate::v5::error::MqttError::{EndOfStream, MalformedPacket, UnacceptableProperty};
 use crate::v5::error::MqttError::{UnspecifiedError, UnsupportedProtocolVersion};
 use crate::v5::property::{
     ConnectProperties, PropertiesBuilder, PropertiesSize, Property, WillProperties,
@@ -35,6 +35,7 @@ impl TryFrom<Bytes> for Connect {
 
         let flags = reader.get_u8();
         let (
+            reserved,
             clean_start_flag,
             will_flag,
             will_qos_flag,
@@ -42,6 +43,9 @@ impl TryFrom<Bytes> for Connect {
             password_flag,
             username_flag,
         ) = Connect::set_flags(flags)?;
+        if reserved {
+            return Err(MalformedPacket);
+        }
 
         let keep_alive = reader.get_u16();
 
@@ -55,8 +59,8 @@ impl TryFrom<Bytes> for Connect {
             let properties = WillProperties::try_from(reader.split_to(will_properties_length))?;
             let topic = decode_utf8_string(&mut reader)?
                 .ok_or_else(|| UnspecifiedError("will topic is missing".to_owned()))?;
-            let payload_len = reader.get_u16();
-            let payload = reader.split_to(payload_len as usize);
+            let payload_len = reader.get_u16() as usize;
+            let payload = reader.split_to(payload_len);
 
             Some(Will {
                 qos: will_qos_flag,
@@ -76,12 +80,14 @@ impl TryFrom<Bytes> for Connect {
         };
 
         let password = if password_flag {
-            Some(reader.clone())
+            let len = reader.get_u16() as usize;
+            Some(reader.split_to(len))
         } else {
             None
         };
 
         Ok(Connect {
+            reserved,
             clean_start_flag,
             keep_alive,
             properties,
@@ -196,6 +202,13 @@ impl Encoder<Connect> for MqttCodec {
         self.encode(msg.client_identifier.unwrap_or_default(), writer)?;
         if let Some(will) = msg.will {
             self.encode(will, writer)?;
+        }
+        if let Some(username) = msg.username {
+            self.encode(username, writer)?;
+        }
+        if let Some(password) = msg.password {
+            writer.put_u16(password.len() as u16);
+            self.encode(password, writer)?;
         }
 
         Ok(())

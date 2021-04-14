@@ -1,117 +1,22 @@
 #[macro_use]
 extern crate claim;
 
+use std::borrow::Borrow;
+use std::time::Duration;
+
 use bytes::Bytes;
 
 use como_mqtt::client::MqttClient;
-
 use como_mqtt::v5::string::MqttString;
 use como_mqtt::v5::types::{ControlPacket, Publish, QoS, ReasonCode};
 
 use crate::common::start_test_broker;
-use std::borrow::Borrow;
-use std::time::Duration;
 
 mod common;
 
 #[tokio::test]
-async fn connect_clean_session() -> anyhow::Result<()> {
-    //  println!("connect_clean_session start");
-    let (port, shutdown_notify, handle) = start_test_broker().await;
-    // println!("connect_clean_session end");
-
-    let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
-        .build()
-        .await?;
-
-    let ack = assert_ok!(client.connect(true).await);
-    assert_eq!(ack.reason_code, ReasonCode::Success);
-    assert!(!ack.session_present);
-    assert_some!(ack.properties.assigned_client_identifier);
-    assert_none!(ack.properties.session_expire_interval);
-    assert_none!(ack.properties.receive_maximum);
-    assert_none!(ack.properties.maximum_qos);
-    assert_none!(ack.properties.retain_available);
-    assert_none!(ack.properties.maximum_packet_size);
-    assert_none!(ack.properties.topic_alias_maximum);
-    assert_none!(ack.properties.reason_string);
-    assert_none!(ack.properties.wildcard_subscription_available);
-    assert_none!(ack.properties.subscription_identifier_available);
-    assert_none!(ack.properties.shared_subscription_available);
-    assert_none!(ack.properties.server_keep_alive);
-    assert_none!(ack.properties.response_information);
-    assert_none!(ack.properties.server_reference);
-    assert_none!(ack.properties.authentication_method);
-    assert_none!(ack.properties.authentication_data);
-
-    assert_none!(client.disconnect().await?);
-
-    drop(client);
-    drop(shutdown_notify);
-    handle.await?
-}
-
-#[tokio::test]
-async fn connect_existing_session() -> anyhow::Result<()> {
-    let (port, shutdown_notify, handle) = start_test_broker().await;
-    let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
-        .client_id("connect_existing_session")
-        .session_expire_interval(10)
-        .build()
-        .await?;
-
-    // Initial #1 connection
-    let ack = assert_ok!(client.connect(false).await);
-    assert!(!ack.session_present);
-    assert_none!(ack.properties.assigned_client_identifier);
-    assert_none!(ack.properties.session_expire_interval);
-
-    let mut client2 = MqttClient::builder(&format!("127.0.0.1:{}", port))
-        .client_id("connect_existing_session")
-        .build()
-        .await?;
-    // #2 connection take over the session from #1
-    let ack = assert_ok!(client2.connect(true).await);
-    assert!(ack.session_present);
-    assert_none!(ack.properties.assigned_client_identifier);
-    assert_none!(ack.properties.session_expire_interval);
-    // expected #1 disconnect
-    assert_matches!(assert_ok!(client.timeout_recv().await), ControlPacket::Disconnect(d) if d.reason_code == ReasonCode::SessionTakenOver);
-    assert_none!(client2.disconnect().await?);
-
-    // #3 connection
-    let mut client3 = MqttClient::builder(&format!("127.0.0.1:{}", port))
-        .client_id("connect_existing_session")
-        .session_expire_interval(10)
-        .build()
-        .await?;
-    let ack = assert_ok!(client3.connect(false).await);
-    assert!(!ack.session_present);
-
-    assert_none!(client3.disconnect().await?);
-
-    let mut client4 = MqttClient::builder(&format!("127.0.0.1:{}", port))
-        .client_id("connect_existing_session")
-        .session_expire_interval(10)
-        .build()
-        .await?;
-    // #4 connection after #3 disconnect with 10 sec session_expire
-    let ack = assert_ok!(client4.connect(false).await);
-    assert!(ack.session_present);
-
-    assert_none!(client4.disconnect().await?);
-
-    drop(client);
-    drop(client2);
-    drop(client3);
-    drop(client4);
-    drop(shutdown_notify);
-    handle.await?
-}
-
-#[tokio::test]
 async fn publish_subscribe() -> anyhow::Result<()> {
-    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let (port, shutdown_notify, handle) = start_test_broker(vec![("allow_empty_id", "true")]).await;
     let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .session_expire_interval(10)
         .build()
@@ -165,7 +70,7 @@ async fn publish_subscribe() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn retained_publish_subscribe() -> anyhow::Result<()> {
-    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let (port, shutdown_notify, handle) = start_test_broker(vec![("allow_empty_id", "true")]).await;
     let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .build()
         .await?;
@@ -266,7 +171,7 @@ async fn retained_publish_subscribe() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn publish_receive_maximum_qos1() -> anyhow::Result<()> {
-    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let (port, shutdown_notify, handle) = start_test_broker(vec![("allow_empty_id", "true")]).await;
     let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .session_expire_interval(10)
         .receive_maximum(10)
@@ -330,4 +235,101 @@ async fn publish_receive_maximum_qos1() -> anyhow::Result<()> {
 #[tokio::test]
 async fn publish_receive_maximum_qos2() -> anyhow::Result<()> {
     todo!("test publisg receive_maximum QoS 2")
+}
+
+#[tokio::test]
+async fn clean_session() -> anyhow::Result<()> {
+    //  println!("connect_clean_session start");
+    let (port, shutdown_notify, handle) = start_test_broker(vec![("allow_empty_id", "true")]).await;
+    // println!("connect_clean_session end");
+
+    let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
+        .build()
+        .await?;
+
+    let ack = assert_ok!(client.connect(true).await);
+    assert_eq!(ack.reason_code, ReasonCode::Success);
+    assert!(!ack.session_present);
+    assert_some!(ack.properties.assigned_client_identifier);
+    assert_none!(ack.properties.session_expire_interval);
+    assert_none!(ack.properties.receive_maximum);
+    assert_none!(ack.properties.maximum_qos);
+    assert_none!(ack.properties.retain_available);
+    assert_none!(ack.properties.maximum_packet_size);
+    assert_none!(ack.properties.topic_alias_maximum);
+    assert_none!(ack.properties.reason_string);
+    assert_none!(ack.properties.wildcard_subscription_available);
+    assert_none!(ack.properties.subscription_identifier_available);
+    assert_none!(ack.properties.shared_subscription_available);
+    assert_none!(ack.properties.server_keep_alive);
+    assert_none!(ack.properties.response_information);
+    assert_none!(ack.properties.server_reference);
+    assert_none!(ack.properties.authentication_method);
+    assert_none!(ack.properties.authentication_data);
+
+    assert_none!(client.disconnect().await?);
+
+    drop(client);
+    drop(shutdown_notify);
+    handle.await?
+}
+
+#[tokio::test]
+async fn existing_session() -> anyhow::Result<()> {
+    let (port, shutdown_notify, handle) = start_test_broker(vec![]).await;
+    let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
+        .client_id("existing_session")
+        .session_expire_interval(10)
+        .build()
+        .await?;
+
+    // Initial #1 connection
+    let ack = assert_ok!(client.connect(false).await);
+    assert_eq!(ack.reason_code, ReasonCode::Success);
+    assert!(!ack.session_present);
+    assert_none!(ack.properties.assigned_client_identifier);
+    assert_none!(ack.properties.session_expire_interval);
+
+    let mut client2 = MqttClient::builder(&format!("127.0.0.1:{}", port))
+        .client_id("existing_session")
+        .build()
+        .await?;
+    // #2 connection take over the session from #1
+    let ack = assert_ok!(client2.connect(true).await);
+    assert_eq!(ack.reason_code, ReasonCode::Success);
+    assert!(ack.session_present);
+    assert_none!(ack.properties.assigned_client_identifier);
+    assert_none!(ack.properties.session_expire_interval);
+    // expected #1 disconnect
+    assert_matches!(assert_ok!(client.timeout_recv().await), ControlPacket::Disconnect(d) if d.reason_code == ReasonCode::SessionTakenOver);
+    assert_none!(client2.disconnect().await?);
+
+    // #3 connection
+    let mut client3 = MqttClient::builder(&format!("127.0.0.1:{}", port))
+        .client_id("existing_session")
+        .session_expire_interval(10)
+        .build()
+        .await?;
+    let ack = assert_ok!(client3.connect(false).await);
+    assert!(!ack.session_present);
+
+    assert_none!(client3.disconnect().await?);
+
+    let mut client4 = MqttClient::builder(&format!("127.0.0.1:{}", port))
+        .client_id("existing_session")
+        .session_expire_interval(10)
+        .build()
+        .await?;
+    // #4 connection after #3 disconnect with 10 sec session_expire
+    let ack = assert_ok!(client4.connect(false).await);
+    assert!(ack.session_present);
+
+    assert_none!(client4.disconnect().await?);
+
+    drop(client);
+    drop(client2);
+    drop(client3);
+    drop(client4);
+    drop(shutdown_notify);
+    handle.await?
 }

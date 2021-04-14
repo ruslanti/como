@@ -25,6 +25,8 @@ pub struct MqttClient {
     properties_builder: PropertiesBuilder,
     timeout: Duration,
     packet_identifier: PacketIdentifier,
+    username: Option<MqttString>,
+    password: Option<Bytes>,
     will: Option<Will>,
 }
 
@@ -34,6 +36,8 @@ pub struct ClientBuilder<'a> {
     keep_alive: Option<u16>,
     timeout: Duration,
     properties_builder: PropertiesBuilder,
+    username: Option<MqttString>,
+    password: Option<Bytes>,
     will: Option<Will>,
 }
 
@@ -45,12 +49,34 @@ impl<'a> MqttClient {
             keep_alive: None,
             timeout: Duration::from_millis(100),
             properties_builder: PropertiesBuilder::default(),
+            username: None,
+            password: None,
             will: None,
         }
     }
 
     pub async fn connect(&mut self, clean_start: bool) -> Result<ConnAck> {
         let connect = Connect {
+            reserved: false,
+            clean_start_flag: clean_start,
+            keep_alive: self.keep_alive,
+            properties: self.properties_builder.to_owned().connect(),
+            client_identifier: self.client_id.clone(),
+            username: self.username.clone(),
+            password: self.password.clone(),
+            will: self.will.to_owned(),
+        };
+        trace!("send {:?}", connect);
+        self.stream.send(ControlPacket::Connect(connect)).await?;
+        self.timeout_recv().await.and_then(|packet| match packet {
+            ControlPacket::ConnAck(ack) => Ok(ack),
+            _ => Err(anyhow!("unexpected: {}", packet)),
+        })
+    }
+
+    pub async fn connect_reserved(&mut self, clean_start: bool) -> Result<ConnAck> {
+        let connect = Connect {
+            reserved: true,
             clean_start_flag: clean_start,
             keep_alive: self.keep_alive,
             properties: self.properties_builder.to_owned().connect(),
@@ -71,7 +97,7 @@ impl<'a> MqttClient {
         timeout(self.timeout, self.stream.next())
             .await
             .map_err(Error::msg)
-            .and_then(|r| r.ok_or_else(|| anyhow!("none message")))
+            .and_then(|r| r.ok_or_else(|| anyhow!("disconnected")))
             .and_then(|r| r.map_err(Error::msg))
     }
 
@@ -230,6 +256,16 @@ impl ClientBuilder<'_> {
         self
     }
 
+    pub fn username(mut self, value: &'static str) -> Self {
+        self.username = Some(MqttString::from(value));
+        self
+    }
+
+    pub fn password(mut self, value: &'static [u8]) -> Self {
+        self.password = Some(Bytes::from_static(value));
+        self
+    }
+
     pub async fn build(self) -> Result<MqttClient> {
         let peer: SocketAddr = self.address.parse()?;
         let socket = if peer.is_ipv4() {
@@ -248,6 +284,8 @@ impl ClientBuilder<'_> {
             properties_builder: self.properties_builder,
             timeout: self.timeout,
             packet_identifier: Default::default(),
+            username: self.username,
+            password: self.password,
             will: self.will,
         })
     }

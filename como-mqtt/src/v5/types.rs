@@ -341,6 +341,7 @@ pub struct Will {
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct Connect {
+    pub reserved: bool,
     pub clean_start_flag: bool,
     pub keep_alive: u16,
     pub properties: ConnectProperties,
@@ -461,6 +462,7 @@ impl MqttCodec {
 impl Connect {
     pub(crate) fn get_flags(&self) -> u8 {
         let mut flags = 0b0000_0000;
+        flags |= self.reserved as u8;
         flags |= (self.clean_start_flag as u8) << 1;
         if let Some(will) = &self.will {
             flags |= 0b0000_0100;
@@ -468,11 +470,14 @@ impl Connect {
             flags |= (will.retain as u8) << 5;
         }
         flags |= (self.password.is_some() as u8) << 6;
-        flags |= (self.username.is_some() as u8) << 6;
+        flags |= (self.username.is_some() as u8) << 7;
         flags
     }
 
-    pub(crate) fn set_flags(flags: u8) -> Result<(bool, bool, QoS, bool, bool, bool), MqttError> {
+    pub(crate) fn set_flags(
+        flags: u8,
+    ) -> Result<(bool, bool, bool, QoS, bool, bool, bool), MqttError> {
+        let reserved = (flags & 0b00000001) != 0;
         let clean_start_flag = ((flags & 0b00000010) >> 1) != 0;
         let will_flag = ((flags & 0b00000100) >> 2) != 0;
         let will_qos_flag: QoS = QoS::try_from((flags & 0b00011000) >> 3)?;
@@ -480,6 +485,7 @@ impl Connect {
         let password_flag = ((flags & 0b01000000) >> 6) != 0;
         let username_flag = ((flags & 0b10000000) >> 7) != 0;
         Ok((
+            reserved,
             clean_start_flag,
             will_flag,
             will_qos_flag,

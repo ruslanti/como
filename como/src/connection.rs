@@ -13,10 +13,14 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
-use tracing::{debug, field, instrument, trace};
+use tracing::{debug, field, instrument, trace, warn};
 use uuid::Uuid;
 
-use como_mqtt::v5::types::{Auth, Connect, ControlPacket, Disconnect, MqttCodec, ReasonCode};
+use como_mqtt::v5::error::MqttError;
+use como_mqtt::v5::string::MqttString;
+use como_mqtt::v5::types::{
+    Auth, ConnAck, Connect, ControlPacket, Disconnect, MqttCodec, ReasonCode,
+};
 
 use crate::context::SessionContext;
 use crate::metric;
@@ -55,17 +59,35 @@ impl ConnectionHandler {
         }
     }
 
+    fn get_identifier(&self, client_identifier: Option<MqttString>) -> Result<String, MqttError> {
+        if let Some(client_identifier) = client_identifier {
+            let identifier: String = client_identifier.try_into()?;
+            trace!("1 {} - {}", identifier, identifier.len());
+            if (1usize..=23).contains(&identifier.len())
+                && identifier
+                    .chars()
+                    .all(|c| matches!(c, '_' | '-' |'0'..='9' | 'A'..='Z' | 'a'..='z'))
+            {
+                Ok(identifier)
+            } else {
+                trace!("1 error {}", identifier);
+                Err(MqttError::ClientIdentifierNotValid)
+            }
+        } else if self.context.settings().allow_empty_id {
+            Ok(Uuid::new_v4().to_simple().to_string())
+        } else {
+            Err(MqttError::ClientIdentifierNotValid)
+        }
+    }
+
     //#[instrument(skip(self, conn_tx, msg), err)]
     async fn prepare_session(
         &mut self,
         msg: &Connect,
         response_tx: Sender<ControlPacket>,
-    ) -> Result<Session> {
+    ) -> Result<Session, MqttError> {
         //trace!("{:?}", msg);
-        let identifier = msg
-            .client_identifier
-            .clone()
-            .unwrap_or_else(|| Uuid::new_v4().to_simple().to_string().into());
+        let identifier = self.get_identifier(msg.client_identifier.clone())?;
 
         // If the Server sends a Server Keep Alive on the CONNACK packet, the Client MUST
         // use this value instead of the Keep Alive value the Client sent on CONNECT
@@ -90,7 +112,7 @@ impl ConnectionHandler {
         trace!("keep_alive: {:?}", self.keep_alive);
 
         let session = Session::new(
-            identifier.try_into()?,
+            identifier,
             response_tx,
             self.peer,
             msg.properties.clone(),
@@ -117,21 +139,45 @@ impl ConnectionHandler {
 
         match (self.session.borrow_mut(), msg) {
             (None, ControlPacket::Connect(connect)) => {
-                let session = self.prepare_session(&connect, response_tx.clone()).await?;
-                self.session
-                    .get_or_insert(session)
-                    .handle_msg(ControlPacket::Connect(connect))
-                    .await
+                if let Err(error) = self
+                    .context
+                    .auth(connect.username.clone(), connect.password.clone())
+                {
+                    warn!(cause = ?error, "auth error");
+                    Ok(Some(ControlPacket::ConnAck(ConnAck {
+                        session_present: false,
+                        reason_code: error.into(),
+                        properties: Default::default(),
+                    })))
+                } else {
+                    match self.prepare_session(&connect, response_tx.clone()).await {
+                        Ok(session) => {
+                            self.session
+                                .get_or_insert(session)
+                                .handle_msg(ControlPacket::Connect(connect))
+                                .await
+                        }
+                        Err(err) => {
+                            warn!(cause = ?err, "connection prepare session error");
+                            Ok(Some(ControlPacket::ConnAck(ConnAck {
+                                session_present: false,
+                                reason_code: ReasonCode::from(err),
+                                properties: Default::default(),
+                            })))
+                        }
+                    }
+                }
             }
             (None, ControlPacket::Auth(_auth)) => unimplemented!(), //self.process_auth(auth).await,
             (None, packet) => {
-                let context = format!("session: None, packet: {}", packet,);
-                Err(anyhow!("unacceptable event").context(context))
+                Err(anyhow!("unacceptable event")
+                    .context(format!("session: None, packet: {}", packet)))
             }
-            (Some(_), ControlPacket::Connect(_)) => todo!(
-                "The Server MUST process a second \
-            CONNECT packet sent from a Client as a Protocol Error and close the Network Connection"
-            ),
+            (Some(_), ControlPacket::Connect(_)) => {
+                // The Server MUST process a second  CONNECT packet sent from a Client as a
+                //Protocol Error and close the Network Connection
+                Err(anyhow!("unacceptable connect in established session"))
+            }
             (Some(_), ControlPacket::PingReq) => Ok(Some(ControlPacket::PingResp)),
             (Some(session), ControlPacket::Disconnect(disconnect)) => {
                 session
