@@ -119,8 +119,10 @@ impl ConnectionHandler {
 
         match (self.session.borrow_mut(), msg) {
             (None, ControlPacket::Connect(connect)) => {
-                if let Err(error) = self.context.auth(connect.username.clone(), connect.password
-                    .clone()) {
+                if let Err(error) = self
+                    .context
+                    .auth(connect.username.clone(), connect.password.clone())
+                {
                     warn!(cause = ?error, "auth error");
                     Ok(Some(ControlPacket::ConnAck(ConnAck {
                         session_present: false,
@@ -129,10 +131,12 @@ impl ConnectionHandler {
                     })))
                 } else {
                     match self.prepare_session(&connect, response_tx.clone()).await {
-                        Ok(session) => self.session
-                            .get_or_insert(session)
-                            .handle_msg(ControlPacket::Connect(connect))
-                            .await,
+                        Ok(session) => {
+                            self.session
+                                .get_or_insert(session)
+                                .handle_msg(ControlPacket::Connect(connect))
+                                .await
+                        }
                         Err(err) => {
                             warn!(cause = ?err, "connection prepare session error");
                             Ok(Some(ControlPacket::ConnAck(ConnAck {
@@ -146,12 +150,14 @@ impl ConnectionHandler {
             }
             (None, ControlPacket::Auth(_auth)) => unimplemented!(), //self.process_auth(auth).await,
             (None, packet) => {
-                let context = format!("session: None, packet: {}", packet,);
-                Err(anyhow!("unacceptable event").context(context))
+                Err(anyhow!("unacceptable event")
+                    .context(format!("session: None, packet: {}", packet)))
             }
-            (Some(_), ControlPacket::Connect(_)) => todo!(
-                "The Server MUST process a second  CONNECT packet sent from a Client as a Protocol Error and close the Network Connection"
-            ),
+            (Some(_), ControlPacket::Connect(_)) => {
+                // The Server MUST process a second  CONNECT packet sent from a Client as a
+                //Protocol Error and close the Network Connection
+                Err(anyhow!("unacceptable connect in established session"))
+            }
             (Some(_), ControlPacket::PingReq) => Ok(Some(ControlPacket::PingResp)),
             (Some(session), ControlPacket::Disconnect(disconnect)) => {
                 session
