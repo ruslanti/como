@@ -29,6 +29,8 @@ pub enum MqttError {
 
     #[error("End of stream: {0}")]
     EndOfStream(&'static str),
+    #[error("Malformed control packet")]
+    MalformedPacket,
     #[error("malformed variable integer: {0}")]
     MalformedVariableInteger(u32),
     #[error("Malformed control packet reason code: {0}")]
@@ -109,6 +111,7 @@ impl From<MqttError> for ReasonCode {
             MqttError::PacketTooLarge => ReasonCode::PacketTooLarge,
             MqttError::NotAuthorized => ReasonCode::NotAuthorized,
             MqttError::BadUserNameOrPassword => ReasonCode::BadUserNameOrPassword,
+            MqttError::MalformedPacket => ReasonCode::MalformedPacket,
         }
     }
 }
