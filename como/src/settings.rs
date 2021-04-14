@@ -9,6 +9,7 @@ pub struct Transport {
     pub bind: String,
     pub port: u16,
     pub max_connections: usize,
+    pub allow_anonymous: bool,
     pub tls: Option<Tls>,
 }
 
@@ -74,6 +75,7 @@ impl Default for Transport {
             bind: String::from("127.0.0.1"),
             port: 1883,
             max_connections: 255,
+            allow_anonymous: true,
             tls: None,
         }
     }

@@ -13,10 +13,12 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::timeout;
 use tokio_util::codec::Framed;
-use tracing::{debug, field, instrument, trace};
+use tracing::{debug, field, instrument, trace, warn};
 use uuid::Uuid;
 
-use como_mqtt::v5::types::{Auth, Connect, ControlPacket, Disconnect, MqttCodec, ReasonCode};
+use como_mqtt::v5::types::{
+    Auth, ConnAck, Connect, ControlPacket, Disconnect, MqttCodec, ReasonCode,
+};
 
 use crate::context::SessionContext;
 use crate::metric;
@@ -117,11 +119,30 @@ impl ConnectionHandler {
 
         match (self.session.borrow_mut(), msg) {
             (None, ControlPacket::Connect(connect)) => {
-                let session = self.prepare_session(&connect, response_tx.clone()).await?;
-                self.session
-                    .get_or_insert(session)
-                    .handle_msg(ControlPacket::Connect(connect))
-                    .await
+                if let Err(error) = self.context.auth(connect.username.clone(), connect.password
+                    .clone()) {
+                    warn!(cause = ?error, "auth error");
+                    Ok(Some(ControlPacket::ConnAck(ConnAck {
+                        session_present: false,
+                        reason_code: error.into(),
+                        properties: Default::default(),
+                    })))
+                } else {
+                    match self.prepare_session(&connect, response_tx.clone()).await {
+                        Ok(session) => self.session
+                            .get_or_insert(session)
+                            .handle_msg(ControlPacket::Connect(connect))
+                            .await,
+                        Err(err) => {
+                            warn!(cause = ?err, "connection prepare session error");
+                            Ok(Some(ControlPacket::ConnAck(ConnAck {
+                                session_present: false,
+                                reason_code: ReasonCode::ProtocolError,
+                                properties: Default::default(),
+                            })))
+                        }
+                    }
+                }
             }
             (None, ControlPacket::Auth(_auth)) => unimplemented!(), //self.process_auth(auth).await,
             (None, packet) => {
@@ -129,8 +150,7 @@ impl ConnectionHandler {
                 Err(anyhow!("unacceptable event").context(context))
             }
             (Some(_), ControlPacket::Connect(_)) => todo!(
-                "The Server MUST process a second \
-            CONNECT packet sent from a Client as a Protocol Error and close the Network Connection"
+                "The Server MUST process a second  CONNECT packet sent from a Client as a Protocol Error and close the Network Connection"
             ),
             (Some(_), ControlPacket::PingReq) => Ok(Some(ControlPacket::PingResp)),
             (Some(session), ControlPacket::Disconnect(disconnect)) => {

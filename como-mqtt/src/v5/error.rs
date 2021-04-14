@@ -74,6 +74,11 @@ pub enum MqttError {
 
     #[error("Property {0} has empty value")]
     EmptyPropertyValue(&'static str),
+
+    #[error("Not Authorized")]
+    NotAuthorized,
+    #[error("Bad username or password")]
+    BadUserNameOrPassword,
 }
 
 impl From<MqttError> for ReasonCode {
@@ -102,6 +107,8 @@ impl From<MqttError> for ReasonCode {
             MqttError::BincodeErrorKind { .. } => ReasonCode::ImplementationSpecificError,
             MqttError::FromUtf8Error { .. } => ReasonCode::MalformedPacket,
             MqttError::PacketTooLarge => ReasonCode::PacketTooLarge,
+            MqttError::NotAuthorized => ReasonCode::NotAuthorized,
+            MqttError::BadUserNameOrPassword => ReasonCode::BadUserNameOrPassword,
         }
     }
 }

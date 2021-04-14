@@ -17,7 +17,7 @@ mod common;
 #[tokio::test]
 async fn connect_clean_session() -> anyhow::Result<()> {
     //  println!("connect_clean_session start");
-    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let (port, shutdown_notify, handle) = start_test_broker(vec![]).await;
     // println!("connect_clean_session end");
 
     let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
@@ -53,7 +53,7 @@ async fn connect_clean_session() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn connect_existing_session() -> anyhow::Result<()> {
-    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let (port, shutdown_notify, handle) = start_test_broker(vec![]).await;
     let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .client_id("connect_existing_session")
         .session_expire_interval(10)
@@ -111,7 +111,7 @@ async fn connect_existing_session() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn publish_subscribe() -> anyhow::Result<()> {
-    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let (port, shutdown_notify, handle) = start_test_broker(vec![]).await;
     let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .session_expire_interval(10)
         .build()
@@ -165,7 +165,7 @@ async fn publish_subscribe() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn retained_publish_subscribe() -> anyhow::Result<()> {
-    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let (port, shutdown_notify, handle) = start_test_broker(vec![]).await;
     let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .build()
         .await?;
@@ -266,7 +266,7 @@ async fn retained_publish_subscribe() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn publish_receive_maximum_qos1() -> anyhow::Result<()> {
-    let (port, shutdown_notify, handle) = start_test_broker().await;
+    let (port, shutdown_notify, handle) = start_test_broker(vec![]).await;
     let mut client = MqttClient::builder(&format!("127.0.0.1:{}", port))
         .session_expire_interval(10)
         .receive_maximum(10)

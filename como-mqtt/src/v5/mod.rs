@@ -8,7 +8,7 @@ mod connect;
 mod decoder;
 mod disconnect;
 pub mod encoder;
-pub(crate) mod error;
+pub mod error;
 mod publish;
 mod pubres;
 pub mod string;
