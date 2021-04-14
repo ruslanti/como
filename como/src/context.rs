@@ -8,21 +8,21 @@ use std::sync::Arc;
 use anyhow::Result;
 use anyhow::{Context, Error};
 use byteorder::{BigEndian, ReadBytesExt};
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sled::{Batch, Db, Event, IVec, Subscriber, Tree};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Semaphore;
 use tracing::{debug, info, instrument, trace, warn};
 
+use como_mqtt::v5::error::MqttError;
+use como_mqtt::v5::string::MqttString;
 use como_mqtt::v5::types::{Publish, QoS, ReasonCode, SubscriptionOptions};
 
 use crate::session::{SessionEvent, SubscribedTopics, SubscriptionMessage};
 use crate::settings::Settings;
 use crate::subscription;
 use crate::topic::{NewTopicSubscriber, TopicManager, Values};
-use bytes::Bytes;
-use como_mqtt::v5::error::MqttError;
-use como_mqtt::v5::string::MqttString;
 
 pub(crate) trait SessionStore {
     fn get(&self, client_id: &str) -> Result<Option<SessionState>>;
@@ -246,11 +246,11 @@ impl SessionContextInner {
 
         let password = password.as_ref().map(|password| password.as_ref());
 
-        match (self.settings.service.allow_anonymous, username, password) {
-            (true, None, _) => Ok(()),
+        match (self.settings.allow_anonymous, username, password) {
+            (true, None, None) => Ok(()),
+            (true, None, Some(_)) => Err(MqttError::NotAuthorized),
             (false, None, _) => Err(MqttError::NotAuthorized),
-            (true, Some(_username), Some(_password)) => Ok(()),
-            (false, Some(_username), Some(_password)) => Ok(()),
+            (_, Some(_username), Some(_password)) => Ok(()),
             (_, Some(_username), None) => Err(MqttError::BadUserNameOrPassword),
         }
     }
