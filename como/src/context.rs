@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::cmp::min;
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::net::SocketAddr;
@@ -7,7 +8,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use anyhow::{Context, Error};
-use byteorder::{BigEndian, ReadBytesExt};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sled::{Batch, Db, Event, IVec, Subscriber, Tree};
@@ -192,7 +192,7 @@ impl SessionContextInner {
         for (topic_name, subscriber, retained) in channels {
             if let Some((id, msg)) = retained {
                 if msg.retain && !msg.payload.is_empty() {
-                    let qos = min(msg.qos, option.qos);
+                    let qos = min(msg.qos, options.qos);
                     subscription::limit_client(qos, limit_client_publish.borrow()).await;
                     if let Err(err) = session_event_tx
                         .send(SessionEvent::SubscriptionEvent(SubscriptionMessage::new(
@@ -211,7 +211,7 @@ impl SessionContextInner {
             let unsubscribe_tx = subscription::subscribe_topic(
                 client_id.to_owned(),
                 topic_name.to_owned(),
-                option.to_owned(),
+                options.to_owned(),
                 session_event_tx.clone(),
                 subscriber,
                 limit_client_publish.clone(),
